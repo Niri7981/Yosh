@@ -21,6 +21,13 @@ function fixture(amount = 10000) {
   return { quote, intent, resource: { ...resource, expected_price_minor: String(amount) } };
 }
 describe('generic authority policy', () => {
+  it('decides economic limits without requiring an HTTP or payment-protocol envelope', () => {
+    const f = fixture();
+    const facts = { amount: f.intent.amount, createdAt: f.intent.createdAt, expiresAt: f.intent.expiresAt };
+    expect(evaluateSpendAuthority(facts, { committed: 0, hasUnknownPayment: false }, now))
+      .toEqual(evaluateSpendAuthority(f.intent, { committed: 0, hasUnknownPayment: false }, now));
+    expect(evaluateSpendAuthority(facts, { committed: 0, hasUnknownPayment: false }, now).decision).toBe('APPROVED');
+  });
   it('defines a strict SpendIntent and upgrades legacy purchase records without changing their execution binding', () => {
     const f = fixture();
     expect(SpendIntentSchema.safeParse({ ...f.intent, input: { asset: 'SOL' } }).success).toBe(false);
@@ -69,6 +76,18 @@ describe('market resource adapter', () => {
   });
 });
 describe('durable approval and budget ledger', () => {
+  it('rejects an incomplete protocol binding before reserving even when its economic facts pass', () => {
+    const ledger = new PurchaseLedger(':memory:');
+    try {
+      const f = fixture();
+      expect(evaluateSpendAuthority(f.intent, { committed: 0, hasUnknownPayment: false }, now).decision).toBe('APPROVED');
+      expect(() => ledger.reserve({ ...f.intent,
+        httpRequest: { url: 'https://provider.fixture.example/data', method: 'GET', access: 'https', headers: {} },
+      }, f.quote, now)).toThrow();
+      expect(ledger.list()).toHaveLength(0);
+      expect(ledger.summary(now).reservedUSDC).toBe(0);
+    } finally { ledger.close(); }
+  });
   it('reuses a task purchase, rejects changed input and permits only one claim', () => {
     const ledger = new PurchaseLedger(':memory:');
     try {

@@ -2,6 +2,8 @@
 
 更新日期：2026-09-21。
 
+2026-10-16 Buyer Reliability v1.1 更新：纯经济策略 `evaluateSpendAuthority()` 现在只读取 Authority 自己定义的 `SpendAuthorityFacts`（`amount`、`createdAt`、`expiresAt`），不再导入包含 HTTP/x402 证据的完整 `SpendIntentSchema`。`PurchaseLedger.reserve()` 仍在调用策略前校验完整不可变记录，并在同一事务内执行身份、Grant、预算与预占规则；经济策略的 `APPROVED` 本身不是付款许可。存储结构、历史记录和原付款证据没有改变。下方内容保留阶段一设计与当时范围。
+
 ## 目标与边界
 
 Yosh 的 Authority Core 接收由服务端创建的消费意图，判断是否允许占用用户预算，并生成只能由后端使用的单笔授权 ID。它不发现 API、不解释行情请求、不解析 x402 协议，也不接触私钥。

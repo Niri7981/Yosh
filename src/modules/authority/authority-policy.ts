@@ -1,7 +1,14 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
-import { SpendIntentSchema } from './spend-intent';
-import { AtomicAmountSchema, atomicAmount, addAtomic, remainingAtomic } from './atomic-money';
+import { AtomicAmountSchema, PositiveAtomicAmountSchema, atomicAmount, addAtomic, remainingAtomic } from './atomic-money';
+
+/** Economic decision input only; the purchase boundary validates execution evidence. */
+export const SpendAuthorityFactsSchema = z.object({
+  amount: PositiveAtomicAmountSchema,
+  createdAt: z.number().int(),
+  expiresAt: z.number().int(),
+});
+export type SpendAuthorityFacts = z.infer<typeof SpendAuthorityFactsSchema>;
 
 export const AuthorityDecisionSchema = z.object({
   decision: z.enum(['APPROVED', 'DENIED', 'REQUIRES_APPROVAL']),
@@ -57,17 +64,17 @@ export function evaluateSpendAuthority(
   const deny = (reason: string): AuthorityDecision => ({
     decision: 'DENIED', reason, committedBefore: committed.toString(), remainingAfter: remaining(),
   });
-  const parsed = SpendIntentSchema.safeParse(raw);
+  const parsed = SpendAuthorityFactsSchema.safeParse(raw);
   if (!parsed.success) return deny('INVALID_SPEND_INTENT');
-  const intent = parsed.data;
-  if (intent.createdAt > now || intent.expiresAt <= now || intent.expiresAt <= intent.createdAt) return deny('SPEND_INTENT_EXPIRED_OR_INVALID');
+  const facts = parsed.data;
+  if (facts.createdAt > now || facts.expiresAt <= now || facts.expiresAt <= facts.createdAt) return deny('SPEND_INTENT_EXPIRED_OR_INVALID');
   if (ledger.hasUnknownPayment) return deny('LEDGER_UNRESOLVED');
   if (controls.paused) return deny('PAYMENTS_PAUSED');
   if (controls.dailyBudget === null) return deny('DAILY_LIMIT_NOT_SET');
   const budget = atomicAmount(controls.dailyBudget); const single = atomicAmount(controls.singleLimit);
-  const total = addAtomic(committed, atomicAmount(intent.amount));
+  const total = addAtomic(committed, atomicAmount(facts.amount));
   if (total > budget) return deny(budget === 0n ? 'DAILY_LIMIT_ZERO' : 'DAILY_BUDGET_EXCEEDED');
-  const decision = atomicAmount(intent.amount) > single ? 'REQUIRES_APPROVAL' : 'APPROVED';
+  const decision = atomicAmount(facts.amount) > single ? 'REQUIRES_APPROVAL' : 'APPROVED';
   return {
     decision,
     reason: decision === 'APPROVED' ? 'AUTHORITY_AND_BUDGET_PASSED' : 'SINGLE_LIMIT_EXCEEDED',
