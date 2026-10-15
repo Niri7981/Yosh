@@ -652,6 +652,28 @@ export class PurchaseLedger {
       throw new Error('LIVE_PAYMENT_EVIDENCE_INVALID');
     }
   }
+  private hasBlockingPayment(intent: SpendIntent, scope: MonetaryScope) {
+    const rows = this.db.prepare(`SELECT approval_id,status FROM purchases WHERE status IN ('PAYING','PAYMENT_UNKNOWN')${this.scopeFilter(scope)}`).all();
+    for (const row of rows) {
+      // Signing/submission stays serialized. An unproven legacy payment is not bounded evidence.
+      if (row.status === 'PAYING') return true;
+      try {
+        const record = this.recordForApproval(String(row.approval_id));
+        const original = this.savedOriginalPayment(record.approvalId);
+        const request = record.intent.httpRequest;
+        if (!isLiveMode(record.executionMode) || !original || !original.evidence.identity.genesisHash
+          || original.evidence.identity.feePayer === original.evidence.identity.payer
+          || !['SUBMISSION_ATTEMPTED', 'OUTCOME_UNKNOWN'].includes(original.state)
+          || !request || !record.intent.x402Challenge || !intent.httpRequest
+          || record.intent.resourceId === intent.resourceId
+          || (new URL(request.url).origin === new URL(intent.httpRequest.url).origin
+            && new URL(request.url).pathname === new URL(intent.httpRequest.url).pathname)) return true;
+        // The entire immutable transfer remains reserved by the same scope/Grant queries.
+        // Endpoint aliases (even different query/body/headers) cannot replace this order.
+      } catch { return true; }
+    }
+    return false;
+  }
   reserve(intent: SpendIntent, quote: PaymentRequirements, now = Date.now(), mode: StoredPurchaseExecutionMode = this.defaultMode, ownerCardMemberId?: string, monetary?: MonetaryScope): SpendReservation {
     if (mode === 'live_mainnet' && (!this.managed || !this.requireSpendGrant)) throw new Error('MAINNET_AUTHORITY_REQUIRED');
     assertExplicitAuthority(mode, intent.network, intent.assetId);
@@ -681,7 +703,7 @@ export class PurchaseLedger {
       this.expireUnclaimed(now, monetary);
       const modeFilter = this.scopeFilter(monetary);
       const committed = this.sumMoney(`(status IN ('APPROVED','PAYING','PAYMENT_UNKNOWN') OR (status='PAID' AND confirmed_day=?))${modeFilter}`, this.activeDay(now, monetary));
-      const unresolved = this.db.prepare(`SELECT id FROM purchases WHERE status IN ('PAYING','PAYMENT_UNKNOWN')${modeFilter} LIMIT 1`).get();
+      const unresolved = this.hasBlockingPayment(intent, monetary);
       const controls = this.controls(undefined, monetary);
       let decision = evaluateSpendAuthority(intent, { committed, hasUnknownPayment: Boolean(unresolved) }, now, controls);
       if (this.requireSpendGrant) decision = this.evaluateGrant(intent, decision, committed, controls, now, monetary);
@@ -729,8 +751,7 @@ export class PurchaseLedger {
         if (committed > atomicAmount(controls.dailyBudget)) throw new Error('Daily limit no longer covers reserved payments');
         if (this.requireSpendGrant) this.assertGrantCovers(record, now);
       }
-      const modeFilter = this.scopeFilter(record.monetaryScope);
-      if (this.db.prepare(`SELECT id FROM purchases WHERE status IN ('PAYING','PAYMENT_UNKNOWN')${modeFilter} LIMIT 1`).get()) throw new Error('Another payment requires reconciliation');
+      if (this.hasBlockingPayment(record.intent, record.monetaryScope)) throw new Error('Another payment requires reconciliation');
       this.db.prepare("UPDATE purchases SET status='PAYING' WHERE approval_id=? AND status='APPROVED'").run(approvalId);
       this.event(record.intent.id, 'payment.PAYING');
       return this.get(record.intent.idempotencyKey, record.ownerCardMemberId)!;

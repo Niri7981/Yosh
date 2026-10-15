@@ -21,6 +21,8 @@ import { signedPaymentFixture, FIXTURE_TRANSACTION_SIGNATURE } from '../helpers/
 import { AppRuntime } from '../../src/modules/app/app-runtime';
 import { postRequestPolicyHash } from '../../src/modules/resources/post-request-authorization';
 import { requestRegisteredResourcePurchase } from '../../src/modules/purchases/request-registered-resource-purchase';
+import { randomUUID } from 'node:crypto';
+import type { SpendPrincipal } from '../../src/modules/authority/spend-grant';
 
 vi.mock('../../src/modules/payment/wallet', () => ({ loadBuyerSigner: vi.fn() }));
 vi.mock('../../src/modules/payment/solana-payment', async original => ({ ...await original<typeof import('../../src/modules/payment/solana-payment')>(), prepareSolanaPayment: vi.fn() }));
@@ -81,6 +83,66 @@ async function fixture(capability: DeliveryRecoveryCapability | null = TEST_CACH
     advance: (ms = 60_000) => { clock += ms; }, now: () => clock,
     reopen: () => { const reopened = new PurchaseLedger(path, options); handles.add(reopened); return reopened; } };
 }
+
+function reserveIndependentPurchase(f: Awaited<ReturnType<typeof fixture>>, requestId: string, principal: SpendPrincipal = f.principal,
+  resource: X402Resource = { ...f.resource, resourceId: 'independent-result', request: { ...f.resource.request, url: 'https://independent.example/v1/result' } }) {
+  if (!f.ledger.resources.list().some(entry => entry.definition.resourceId === resource.resourceId))
+    f.ledger.resources.add({ ...resource, displayName: 'Independent fixture' });
+  if (!f.ledger.activeSpendGrant(f.now(), principal.cardMemberId, 'live_mainnet', resource.resourceId))
+    f.ledger.createSpendGrant({ totalLimit: '100000', singleLimit: '10000', expiresAt: f.now() + 600_000 }, principal,
+      { resourceId: resource.resourceId, providerId: resource.providerId, operation: PAID_RESOURCE_PURCHASE_OPERATION,
+        network: f.config.network, assetId: f.config.mint, assetDecimals: 6, payTo: f.intent.payTo, paymentScheme: 'exact',
+        postPolicyHash: postRequestPolicyHash(resource) }, f.now(), 'live_mainnet');
+  const challenge = { ...f.intent.x402Challenge!, resource: { url: resource.request.url } };
+  const intent = createX402SpendIntent({ idempotencyKey: requestId, resource, challenge, environment: f.config, buyer: f.config.buyer,
+    authority: f.ledger.spendAuthorityForDecision(principal, PAID_RESOURCE_PURCHASE_OPERATION, f.now(), 'live_mainnet', resource.resourceId), now: f.now() });
+  return f.ledger.reserve(intent, challenge.accepts[0], f.now(), 'live_mainnet', principal.cardMemberId, f.ledger.paymentScope(f.config, 'live_mainnet'));
+}
+
+it('keeps evidenced UNKNOWN money reserved while another member buys an independent resource', async () => {
+  const f = await fixture(TEST_CACHED_DELIVERY, 'live_mainnet');
+  vi.mocked(reconcileStoredOriginalPayment).mockResolvedValue({ status: 'UNKNOWN' });
+  await expect(f.paid()).rejects.toThrow();
+  const original = f.ledger.savedOriginalPayment(f.record.approvalId);
+  const other = { ...f.principal, cardMemberId: f.ledger.createCardMember('Independent member').id, connectionId: randomUUID() };
+  const independent = reserveIndependentPurchase(f, 'independent', other);
+  expect(independent.status).toBe('APPROVED');
+  f.ledger.close(); const reopened = f.reopen();
+  expect(reopened.claim(independent.approvalId, f.now(), undefined, 'live_mainnet').status).toBe('PAYING');
+  expect(reopened.managedSummary(f.now(), 'live_mainnet')).toMatchObject({ reserved: '20000', paid: '0', remaining: '80000' });
+  expect(reopened.get(f.intent.idempotencyKey, f.principal.cardMemberId)?.status).toBe('PAYMENT_UNKNOWN');
+  expect(reopened.savedOriginalPayment(f.record.approvalId)).toEqual(original);
+  expect(prepareSolanaPayment).toHaveBeenCalledOnce();
+});
+
+it('rechecks independent approvals against the retained UNKNOWN reservation and still serializes PAYING', async () => {
+  const f = await fixture(TEST_CACHED_DELIVERY, 'live_mainnet');
+  const independent = reserveIndependentPurchase(f, 'preapproved');
+  vi.mocked(reconcileStoredOriginalPayment).mockResolvedValue({ status: 'UNKNOWN' }); await expect(f.paid()).rejects.toThrow();
+  f.ledger.setDailyLimit('19999', 'live_mainnet');
+  expect(() => f.ledger.claim(independent.approvalId, f.now(), undefined, 'live_mainnet')).toThrow('Daily limit');
+  f.ledger.setDailyLimit('100000', 'live_mainnet');
+  expect(f.ledger.claim(independent.approvalId, f.now(), undefined, 'live_mainnet').status).toBe('PAYING');
+  const third = reserveIndependentPurchase(f, 'while-paying', f.principal,
+    { ...f.resource, resourceId: 'third-result', request: { ...f.resource.request, url: 'https://third.example/result' } });
+  expect(third.decision.reason).toBe('LEDGER_UNRESOLVED');
+});
+
+it('blocks replacement attempts for the same resource or an alias of the original HTTP request', async () => {
+  const f = await fixture(TEST_CACHED_DELIVERY, 'live_mainnet');
+  vi.mocked(reconcileStoredOriginalPayment).mockResolvedValue({ status: 'UNKNOWN' }); await expect(f.paid()).rejects.toThrow();
+  expect(reserveIndependentPurchase(f, 'replacement', f.principal, f.resource).decision.reason).toBe('LEDGER_UNRESOLVED');
+  expect(reserveIndependentPurchase(f, 'alias', f.principal, { ...f.resource, resourceId: 'alias-result' }).decision.reason).toBe('LEDGER_UNRESOLVED');
+  expect(reserveIndependentPurchase(f, 'changed-alias', f.principal, { ...f.resource, resourceId: 'changed-alias-result',
+    request: { ...f.resource.request, url: f.resource.request.url + '?retry=1', body: '{"query":"replacement"}' } }).decision.reason).toBe('LEDGER_UNRESOLVED');
+});
+
+it('keeps legacy or invalid-evidence UNKNOWN payments blocking the scope rather than assuming a bounded transfer', async () => {
+  const f = await fixture(TEST_CACHED_DELIVERY, 'live_mainnet');
+  f.ledger.claim(f.record.approvalId, f.now(), undefined, 'live_mainnet'); f.ledger.unknown(f.record.approvalId);
+  expect(reserveIndependentPurchase(f, 'no-evidence').decision.reason).toBe('LEDGER_UNRESOLVED');
+  expect(f.ledger.managedSummary(f.now(), 'live_mainnet')).toMatchObject({ reserved: '10000', unresolved: 1 });
+});
 
 it.each(['DISABLED', 'REMOVED'] as const)('recovers the same paid Mainnet order after resource %s and restart without new spending', async state => {
   const f = await fixture(TEST_CACHED_DELIVERY, 'live_mainnet'); await expect(f.paid()).rejects.toThrow();
