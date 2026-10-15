@@ -5,6 +5,7 @@ import { PaymentReconciliation } from './payment-reconciliation';
 import { migrateHttpPurchaseBindings } from './http-binding-migration';
 import { migrateDeliveryRecovery } from './delivery-migration';
 import { PurchaseDeliveryStore } from './purchase-delivery-store';
+import { parseStoredPurchaseStatus, purchaseStatusAfter, type PurchaseStatus, type PurchaseTransition } from './purchase-state';
 import { migrateMainnetAuthority } from './mainnet-authority-migration';
 import { ReceiptStatusSchema, type DeliveryStatus, type DeliveryRecoveryState, type ReceiptStatus } from './delivery-state';
 import { type DeliveryRecoveryCapability } from '../resources/delivery-capability';
@@ -12,7 +13,7 @@ import { atomicAmount, addAtomic, remainingAtomic } from '../authority/atomic-mo
 import { MonetaryScopeSchema, monetaryScope, monetaryScopeId, PRODUCT_MAINNET_WALLET_ID, PRODUCT_TEST_WALLET_ID, LEGACY_TEST_WALLET_ID, type MonetaryScope } from './monetary-scope';
 import { migrateMonetaryLedger, storeMonetaryScope } from './monetary-migration';
 import { RuntimeResourceRegistry } from '../resources/runtime-resource-registry';
-import { DatabaseSync } from 'node:sqlite';
+import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
 import { mkdirSync, chmodSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -49,7 +50,7 @@ export const PaymentEvidenceSchema = z.discriminatedUnion('version', [
 export type PaymentEvidence = z.infer<typeof PaymentEvidenceSchema>;
 export type PaymentVerification = { payer: string; messageHash: string; confirmationStatus: 'confirmed' | 'finalized'; settlementConfirmed: true };
 export type SpendReservation = {
-  monetaryScope: MonetaryScope; intent: SpendIntent; quote: PaymentRequirements; approvalId: string; decision: AuthorityDecision; status: string; deliveryStatus: DeliveryStatus;
+  monetaryScope: MonetaryScope; intent: SpendIntent; quote: PaymentRequirements; approvalId: string; decision: AuthorityDecision; status: PurchaseStatus; deliveryStatus: DeliveryStatus;
   executionMode: StoredPurchaseExecutionMode; paymentPayloadPresent: boolean; paymentPayloadHash?: string; paymentEvidence?: PaymentEvidence;
   receiptStatus: ReceiptStatus; deliveryRecovery: DeliveryRecoveryState;
   ownerCardMemberId?: string; transaction?: string; data?: unknown; answer?: string;
@@ -62,11 +63,6 @@ export type SpendGrantSummary = {
   network: string; assetId: string; assetDecimals: number; payTo: string; paymentScheme: string; totalLimit: string; singleLimit: string;
   committed: string; remaining: string; createdAt: number; expiresAt: number; revokedAt: number | null;
 };
-function currentAuthorityStatus(status: string) {
-  if (status === 'REJECTED') return 'DENIED';
-  if (status === 'NEEDS_CONFIRMATION') return 'REQUIRES_APPROVAL';
-  return status;
-}
 function storedExecutionMode(value: unknown): StoredPurchaseExecutionMode {
   const parsed = PurchaseExecutionModeSchema.safeParse(value);
   return parsed.success ? parsed.data : 'UNKNOWN';
@@ -512,12 +508,21 @@ export class PurchaseLedger {
       if (this.requireSpendGrant) this.assertGrantCovers(record, now);
     }
   }
+  /** The same write lock covers eligibility, state ordering and financial/audit writes. */
+  private transitionEligible(operation: PurchaseTransition, where: string, ...params: SQLInputValue[]) {
+    const rows = this.db.prepare(`SELECT id,status FROM purchases WHERE ${where}`).all(...params);
+    for (const row of rows) {
+      const next = purchaseStatusAfter(parseStoredPurchaseStatus(row.status), operation);
+      this.db.prepare('UPDATE purchases SET status=? WHERE id=? AND status=?').run(next, String(row.id), String(row.status));
+    }
+    return rows;
+  }
   /** Only the sole service owner calls this before accepting any requests.
    * A payload is durably saved before submission; its absence proves no submission.
    * Never run this while another process or signer can still own these claims. */
   recoverUnsubmittedOnStartup() {
     this.atomic(() => {
-      const rows = this.db.prepare("UPDATE purchases SET status='FAILED' WHERE status IN ('PAYING','PAYMENT_UNKNOWN') AND ((status='PAYING' AND payload IS NULL) OR id IN (SELECT purchase_id FROM original_payments WHERE state='SIGNED_NOT_SUBMITTED' AND submission_attempted_at IS NULL)) RETURNING id").all();
+      const rows = this.transitionEligible('FAIL_BEFORE_SUBMISSION', "status IN ('PAYING','PAYMENT_UNKNOWN') AND ((status='PAYING' AND payload IS NULL) OR id IN (SELECT purchase_id FROM original_payments WHERE state='SIGNED_NOT_SUBMITTED' AND submission_attempted_at IS NULL))");
       for (const row of rows) this.db.prepare("UPDATE original_payments SET state='NOT_SUBMITTED' WHERE purchase_id=? AND state='SIGNED_NOT_SUBMITTED'").run(String(row.id));
       for (const row of rows) this.event(String(row.id), 'payment.FAILED_BEFORE_SUBMISSION');
     });
@@ -592,7 +597,7 @@ export class PurchaseLedger {
       try { paymentPayloadHash = hash(JSON.parse(String(row.payload))); } catch { /* Malformed legacy payloads cannot prove a live payment. */ }
     }
     const delivery = this.delivery.state(String(row.id));
-    return { monetaryScope: monetary, intent, quote: JSON.parse(String(row.quote)), approvalId: String(row.approval_id), decision: parseStoredAuthorityDecision(JSON.parse(String(row.decision))), status: currentAuthorityStatus(String(row.status)),
+    return { monetaryScope: monetary, intent, quote: JSON.parse(String(row.quote)), approvalId: String(row.approval_id), decision: parseStoredAuthorityDecision(JSON.parse(String(row.decision))), status: parseStoredPurchaseStatus(row.status),
       deliveryStatus: delivery.status, receiptStatus: delivery.receiptStatus, deliveryRecovery: delivery,
       executionMode: storedExecutionMode(row.execution_mode), paymentPayloadPresent,
       ...(paymentPayloadHash ? { paymentPayloadHash } : {}), ...(storedPaymentEvidence(row.payment_evidence) ? { paymentEvidence: storedPaymentEvidence(row.payment_evidence) } : {}),
@@ -684,7 +689,7 @@ export class PurchaseLedger {
   }
   /** Release only approvals that never reached the signer. Caller holds the write lock. */
   private expireUnclaimed(now: number, scope: MonetaryScope = this.scope()) {
-    const rows = this.db.prepare(`UPDATE purchases SET status='EXPIRED' WHERE status='APPROVED' AND payload IS NULL AND json_extract(purchase,'$.expiresAt')<=?${this.scopeFilter(scope)} RETURNING id`).all(now);
+    const rows = this.transitionEligible('EXPIRE_APPROVAL', `status='APPROVED' AND payload IS NULL AND json_extract(purchase,'$.expiresAt')<=?${this.scopeFilter(scope)}`, now);
     for (const row of rows) this.event(String(row.id), 'purchase.EXPIRED');
   }
   releaseExpired(now = Date.now()) { this.atomic(() => this.expireUnclaimed(now)); }
@@ -718,7 +723,7 @@ export class PurchaseLedger {
         if (this.requireSpendGrant) this.assertGrantCovers(record, now);
       }
       if (this.hasBlockingPayment(record.intent, record.monetaryScope)) throw new Error('Another payment requires reconciliation');
-      this.db.prepare("UPDATE purchases SET status='PAYING' WHERE approval_id=? AND status='APPROVED'").run(approvalId);
+      this.db.prepare("UPDATE purchases SET status=? WHERE approval_id=? AND status='APPROVED'").run(purchaseStatusAfter(record.status, 'START_PAYMENT'), approvalId);
       this.event(record.intent.id, 'payment.PAYING');
       return this.get(record.intent.idempotencyKey, record.ownerCardMemberId)!;
     });
@@ -812,8 +817,8 @@ export class PurchaseLedger {
         quoteFingerprint: original.evidence.quoteFingerprint, transaction, payer: original.evidence.identity.payer, confirmationStatus,
         settlementConfirmed: false, source: 'buyer_rpc', originalEvidenceHash: hash(original.evidence), scopeId: original.evidence.scopeId, verifiedAt: now });
       this.db.prepare("UPDATE original_payments SET state='CONFIRMED',transaction_id=? WHERE purchase_id=?").run(transaction, record.intent.id);
-      this.db.prepare("UPDATE purchases SET status='PAID',transaction_id=?,confirmed_day=?,payment_evidence=? WHERE approval_id=? AND status IN ('PAYING','PAYMENT_UNKNOWN')")
-        .run(transaction, this.activeDay(now, record.monetaryScope), JSON.stringify(proof), approvalId);
+      this.db.prepare("UPDATE purchases SET status=?,transaction_id=?,confirmed_day=?,payment_evidence=? WHERE approval_id=? AND status IN ('PAYING','PAYMENT_UNKNOWN')")
+        .run(purchaseStatusAfter(record.status, 'CONFIRM_PAYMENT'), transaction, this.activeDay(now, record.monetaryScope), JSON.stringify(proof), approvalId);
       this.event(record.intent.id, 'payment.PAID');
     });
   }
@@ -825,7 +830,7 @@ export class PurchaseLedger {
       if (record.status === 'FAILED' && original.state === 'FINALIZED_FAILED') return;
       if (!['PAYING','PAYMENT_UNKNOWN'].includes(record.status) || !['SUBMISSION_ATTEMPTED','OUTCOME_UNKNOWN'].includes(original.state)) throw new Error('Original payment is not recoverable');
       this.db.prepare("UPDATE original_payments SET state='FINALIZED_FAILED',transaction_id=? WHERE purchase_id=?").run(transaction, record.intent.id);
-      this.db.prepare("UPDATE purchases SET status='FAILED',transaction_id=? WHERE approval_id=?").run(transaction, approvalId);
+      this.db.prepare("UPDATE purchases SET status=?,transaction_id=? WHERE approval_id=?").run(purchaseStatusAfter(record.status, 'FAIL_FINALIZED_PAYMENT'), transaction, approvalId);
       this.event(record.intent.id, 'payment.FAILED_ON_CHAIN');
     });
   }
@@ -835,7 +840,7 @@ export class PurchaseLedger {
   }
   failUnsubmitted(approvalId: string) {
     this.atomic(() => {
-      const row = this.db.prepare("UPDATE purchases SET status='FAILED' WHERE approval_id=? AND status IN ('PAYING','PAYMENT_UNKNOWN') AND ((status='PAYING' AND payload IS NULL) OR id IN (SELECT purchase_id FROM original_payments WHERE state='SIGNED_NOT_SUBMITTED' AND submission_attempted_at IS NULL)) RETURNING id").get(approvalId);
+      const row = this.transitionEligible('FAIL_BEFORE_SUBMISSION', "approval_id=? AND status IN ('PAYING','PAYMENT_UNKNOWN') AND ((status='PAYING' AND payload IS NULL) OR id IN (SELECT purchase_id FROM original_payments WHERE state='SIGNED_NOT_SUBMITTED' AND submission_attempted_at IS NULL))", approvalId)[0];
       if (row) {
         this.db.prepare("UPDATE original_payments SET state='NOT_SUBMITTED' WHERE purchase_id=? AND state='SIGNED_NOT_SUBMITTED'").run(String(row.id));
         this.event(String(row.id), 'payment.FAILED_BEFORE_SUBMISSION');
@@ -846,7 +851,10 @@ export class PurchaseLedger {
     this.atomic(() => {
       // New evidence rows may only release authority through exact finalized proof.
       if (this.savedOriginalPayment(approvalId)) throw new Error('ORIGINAL_PAYMENT_PROOF_REQUIRED');
-      const row = this.db.prepare("UPDATE purchases SET status='FAILED',transaction_id=? WHERE approval_id=? AND status IN ('PAYING','PAYMENT_UNKNOWN') RETURNING id").get(transaction, approvalId);
+      const previous = this.db.prepare("SELECT status FROM purchases WHERE approval_id=? AND status IN ('PAYING','PAYMENT_UNKNOWN')").get(approvalId);
+      if (!previous) return;
+      const row = this.db.prepare("UPDATE purchases SET status=?,transaction_id=? WHERE approval_id=? AND status IN ('PAYING','PAYMENT_UNKNOWN') RETURNING id")
+        .get(purchaseStatusAfter(parseStoredPurchaseStatus(previous.status), 'FAIL_FINALIZED_PAYMENT'), transaction, approvalId);
       if (row) this.event(String(row.id), 'payment.FAILED_ON_CHAIN');
     });
   }
@@ -872,8 +880,8 @@ export class PurchaseLedger {
     const evidence = PaymentEvidenceSchema.parse({ version: 2, payloadHash: hash(payload), messageHash: verification.messageHash,
       quoteFingerprint: record.intent.quoteFingerprint, transaction, payer: verification.payer, confirmationStatus: verification.confirmationStatus,
       settlementConfirmed: true, verifiedAt: now });
-    const updated = this.db.prepare("UPDATE purchases SET status='PAID',transaction_id=?,confirmed_day=?,payment_evidence=? WHERE approval_id=? AND status IN ('PAYING','PAYMENT_UNKNOWN') RETURNING id")
-      .get(transaction, this.activeDay(now, record.monetaryScope), JSON.stringify(evidence), approvalId);
+    const updated = this.db.prepare("UPDATE purchases SET status=?,transaction_id=?,confirmed_day=?,payment_evidence=? WHERE approval_id=? AND status IN ('PAYING','PAYMENT_UNKNOWN') RETURNING id")
+      .get(purchaseStatusAfter(record.status, 'CONFIRM_PAYMENT'), transaction, this.activeDay(now, record.monetaryScope), JSON.stringify(evidence), approvalId);
     if (!updated) throw new Error('Payment cannot be confirmed from this state');
     this.event(String(updated.id), 'payment.PAID');
   }
@@ -889,8 +897,8 @@ export class PurchaseLedger {
       if (record?.executionMode === 'simulated') {
         if (!result.transaction.startsWith('simulated-') || !['PAYING', 'PAID'].includes(record.status)) throw new Error('Simulated purchase cannot be completed from this state');
         if (record.status !== 'PAID') {
-          const paid = this.db.prepare("UPDATE purchases SET status='PAID',transaction_id=?,confirmed_day=? WHERE approval_id=? AND status='PAYING' RETURNING id")
-            .get(result.transaction, this.activeDay(now, record.monetaryScope), approvalId);
+          const paid = this.db.prepare("UPDATE purchases SET status=?,transaction_id=?,confirmed_day=? WHERE approval_id=? AND status='PAYING' RETURNING id")
+            .get(purchaseStatusAfter(record.status, 'CONFIRM_SIMULATED_PAYMENT'), result.transaction, this.activeDay(now, record.monetaryScope), approvalId);
           if (!paid) throw new Error('Simulated purchase cannot be completed from this state');
           this.event(String(paid.id), 'payment.PAID');
         } else if (record.transaction !== result.transaction) throw new Error('Simulated transaction changed');
@@ -906,7 +914,9 @@ export class PurchaseLedger {
   unknown(approvalId: string, transaction?: string) {
     this.atomic(() => {
       const previous = this.db.prepare('SELECT status FROM purchases WHERE approval_id=?').get(approvalId);
-      const row = this.db.prepare("UPDATE purchases SET status='PAYMENT_UNKNOWN',transaction_id=COALESCE(transaction_id,?) WHERE approval_id=? AND status IN ('PAYING','PAYMENT_UNKNOWN') RETURNING id").get(transaction ?? null, approvalId);
+      if (!previous || !['PAYING', 'PAYMENT_UNKNOWN'].includes(String(previous.status))) return;
+      const row = this.db.prepare("UPDATE purchases SET status=?,transaction_id=COALESCE(transaction_id,?) WHERE approval_id=? AND status IN ('PAYING','PAYMENT_UNKNOWN') RETURNING id")
+        .get(purchaseStatusAfter(parseStoredPurchaseStatus(previous.status), 'MARK_PAYMENT_UNKNOWN'), transaction ?? null, approvalId);
       if (row) this.db.prepare("UPDATE original_payments SET state='OUTCOME_UNKNOWN' WHERE purchase_id=? AND state IN ('SUBMISSION_ATTEMPTED','OUTCOME_UNKNOWN')").run(String(row.id));
       if (row && previous?.status !== 'PAYMENT_UNKNOWN') this.event(String(row.id), 'payment.PAYMENT_UNKNOWN');
     });
@@ -944,7 +954,7 @@ export class PurchaseLedger {
       ${memberId ? 'WHERE p.owner_card_member_id=?' : ''} ORDER BY created_at DESC,p.id DESC LIMIT ?`)
       .all(...(memberId ? [memberId, limit] : [limit]))
       .map(row => { const delivery = this.delivery.state(String(row.id)); return ({ purchaseId: String(row.task_id), ownerCardMemberId: row.owner_card_member_id ? String(row.owner_card_member_id) : null,
-        status: currentAuthorityStatus(String(row.status)), deliveryStatus: delivery.status, receiptStatus: delivery.receiptStatus, deliveryRecovery: delivery,
+        status: parseStoredPurchaseStatus(row.status), deliveryStatus: delivery.status, receiptStatus: delivery.receiptStatus, deliveryRecovery: delivery,
         amount: String(row.amount), createdAt: Number(row.created_at), transaction: row.transaction_id ? String(row.transaction_id) : null,
         executionMode: storedExecutionMode(row.execution_mode), monetaryEnvironment: String(row.monetary_environment),
         network: String(row.network), providerId: row.provider_id ? String(row.provider_id) : null,

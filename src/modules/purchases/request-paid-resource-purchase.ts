@@ -9,6 +9,7 @@ import { executeApprovedPayment, paymentEndpointForIntent, recoverApprovedPaymen
 import { displayAmount, fetchPaidResourceQuote } from './paid-resource-quote';
 import { PurchaseLedger, type DeliveryStatus, type PurchaseExecutionMode, type SpendReservation } from './purchase-ledger';
 import type { ReceiptStatus, DeliveryRecoveryState } from './delivery-state';
+import type { PurchaseStatus } from './purchase-state';
 import { hash } from './spending-policy';
 import { resourcePaymentBinding } from '../payment/resource-challenge';
 import { TEST_CACHED_DELIVERY } from '../resources/delivery-capability';
@@ -24,7 +25,7 @@ export const PurchaseRequestInputSchema = z.object({
 export type PurchaseRequestInput = z.infer<typeof PurchaseRequestInputSchema>;
 
 export type PurchaseRequestResult = {
-  purchaseId: string; resourceId: PurchaseRequestInput['resourceId']; amount: string; display: string; status: string;
+  purchaseId: string; resourceId: PurchaseRequestInput['resourceId']; amount: string; display: string; status: PurchaseStatus;
   decision: SpendReservation['decision'];
   quote: { resourceId: string; resourceUrl: string; providerId: string; network: string; assetId: string; assetDecimals: number; payTo: string; amount: string; expiresAt: number; fingerprint: string };
   grant: { id: string; version: number } | null;

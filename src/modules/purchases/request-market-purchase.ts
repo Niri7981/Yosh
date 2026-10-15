@@ -11,6 +11,7 @@ import { createMarketSnapshotSpendIntent } from '../resources/market-spend-adapt
 import { MarketSnapshotOutputSchema, type MarketSnapshotOutput } from '../resources/resource-schema';
 import { PurchaseLedger, type DeliveryStatus, type PurchaseExecutionMode, type SpendReservation } from './purchase-ledger';
 import type { ReceiptStatus, DeliveryRecoveryState } from './delivery-state';
+import type { PurchaseStatus } from './purchase-state';
 import { hash } from './spending-policy';
 import { validX402Memo } from '../payment/resource-challenge';
 
@@ -26,7 +27,7 @@ export type PurchaseRequestResult = {
   offerId: PurchaseRequestInput['offerId'];
   amount: string;
   display: string;
-  status: string;
+  status: PurchaseStatus;
   decision: SpendReservation['decision'];
   quote: { resourceId: string; providerId: string; network: string; assetId: string; assetDecimals: number; payTo: string; amount: string; expiresAt: number; fingerprint: string };
   grant: { id: string; version: number } | null;
