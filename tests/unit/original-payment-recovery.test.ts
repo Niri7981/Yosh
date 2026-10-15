@@ -347,6 +347,28 @@ it('SQLite rejects rewriting original evidence, signed payload, or the already c
   expect(accounting(f)).toMatchObject({ paid: '0', reserved: '10000', unresolved: 1 });
 });
 
+it('persists history continuation and backoff across restart, then confirms the original without signing or merchant calls', async () => {
+  const path = persistentPath(); const f = await fixture(path); saveOriginal(f);
+  const candidates = Array.from({ length: 24 }, () => ({ signature: getBase58Decoder().decode(crypto.getRandomValues(new Uint8Array(64))), memo: f.actualMemo }));
+  const history = [...candidates, { signature: f.signature, memo: f.actualMemo }];
+  const calls = network(f, request => {
+    if (request.method === 'getTransaction') return request.params[0] === f.signature ? f.rpc : null;
+    const before = z.object({ before: z.string().optional() }).parse(request.params[1]).before;
+    return history.slice(before === undefined ? 0 : history.findIndex(item => item.signature === before) + 1);
+  });
+  await reconcileApprovedPayment(f.ledger, 'original-request', f.config);
+  const state = f.ledger.reconciliation.state(f.record.intent.id)!;
+  expect(state).toMatchObject({ attempts: 1, before: candidates[19].signature, lastCode: 'UNKNOWN', claimed: false });
+  const original = f.ledger.savedOriginalPayment(f.record.approvalId);
+  close(f); const reopened = new PurchaseLedger(path, { mode: 'live_devnet', walletIdentity: f.config.buyer }); ledgers.push(reopened);
+  expect(reopened.reconciliation.state(f.record.intent.id)).toEqual(state);
+  await reconcileApprovedPayment(reopened, 'original-request', f.config);
+  expect(reopened.get('original-request')).toMatchObject({ status: 'PAID', transaction: f.signature });
+  expect(reopened.savedOriginalPayment(f.record.approvalId)?.evidence).toEqual(original!.evidence);
+  expect(reopened.reconciliation.state(f.record.intent.id)?.attempts).toBe(2);
+  expect(calls.merchantRequests).toHaveLength(0); expect(loadBuyerSigner).not.toHaveBeenCalled(); expect(prepareSolanaPayment).not.toHaveBeenCalled();
+});
+
 it('does not steal a read-only claim across SQLite handles or reset its backoff on exclusive startup', async () => {
   const path = persistentPath(); const f = await fixture(path); saveOriginal(f);
   const first = f.ledger.reconciliation.claim(f.record.intent.id)!;

@@ -430,6 +430,55 @@ it('backend automatically retries due paid deliveries after restart, even while 
     await app.prepareQuit(); await vi.advanceTimersByTimeAsync(10_000); expect(fetcher).toHaveBeenCalledOnce();
   } finally { await app.prepareQuit(); app.close(); }
 });
+it('backend continuously reconciles UNKNOWN after RPC recovery without another purchase request or restart', async () => {
+  const f = await fixture({ kind: 'none' });
+  vi.mocked(reconcileStoredOriginalPayment).mockResolvedValue({ status: 'UNKNOWN' }); await expect(f.paid()).rejects.toThrow(); f.ledger.close();
+  vi.stubEnv('YOSH_EXECUTION_MODE', 'simulated'); vi.stubEnv('APP2049_ENABLE_DEVNET_PURCHASES', '0');
+  vi.stubEnv('SOLANA_CLUSTER', 'devnet'); vi.stubEnv('DEMO_MERCHANT_PUBLIC_KEY', f.config.merchant);
+  vi.stubEnv('DEMO_BUYER_PUBLIC_KEY', f.config.buyer); vi.stubEnv('YOSH_USE_PRODUCT_WALLET', '1');
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  const fetcher = vi.fn<typeof fetch>();
+  const app = new AppRuntime(join(f.path, '..'), { initializeWallet: async () => ({ address: f.config.buyer, reused: true }), now: f.now, fetcher });
+  try {
+    app.ledger.setPaused(true);
+    await app.start('http://127.0.0.1:3049');
+    expect(app.ledger.get(f.intent.idempotencyKey, f.principal.cardMemberId)?.status).toBe('PAYMENT_UNKNOWN');
+    expect(reconcileStoredOriginalPayment).toHaveBeenCalledOnce(); // Startup must respect the persisted first backoff.
+    vi.mocked(reconcileStoredOriginalPayment).mockResolvedValue({ status: 'CONFIRMED', transaction: FIXTURE_TRANSACTION_SIGNATURE });
+    f.advance(999); await vi.advanceTimersByTimeAsync(999); expect(reconcileStoredOriginalPayment).toHaveBeenCalledOnce();
+    f.advance(1); await vi.advanceTimersByTimeAsync(1);
+    expect(app.ledger.get(f.intent.idempotencyKey, f.principal.cardMemberId)?.status).toBe('PAID');
+    expect(app.ledger.managedSummary(f.now(), 'live_devnet')).toMatchObject({ paid: '10000', reserved: '0' });
+    expect(fetcher).not.toHaveBeenCalled(); expect(prepareSolanaPayment).toHaveBeenCalledOnce();
+    const count = vi.mocked(reconcileStoredOriginalPayment).mock.calls.length;
+    await app.prepareQuit(); await vi.advanceTimersByTimeAsync(30_000);
+    expect(reconcileStoredOriginalPayment).toHaveBeenCalledTimes(count);
+  } finally { await app.prepareQuit(); app.close(); }
+});
+it('quit cancels an in-flight automatic chain read, retains the reservation, and schedules no more work', async () => {
+  const f = await fixture({ kind: 'none' });
+  vi.mocked(reconcileStoredOriginalPayment).mockResolvedValue({ status: 'UNKNOWN' }); await expect(f.paid()).rejects.toThrow(); f.ledger.close();
+  vi.stubEnv('YOSH_EXECUTION_MODE', 'simulated'); vi.stubEnv('SOLANA_CLUSTER', 'devnet');
+  vi.stubEnv('APP2049_ENABLE_DEVNET_PURCHASES', '0'); vi.stubEnv('DEMO_MERCHANT_PUBLIC_KEY', f.config.merchant);
+  vi.stubEnv('DEMO_BUYER_PUBLIC_KEY', f.config.buyer); vi.stubEnv('YOSH_USE_PRODUCT_WALLET', '1');
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  const app = new AppRuntime(join(f.path, '..'), { initializeWallet: async () => ({ address: f.config.buyer, reused: true }), now: f.now });
+  let cancelled = false;
+  try {
+    await app.start('http://127.0.0.1:3049');
+    vi.mocked(reconcileStoredOriginalPayment).mockImplementation((_config, _identity, _known, _observe, options) => new Promise(resolve => {
+      options?.signal?.addEventListener('abort', () => { cancelled = true; resolve({ status: 'UNKNOWN' }); }, { once: true });
+    }));
+    f.advance(1000); await vi.advanceTimersByTimeAsync(1000);
+    expect(app.ledger.reconciliation.state(f.intent.id)?.claimed).toBe(true);
+    await app.prepareQuit(); expect(cancelled).toBe(true);
+    expect(app.ledger.reconciliation.state(f.intent.id)?.claimed).toBe(false);
+    expect(app.ledger.managedSummary(f.now(), 'live_devnet')).toMatchObject({ reserved: '10000', paid: '0', unresolved: 1 });
+    const count = vi.mocked(reconcileStoredOriginalPayment).mock.calls.length;
+    await vi.advanceTimersByTimeAsync(60_000); expect(reconcileStoredOriginalPayment).toHaveBeenCalledTimes(count);
+    expect(prepareSolanaPayment).toHaveBeenCalledOnce();
+  } finally { await app.prepareQuit(); app.close(); }
+});
 it('cached-result retries never invoke the fixture token-transfer dispatcher a second time', async () => {
   const f = await fixture(); const transfer = vi.fn();
   f.initial.mockImplementation(async () => { transfer(); throw new Error('Transfer succeeded, response lost'); });

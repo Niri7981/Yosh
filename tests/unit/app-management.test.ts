@@ -299,7 +299,9 @@ describe('managed budget and Devnet test records', () => {
       release(); await Promise.all([startup, repeated, quit]);
       expect(recoverApprovedPayment).toHaveBeenCalledTimes(1);
       expect(vi.mocked(recoverApprovedPayment).mock.calls[0]?.[1]).toBe('startup-original');
-      expect(app.ledger.get('startup-original')?.status).toBe('PAYING');
+      expect(app.ledger.get('startup-original')?.status).toBe('PAYMENT_UNKNOWN');
+      expect(app.ledger.savedPayload(record.approvalId)).toEqual({ x402Version: 2, accepted: quote, payload: { transaction: 'test-wire' } });
+      expect(app.ledger.managedSummary(now, 'live_devnet')).toMatchObject({ reserved: '10000', paid: '0', unresolved: 1 });
       expect(app.ledger.controls().paused).toBe(true);
     } finally { app.close(); }
   });

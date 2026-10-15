@@ -5,7 +5,8 @@ import { initializeProductWallet, readExistingProductWallets } from '../app-wall
 import { atomicAmount } from '../authority/atomic-money';
 import { DEVNET_USDC_MINT, inspectFacilitatorConfiguration, loadPaymentConfig, PaymentConfigurationError } from '../payment/payment-config';
 import { PurchaseLedger } from '../purchases/purchase-ledger';
-import { paymentEndpointForIntent, recoverApprovedPayment } from '../purchases/approved-payment';
+import { paymentEndpointForIntent, recoverApprovedPayment, reconcileApprovedPayment } from '../purchases/approved-payment';
+import { monetaryScopeId } from '../purchases/monetary-scope';
 import { purchaseMarketSnapshot } from '../purchases/purchase-market-snapshot';
 import { hash } from '../purchases/spending-policy';
 import { AgentConnection } from '../mcp/connection';
@@ -62,6 +63,7 @@ export class AppRuntime {
   private active = new Set<Promise<unknown>>();
   private startup?: Promise<void>;
   private deliveryRecoveryTimer?: ReturnType<typeof setTimeout>;
+  private readonly reconciliationAbort = new AbortController();
   private recoveryStatus: 'idle' | 'running' | 'complete' | 'pending' = 'idle';
   private wallet?: Promise<{ address: string; reused: boolean }>;
   private walletInventory?: Promise<WalletInventoryEntry[]>;
@@ -282,17 +284,26 @@ export class AppRuntime {
     // The Electron single-instance owner starts this once before new purchases.
     this.ledger.recoverUnsubmittedOnStartup();
     this.ledger.recoverDeliveryClaimsOnStartup();
+    this.ledger.reconciliation.recoverClaimsOnStartup();
     try {
       const pending = this.ledger.pendingRecovery();
       if (pending.length) {
         const wallet = await this.initializeWallet();
         const config = this.paymentConfiguration('simulated');
         if (config.mode !== this.purchaseExecutionMode() || config.buyer !== wallet.address) throw new Error('Recovery wallet mismatch');
+        let paymentChecks = 0;
         for (const item of pending) {
           if (!this.accepting) break;
-          try { const record = this.ledger.get(item.requestId, item.ownerCardMemberId);
+          try { let record = this.ledger.get(item.requestId, item.ownerCardMemberId);
+            // Exclusive startup has no live submitting executor. Preserve every possible send.
+            if (record?.status === 'PAYING') {
+              this.ledger.unknown(record.approvalId);
+              record = this.ledger.get(item.requestId, item.ownerCardMemberId);
+            }
+            if (record?.status === 'PAYMENT_UNKNOWN' && paymentChecks++ >= 4) continue;
             if (record) await recoverApprovedPayment(this.ledger, item.requestId, config,
-              paymentEndpointForIntent(origin, record.intent), () => {}, item.ownerCardMemberId); }
+              paymentEndpointForIntent(origin, record.intent), () => {}, item.ownerCardMemberId,
+              { automatic: true, signal: this.reconciliationAbort.signal }); }
           catch { /* Keep mismatched or unavailable original payments frozen. */ }
         }
       }
@@ -313,7 +324,7 @@ export class AppRuntime {
   private scheduleDeliveryRecovery(origin: string) {
     if (!this.accepting) return;
     this.deliveryRecoveryTimer = setTimeout(() => {
-      const operation = this.track(this.retryDueDeliveries(origin));
+      const operation = this.track(Promise.all([this.retryDueDeliveries(origin), this.reconcileDuePayments()]));
       void operation.finally(() => this.scheduleDeliveryRecovery(origin));
     }, 1000);
     this.deliveryRecoveryTimer.unref();
@@ -335,8 +346,34 @@ export class AppRuntime {
       this.recoveryStatus = this.ledger.pendingRecovery().length ? 'pending' : 'complete';
     } catch { this.recoveryStatus = 'pending'; }
   }
+  private async reconcileDuePayments() {
+    try {
+      if (!this.accepting) return;
+      const mode = this.purchaseExecutionMode();
+      // Disabling test execution must not strand already submitted Devnet payments.
+      const scope = this.ledger.scope(mode === 'simulated' ? 'live_devnet' : mode);
+      const due = this.ledger.reconciliation.due(monetaryScopeId(scope));
+      if (!due.length) return;
+      const wallet = await this.initializeWallet();
+      const config = this.paymentConfiguration('simulated');
+      if (config.mode !== this.purchaseExecutionMode() || config.buyer !== wallet.address) return;
+      for (const item of due) {
+        if (!this.accepting) break;
+        try {
+          await reconcileApprovedPayment(this.ledger, item.requestId, config, () => {}, item.ownerCardMemberId,
+            { automatic: true, signal: this.reconciliationAbort.signal });
+        } catch {
+          // Even an unreadable purchase must back off rather than monopolize the due batch.
+          const claim = this.ledger.reconciliation.claim(item.purchaseId, true);
+          if (claim) this.ledger.reconciliation.finish(claim, 'BINDING_MISMATCH');
+        }
+      }
+      this.recoveryStatus = this.ledger.pendingRecovery().length ? 'pending' : 'complete';
+    } catch { this.recoveryStatus = 'pending'; }
+  }
   async prepareQuit() {
     this.accepting = false;
+    this.reconciliationAbort.abort();
     clearTimeout(this.deliveryRecoveryTimer);
     this.ledger.stopPayments();
     await Promise.allSettled([...this.active]);

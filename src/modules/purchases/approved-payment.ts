@@ -19,6 +19,7 @@ import { HttpResourceRequestSchema } from '../resources/http-resource';
 import { prepareSafeResourceFetch } from '../resources/safe-resource-fetch';
 import { assertProductionPaymentGate } from '../payment/production-execution-gate';
 import { observeDeliveryReceipt, receiveOriginalDelivery, recoverPaidDelivery } from './delivery-recovery';
+import type { ReconciliationCode } from './payment-reconciliation';
 
 export function paymentEndpoint(origin: string, offerId?: string) {
   const url = new URL(origin);
@@ -83,39 +84,51 @@ function originalEvidence(record: PurchaseRecord, payload: PaymentPayload, confi
 }
 
 /** Buyer-side accounting recovery. No signer, merchant request or transaction submission. */
-export async function reconcileApprovedPayment(ledger: PurchaseLedger, taskId: string, config: PaymentConfig, trace: Trace = () => {}, memberId?: string): Promise<ChainOutcome | undefined> {
+export async function reconcileApprovedPayment(ledger: PurchaseLedger, taskId: string, config: PaymentConfig, trace: Trace = () => {}, memberId?: string,
+  options: { automatic?: boolean; signal?: AbortSignal } = {}): Promise<ChainOutcome | undefined> {
   const record = ledger.get(taskId, memberId);
   if (!record || !['live_devnet', 'live_mainnet'].includes(record.executionMode) || !['PAYING', 'PAYMENT_UNKNOWN'].includes(record.status)) return;
   if (record.executionMode === 'live_mainnet' || config.mode === 'live_mainnet') {
     ledger.assertReplayAllowed(record, config.mode);
     ledger.assertReplayAllowed(record, config.mode, ledger.paymentScope(config, config.mode));
   }
-  trace('RECOVERY_STARTED');
-  const payload = ledger.savedPayload(record.approvalId);
-  if (!payload) return { status: 'UNKNOWN' }; // Initial signer might still own the claim.
-  let original = ledger.savedOriginalPayment(record.approvalId);
-  if (!original) {
-    // Signed legacy rows have no trustworthy send marker. Validate their original
-    // bytes, retain possible submission, and never infer failure from that absence.
-    try {
-      ledger.attachLegacyOriginalPayment(record.approvalId, originalEvidence(record, payload, { ...config, merchant: record.intent.payTo }));
-      original = ledger.savedOriginalPayment(record.approvalId);
-    } catch { return { status: 'UNKNOWN' }; }
-  }
-  if (!original || !['SUBMISSION_ATTEMPTED', 'OUTCOME_UNKNOWN'].includes(original.state)) return { status: 'UNKNOWN' };
-  const identity = original.evidence.identity;
-  if (identity.payer !== config.buyer || identity.network !== config.network || identity.mint !== config.mint) return { status: 'UNKNOWN' };
-  let outcome: ChainOutcome;
+  const claim = ledger.reconciliation.claim(record.intent.id, options.automatic);
+  if (!claim) return { status: 'UNKNOWN' };
+  let code: ReconciliationCode = 'UNKNOWN';
   try {
-    outcome = await reconcileStoredOriginalPayment(config, identity, original.transaction ?? ledger.observedTransactionSignature(record.approvalId) ?? record.transaction,
-      signature => ledger.observeTransactionSignature(record.approvalId, signature));
-  } catch { outcome = { status: 'UNKNOWN' }; }
-  if (outcome.status === 'CONFIRMED') {
-    ledger.confirmOriginalPayment(record.approvalId, outcome.transaction, outcome.confirmationStatus ?? 'confirmed');
-    trace('CHAIN_CONFIRMED', outcome.transaction);
-  } else if (outcome.status === 'FAILED') ledger.failOriginalPayment(record.approvalId, outcome.transaction);
-  else ledger.unknown(record.approvalId);
-  return outcome;
+    options.signal?.throwIfAborted();
+    trace('RECOVERY_STARTED');
+    const payload = ledger.savedPayload(record.approvalId);
+    if (!payload) { code = 'EVIDENCE_UNAVAILABLE'; return { status: 'UNKNOWN' }; } // Initial signer might still own the claim.
+    let original = ledger.savedOriginalPayment(record.approvalId);
+    if (!original) {
+      // Signed legacy rows have no trustworthy send marker. Validate their original
+      // bytes, retain possible submission, and never infer failure from that absence.
+      try {
+        ledger.attachLegacyOriginalPayment(record.approvalId, originalEvidence(record, payload, { ...config, merchant: record.intent.payTo }));
+        original = ledger.savedOriginalPayment(record.approvalId);
+      } catch { code = 'BINDING_MISMATCH'; return { status: 'UNKNOWN' }; }
+    }
+    if (!original || !['SUBMISSION_ATTEMPTED', 'OUTCOME_UNKNOWN'].includes(original.state)) { code = 'EVIDENCE_UNAVAILABLE'; return { status: 'UNKNOWN' }; }
+    const identity = original.evidence.identity;
+    if (identity.payer !== config.buyer || identity.network !== config.network || identity.mint !== config.mint) { code = 'BINDING_MISMATCH'; return { status: 'UNKNOWN' }; }
+    let outcome: ChainOutcome;
+    try {
+      outcome = await reconcileStoredOriginalPayment(config, identity, original.transaction ?? ledger.observedTransactionSignature(record.approvalId) ?? record.transaction,
+        signature => ledger.observeTransactionSignature(record.approvalId, signature),
+        { before: claim.before, onCursor: before => ledger.reconciliation.saveCursor(claim, before), signal: options.signal });
+    } catch { outcome = { status: 'UNKNOWN' }; }
+    if (outcome.status === 'CONFIRMED') {
+      ledger.confirmOriginalPayment(record.approvalId, outcome.transaction, outcome.confirmationStatus ?? 'confirmed');
+      trace('CHAIN_CONFIRMED', outcome.transaction);
+    } else if (outcome.status === 'FAILED') ledger.failOriginalPayment(record.approvalId, outcome.transaction);
+    else ledger.unknown(record.approvalId);
+    code = outcome.status;
+    return outcome;
+  } catch {
+    code = options.signal?.aborted ? 'INTERRUPTED' : 'BINDING_MISMATCH';
+    return { status: 'UNKNOWN' };
+  } finally { ledger.reconciliation.finish(claim, code); }
 }
 
 /** Internal approval ID is the only caller-supplied payment parameter. */
@@ -179,7 +192,8 @@ export async function executeApprovedPayment(ledger: PurchaseLedger, approvalId:
 }
 
 /** Original payment is reconciled first; existing delivery recovery is only used after PAID. */
-export async function recoverApprovedPayment(ledger: PurchaseLedger, taskId: string, config: PaymentConfig, endpoint: string, trace: Trace = () => {}, memberId?: string, options: { fetcher?: typeof fetch } = {}) {
+export async function recoverApprovedPayment(ledger: PurchaseLedger, taskId: string, config: PaymentConfig, endpoint: string, trace: Trace = () => {}, memberId?: string,
+  options: { fetcher?: typeof fetch; automatic?: boolean; signal?: AbortSignal } = {}) {
   let record = ledger.get(taskId, memberId);
   if (!record || !['live_devnet', 'live_mainnet'].includes(record.executionMode)) return;
   if (record.executionMode === 'live_mainnet' || config.mode === 'live_mainnet') {
@@ -187,7 +201,7 @@ export async function recoverApprovedPayment(ledger: PurchaseLedger, taskId: str
     ledger.assertReplayAllowed(record, config.mode, ledger.paymentScope(config, config.mode));
   }
   if (['PAYING', 'PAYMENT_UNKNOWN'].includes(record.status)) {
-    await reconcileApprovedPayment(ledger, taskId, config, trace, memberId);
+    await reconcileApprovedPayment(ledger, taskId, config, trace, memberId, options);
     record = ledger.get(taskId, memberId);
   }
   if (!record || record.status !== 'PAID' || record.deliveryStatus !== 'PENDING') return;
