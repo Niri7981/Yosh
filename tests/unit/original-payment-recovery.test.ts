@@ -346,3 +346,37 @@ it('SQLite rejects rewriting original evidence, signed payload, or the already c
   expect(f.ledger.savedOriginalPayment(f.record.approvalId)).toEqual(original);
   expect(accounting(f)).toMatchObject({ paid: '0', reserved: '10000', unresolved: 1 });
 });
+
+it('does not steal a read-only claim across SQLite handles or reset its backoff on exclusive startup', async () => {
+  const path = persistentPath(); const f = await fixture(path); saveOriginal(f);
+  const first = f.ledger.reconciliation.claim(f.record.intent.id)!;
+  const state = f.ledger.reconciliation.state(f.record.intent.id)!;
+  const other = new PurchaseLedger(path, { mode: 'live_devnet', walletIdentity: f.config.buyer }); ledgers.push(other);
+  expect(other.reconciliation.claim(f.record.intent.id)).toBeUndefined();
+  expect(other.reconciliation.state(f.record.intent.id)).toEqual(state);
+  close(f); other.reconciliation.recoverClaimsOnStartup();
+  expect(other.reconciliation.state(f.record.intent.id)).toMatchObject({ attempts: 1, nextAttemptAt: state.nextAttemptAt, claimed: false, lastCode: 'INTERRUPTED' });
+  expect(other.reconciliation.claim(f.record.intent.id, true)).toBeUndefined();
+  const second = other.reconciliation.claim(f.record.intent.id)!;
+  expect(() => other.reconciliation.saveCursor(first, f.signature)).toThrow('RECONCILIATION_CLAIM_MISMATCH');
+  other.reconciliation.finish(first, 'CONFIRMED');
+  expect(other.reconciliation.state(f.record.intent.id)?.claimed).toBe(true);
+  other.reconciliation.finish(second, 'UNKNOWN');
+  expect(other.managedSummary()).toMatchObject({ reserved: '10000', paid: '0', unresolved: 1 });
+});
+
+it('adds reconciliation metadata to an old ledger without rewriting purchase or original-payment evidence', async () => {
+  const path = persistentPath(); const f = await fixture(path); saveOriginal(f); close(f);
+  const db = new DatabaseSync(path);
+  const purchases = db.prepare('SELECT * FROM purchases').all(); const original = db.prepare('SELECT * FROM original_payments').all();
+  db.exec("DROP TABLE payment_reconciliation; DELETE FROM ledger_schema_migrations WHERE id='016_payment_reconciliation'"); db.close();
+  const reopened = new PurchaseLedger(path, { mode: 'live_devnet', walletIdentity: f.config.buyer }); ledgers.push(reopened);
+  const verified = new DatabaseSync(path);
+  try {
+    expect(verified.prepare('SELECT * FROM purchases').all()).toEqual(purchases);
+    expect(verified.prepare('SELECT * FROM original_payments').all()).toEqual(original);
+    expect(verified.prepare('PRAGMA integrity_check').get()).toMatchObject({ integrity_check: 'ok' });
+    expect(verified.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
+    expect(reopened.reconciliation.state(f.record.intent.id)).toMatchObject({ attempts: 0, nextAttemptAt: 0, claimed: false });
+  } finally { verified.close(); }
+});

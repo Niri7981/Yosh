@@ -1,6 +1,7 @@
 import { TransactionSignatureSchema, validateSignedPaymentIdentity } from '../payment/original-payment-evidence';
 import { OriginalPaymentRecordSchema, OriginalPaymentStateSchema, type OriginalPaymentRecord, type StoredOriginalPayment } from './original-payment-record';
 import { migrateOriginalPaymentEvidence } from './original-payment-migration';
+import { PaymentReconciliation } from './payment-reconciliation';
 import { migrateHttpPurchaseBindings } from './http-binding-migration';
 import { initializeDeliveryState, migrateDeliveryRecovery } from './delivery-migration';
 import { migrateMainnetAuthority } from './mainnet-authority-migration';
@@ -89,6 +90,7 @@ function isLiveMode(mode: StoredPurchaseExecutionMode | undefined) {
 export class PurchaseLedger {
   private db: DatabaseSync;
   readonly resources: RuntimeResourceRegistry;
+  readonly reconciliation: PaymentReconciliation;
   private managed: boolean;
   private requireSpendGrant: boolean;
   private requireRegisteredResource: boolean;
@@ -147,7 +149,7 @@ export class PurchaseLedger {
       this.db.prepare('INSERT OR IGNORE INTO app_budget_clock (id,spending_day,time_zone,next_boundary,last_seen) VALUES (1,?,?,?,?)')
         .run(spendingDay(now, zone), zone, nextSpendingDayBoundary(now, zone), now);
     }
-    try { migrateMonetaryLedger(this.db, this.managed, this.walletIdentity, this.now()); migrateOriginalPaymentEvidence(this.db, this.now()); migrateHttpPurchaseBindings(this.db, this.now()); migrateDeliveryRecovery(this.db, this.now()); migrateMainnetAuthority(this.db, this.managed, this.now()); this.migrateResourceScopedGrants(); this.migratePostGrantConsent(); this.resources = new RuntimeResourceRegistry(this.db, this.now); }
+    try { migrateMonetaryLedger(this.db, this.managed, this.walletIdentity, this.now()); migrateOriginalPaymentEvidence(this.db, this.now()); migrateHttpPurchaseBindings(this.db, this.now()); migrateDeliveryRecovery(this.db, this.now()); migrateMainnetAuthority(this.db, this.managed, this.now()); this.migrateResourceScopedGrants(); this.migratePostGrantConsent(); this.resources = new RuntimeResourceRegistry(this.db, this.now); this.reconciliation = new PaymentReconciliation(this.db, this.now); }
     catch (error) { this.db.close(); throw error; }
   }
   scope(mode: StoredPurchaseExecutionMode = this.defaultMode, network?: string, asset?: string, decimals = 6,
