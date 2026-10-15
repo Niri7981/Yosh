@@ -11,6 +11,10 @@ export { transactionMessageHash } from './original-payment-evidence';
 export type ChainOutcome = { status: 'CONFIRMED'; transaction: string; confirmationStatus?: 'confirmed' | 'finalized' }
   | { status: 'FAILED'; transaction: string } | { status: 'UNKNOWN' };
 const unknown: ChainOutcome = { status: 'UNKNOWN' };
+export const RECONCILIATION_MAX_PAGES = 5;
+export const RECONCILIATION_MAX_CANDIDATES = 20;
+export const RECONCILIATION_TIMEOUT_MS = 30_000;
+export type ReconciliationSearch = { before?: string; onCursor?: (before: string | undefined) => void; signal?: AbortSignal };
 const TransactionResultSchema = z.object({
   transaction: z.tuple([z.string().max(1_644), z.literal('base64')]),
   meta: z.object({ err: z.union([z.null(), z.string().min(1), z.object({}).passthrough()]) }).passthrough().nullable(),
@@ -20,15 +24,18 @@ const HistorySchema = z.array(z.object({ signature: TransactionSignatureSchema, 
 type ReadRpc = (method: string, params?: unknown[]) => Promise<unknown>;
 
 /** A separate bounded buyer read path; it never contacts the merchant or sends a transaction. */
-async function boundedRpc(config: PaymentConfig, method: string, params: unknown[] = []): Promise<unknown> {
+async function boundedRpc(config: PaymentConfig, method: string, params: unknown[] = [], signal?: AbortSignal): Promise<unknown> {
+  signal?.throwIfAborted();
   const response = await fetch(config.rpcUrl, { method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }), redirect: 'error', signal: AbortSignal.timeout(15_000) });
-  if (!response.ok || !response.body) throw new Error('ORIGINAL_PAYMENT_RPC_UNAVAILABLE');
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }), redirect: 'error',
+    signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(15_000)]) : AbortSignal.timeout(15_000) });
+  if (!response.ok || !response.body) { await response.body?.cancel(); throw new Error('ORIGINAL_PAYMENT_RPC_UNAVAILABLE'); }
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
   let size = 0;
   try {
     while (true) {
+      signal?.throwIfAborted();
       const { done, value } = await reader.read();
       if (done) break;
       size += value.byteLength;
@@ -40,6 +47,35 @@ async function boundedRpc(config: PaymentConfig, method: string, params: unknown
   const envelope = z.object({ jsonrpc: z.literal('2.0'), id: z.literal(1), result: z.unknown() }).passthrough().parse(result);
   if (!Object.hasOwn(envelope, 'result') || Object.hasOwn(envelope, 'error')) throw new Error('ORIGINAL_PAYMENT_RPC_INVALID');
   return envelope.result;
+}
+
+/** Cursor advances only after inspection. Failure keeps that candidate available next time.
+ * Reaching the end restarts at the head on the next pass, so late indexing is not lost. */
+async function searchHistory(read: ReadRpc, payer: string, memo: string, matches: MatchTransaction,
+  onSignature: (signature: string) => void, options: ReconciliationSearch = {}): Promise<ChainOutcome> {
+  let before = options.before === undefined ? undefined : TransactionSignatureSchema.parse(options.before);
+  const seen = new Set<string>(); let inspected = 0;
+  for (let page = 0; page < RECONCILIATION_MAX_PAGES; page++) {
+    options.signal?.throwIfAborted();
+    const history = HistorySchema.parse(await read('getSignaturesForAddress', [payer,
+      { limit: 100, commitment: 'confirmed', ...(before ? { before } : {}) }]));
+    if (!history.length) { options.onCursor?.(undefined); return unknown; }
+    for (const item of history) {
+      if (seen.has(item.signature) || item.signature === before) return unknown;
+      seen.add(item.signature); options.signal?.throwIfAborted();
+      if (item.memo?.includes(memo)) {
+        if (before !== undefined) options.onCursor?.(before);
+        const outcome = await inspect(read, item.signature, matches, onSignature);
+        if (outcome.status !== 'UNKNOWN') return outcome;
+        inspected++;
+      }
+      before = item.signature;
+      if (inspected >= RECONCILIATION_MAX_CANDIDATES) { options.onCursor?.(before); return unknown; }
+    }
+    options.onCursor?.(before);
+    if (history.length < 100) { options.onCursor?.(undefined); return unknown; }
+  }
+  return unknown;
 }
 
 async function correctNetwork(config: PaymentConfig, read: ReadRpc, identity?: SignedPaymentIdentity) {
@@ -77,10 +113,12 @@ async function inspect(read: ReadRpc, signature: string, matches: MatchTransacti
 
 /** Reconcile immutable buyer-signed facts; disappearance, expiry, or absent history remains unknown. */
 export async function reconcileStoredOriginalPayment(config: PaymentConfig, stored: SignedPaymentIdentity, knownSignature?: string,
-  onSignature: (signature: string) => void = () => {}): Promise<ChainOutcome> {
+  onSignature: (signature: string) => void = () => {}, options: ReconciliationSearch = {}): Promise<ChainOutcome> {
   try {
     const identity = SignedPaymentIdentitySchema.parse(stored);
-    const read: ReadRpc = (method, params) => boundedRpc(config, method, params);
+    const timeout = AbortSignal.timeout(RECONCILIATION_TIMEOUT_MS);
+    const signal = options.signal ? AbortSignal.any([options.signal, timeout]) : timeout;
+    const read: ReadRpc = (method, params) => boundedRpc(config, method, params, signal);
     const signatures = [...new Set([identity.knownSignature, knownSignature].filter((value): value is string => value !== undefined))];
     // Receipt signatures remain observations until exact signed-message verification succeeds.
     for (const signature of signatures) if (TransactionSignatureSchema.safeParse(signature).success) onSignature(signature);
@@ -90,14 +128,7 @@ export async function reconcileStoredOriginalPayment(config: PaymentConfig, stor
       const outcome = await inspect(read, signature, matches);
       if (outcome.status !== 'UNKNOWN') return outcome;
     }
-    const recent = HistorySchema.parse(await read('getSignaturesForAddress', [identity.payer, { limit: 100, commitment: 'confirmed' }]));
-    // Memo narrows a bounded search; only the exact original buyer-signed message proves identity.
-    const candidates = recent.filter(item => item.memo?.includes(identity.actualMemo)).slice(0, 3);
-    for (const candidate of candidates) {
-      const outcome = await inspect(read, candidate.signature, matches, onSignature);
-      if (outcome.status !== 'UNKNOWN') return outcome;
-    }
-    return unknown;
+    return await searchHistory(read, identity.payer, identity.actualMemo, matches, onSignature, { ...options, signal });
   } catch { return unknown; }
 }
 
@@ -133,11 +164,6 @@ export async function reconcileOriginalTransaction(config: PaymentConfig, messag
       const known = await inspect(read, knownSignature, matches);
       if (known.status !== 'UNKNOWN') return known;
     }
-    const recent = HistorySchema.parse(await read('getSignaturesForAddress', [config.buyer, { limit: 100, commitment: 'confirmed' }]));
-    for (const candidate of recent.filter(item => item.memo?.includes(memo)).slice(0, 3)) {
-      const outcome = await inspect(read, candidate.signature, matches);
-      if (outcome.status !== 'UNKNOWN') return outcome;
-    }
-    return unknown;
+    return await searchHistory(read, config.buyer, memo, matches, () => {});
   } catch { return unknown; }
 }

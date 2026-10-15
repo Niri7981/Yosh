@@ -8,7 +8,7 @@ import { loadPaymentConfig } from '../../src/modules/payment/payment-config';
 import { TOKEN_PROGRAM } from '../../src/modules/payment/payment-environment';
 import { createSignedPaymentIdentity, decodeOriginalTransaction, matchesSignedPaymentIdentity,
   SignedPaymentIdentitySchema, transactionMessageHash, validateSignedPaymentIdentity } from '../../src/modules/payment/original-payment-evidence';
-import { reconcileStoredOriginalPayment } from '../../src/modules/payment/reconcile-transaction';
+import { reconcileStoredOriginalPayment, RECONCILIATION_MAX_PAGES, RECONCILIATION_MAX_CANDIDATES } from '../../src/modules/payment/reconcile-transaction';
 
 const buyer = Keypair.generate();
 const feePayer = Keypair.generate();
@@ -58,7 +58,7 @@ function mockRpc(handler: (method: string, params: unknown[]) => unknown | Promi
   vi.stubGlobal('fetch', mocked);
   return mocked;
 }
-afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
+afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); vi.useRealTimers(); });
 
 describe('durable original buyer-signed Solana identity', () => {
   it('retains buyer partial signature, actual memo, message identity, token accounts and lifetime', () => {
@@ -126,6 +126,88 @@ describe('durable original buyer-signed Solana identity', () => {
 });
 
 describe('merchant-independent original-payment reconciliation', () => {
+  it('finds an original transaction beyond the first 100 history entries using the RPC before cursor', async () => {
+    const f = fixture(); const identity = createSignedPaymentIdentity(f.payload, config);
+    const firstPage = Array.from({ length: 100 }, () => ({ signature: getBase58Decoder().decode(crypto.getRandomValues(new Uint8Array(64))), memo: null }));
+    mockRpc((method, params) => {
+      if (method === 'getTransaction') return f.rpc;
+      const options = z.object({ before: z.string().optional() }).parse(params[1]);
+      return options.before === firstPage.at(-1)!.signature ? [{ signature: f.signature, memo }] : firstPage;
+    });
+    expect(await reconcileStoredOriginalPayment(config, identity)).toMatchObject({ status: 'CONFIRMED', transaction: f.signature });
+  });
+  it('does not discard the original transaction after three unrelated memo candidates', async () => {
+    const f = fixture(); const identity = createSignedPaymentIdentity(f.payload, config);
+    const unrelated = Array.from({ length: 4 }, () => fixture());
+    mockRpc((method, params) => method === 'getSignaturesForAddress'
+      ? [...unrelated.map(item => ({ signature: item.signature, memo })), { signature: f.signature, memo }]
+      : unrelated.find(item => item.signature === params[0])?.rpc ?? f.rpc);
+    expect(await reconcileStoredOriginalPayment(config, identity)).toMatchObject({ status: 'CONFIRMED', transaction: f.signature });
+  });
+  it('bounds a history pass and preserves a continuation cursor instead of restarting at the head', async () => {
+    const f = fixture(); const identity = createSignedPaymentIdentity(f.payload, config);
+    const history = Array.from({ length: 700 }, () => ({ signature: getBase58Decoder().decode(crypto.getRandomValues(new Uint8Array(64))), memo: null }));
+    let cursor: string | undefined;
+    const fetcher = mockRpc((_method, params) => {
+      const before = z.object({ before: z.string().optional() }).parse(params[1]).before;
+      const offset = before === undefined ? 0 : history.findIndex(item => item.signature === before) + 1;
+      return history.slice(offset, offset + 100);
+    });
+    expect(await reconcileStoredOriginalPayment(config, identity, undefined, () => {}, { onCursor: before => { cursor = before; } })).toEqual({ status: 'UNKNOWN' });
+    expect(fetcher).toHaveBeenCalledTimes(RECONCILIATION_MAX_PAGES + 1);
+    expect(cursor).toBe(history[499].signature);
+    const checkpoints = vi.fn();
+    await reconcileStoredOriginalPayment(config, identity, undefined, () => {}, { before: cursor, onCursor: checkpoints });
+    expect(checkpoints).toHaveBeenLastCalledWith(undefined);
+    const requests = fetcher.mock.calls.map(([, init]) => RpcRequestSchema.parse(JSON.parse(String(init?.body))));
+    expect(requests.filter(request => request.method === 'getSignaturesForAddress')[5].params[1]).toMatchObject({ before: history[499].signature });
+  });
+  it('bounds memo candidate inspection without skipping the next candidate or interpreting absence as failure', async () => {
+    const f = fixture(); const identity = createSignedPaymentIdentity(f.payload, config);
+    const history = Array.from({ length: 30 }, () => ({ signature: getBase58Decoder().decode(crypto.getRandomValues(new Uint8Array(64))), memo }));
+    let cursor: string | undefined;
+    const fetcher = mockRpc(method => method === 'getSignaturesForAddress' ? history : null);
+    expect(await reconcileStoredOriginalPayment(config, identity, undefined, () => {}, { onCursor: before => { cursor = before; } })).toEqual({ status: 'UNKNOWN' });
+    expect(cursor).toBe(history[RECONCILIATION_MAX_CANDIDATES - 1].signature);
+    expect(fetcher).toHaveBeenCalledTimes(RECONCILIATION_MAX_CANDIDATES + 2);
+  });
+  it('keeps the cursor before a candidate when its RPC lookup fails, and stops a cancelled pass', async () => {
+    const f = fixture(); const identity = createSignedPaymentIdentity(f.payload, config);
+    const checkpoints = vi.fn();
+    const fetcher = mockRpc(method => {
+      if (method === 'getSignaturesForAddress') return [{ signature: f.signature, memo }];
+      throw new Error('rate limited');
+    });
+    expect(await reconcileStoredOriginalPayment(config, identity, undefined, () => {}, { onCursor: checkpoints })).toEqual({ status: 'UNKNOWN' });
+    expect(checkpoints).not.toHaveBeenCalled();
+    const count = fetcher.mock.calls.length; const abort = new AbortController(); abort.abort();
+    expect(await reconcileStoredOriginalPayment(config, identity, undefined, () => {}, { signal: abort.signal })).toEqual({ status: 'UNKNOWN' });
+    expect(fetcher).toHaveBeenCalledTimes(count);
+  });
+  it('enforces a total read deadline even when each RPC individually answers within its timeout', async () => {
+    const f = fixture(); const identity = createSignedPaymentIdentity(f.payload, config);
+    vi.useFakeTimers();
+    vi.spyOn(AbortSignal, 'timeout').mockImplementation(ms => {
+      const abort = new AbortController(); setTimeout(() => abort.abort(), ms); return abort.signal;
+    });
+    const signatures = Array.from({ length: 5 }, () => ({ signature: getBase58Decoder().decode(crypto.getRandomValues(new Uint8Array(64))), memo }));
+    const fetcher = vi.fn<typeof fetch>((_url, init) => new Promise((resolve, reject) => {
+      const request = RpcRequestSchema.parse(JSON.parse(String(init?.body)));
+      const abort = () => { clearTimeout(timer); reject(new Error('cancelled')); };
+      const timer = setTimeout(() => {
+        init?.signal?.removeEventListener('abort', abort);
+        resolve(Response.json({ jsonrpc: '2.0', id: 1,
+          result: request.method === 'getGenesisHash' ? config.genesisHash : request.method === 'getSignaturesForAddress' ? signatures : null }));
+      }, 10_000);
+      init?.signal?.addEventListener('abort', abort, { once: true });
+    }));
+    vi.stubGlobal('fetch', fetcher);
+    const pending = reconcileStoredOriginalPayment(config, identity);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(await pending).toEqual({ status: 'UNKNOWN' });
+    expect(fetcher).toHaveBeenCalledTimes(3);
+    await vi.advanceTimersByTimeAsync(100_000); expect(fetcher).toHaveBeenCalledTimes(3);
+  });
   it('recovers confirmed transfer directly and observes a returned signature before the first RPC wait', async () => {
     const f = fixture(); const identity = createSignedPaymentIdentity(f.payload, config);
     const observed = vi.fn();
