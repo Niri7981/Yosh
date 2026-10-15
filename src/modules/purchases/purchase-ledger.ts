@@ -3,10 +3,11 @@ import { OriginalPaymentRecordSchema, OriginalPaymentStateSchema, type OriginalP
 import { migrateOriginalPaymentEvidence } from './original-payment-migration';
 import { PaymentReconciliation } from './payment-reconciliation';
 import { migrateHttpPurchaseBindings } from './http-binding-migration';
-import { initializeDeliveryState, migrateDeliveryRecovery } from './delivery-migration';
+import { migrateDeliveryRecovery } from './delivery-migration';
+import { PurchaseDeliveryStore } from './purchase-delivery-store';
 import { migrateMainnetAuthority } from './mainnet-authority-migration';
-import { DeliveryRecoveryStateSchema, DELIVERY_RETRY_LIMIT, ReceiptStatusSchema, type DeliveryStatus, type DeliveryRecoveryState, type ReceiptStatus } from './delivery-state';
-import { DeliveryRecoveryCapabilitySchema, type DeliveryRecoveryCapability } from '../resources/delivery-capability';
+import { ReceiptStatusSchema, type DeliveryStatus, type DeliveryRecoveryState, type ReceiptStatus } from './delivery-state';
+import { type DeliveryRecoveryCapability } from '../resources/delivery-capability';
 import { atomicAmount, addAtomic, remainingAtomic } from '../authority/atomic-money';
 import { MonetaryScopeSchema, monetaryScope, monetaryScopeId, PRODUCT_MAINNET_WALLET_ID, PRODUCT_TEST_WALLET_ID, LEGACY_TEST_WALLET_ID, type MonetaryScope } from './monetary-scope';
 import { migrateMonetaryLedger, storeMonetaryScope } from './monetary-migration';
@@ -89,6 +90,7 @@ function isLiveMode(mode: StoredPurchaseExecutionMode | undefined) {
 /** SQLite owns approval, budget reservation and the unique task purchase. No model writes. */
 export class PurchaseLedger {
   private db: DatabaseSync;
+  private readonly delivery: PurchaseDeliveryStore;
   readonly resources: RuntimeResourceRegistry;
   readonly reconciliation: PaymentReconciliation;
   private managed: boolean;
@@ -149,7 +151,7 @@ export class PurchaseLedger {
       this.db.prepare('INSERT OR IGNORE INTO app_budget_clock (id,spending_day,time_zone,next_boundary,last_seen) VALUES (1,?,?,?,?)')
         .run(spendingDay(now, zone), zone, nextSpendingDayBoundary(now, zone), now);
     }
-    try { migrateMonetaryLedger(this.db, this.managed, this.walletIdentity, this.now()); migrateOriginalPaymentEvidence(this.db, this.now()); migrateHttpPurchaseBindings(this.db, this.now()); migrateDeliveryRecovery(this.db, this.now()); migrateMainnetAuthority(this.db, this.managed, this.now()); this.migrateResourceScopedGrants(); this.migratePostGrantConsent(); this.resources = new RuntimeResourceRegistry(this.db, this.now); this.reconciliation = new PaymentReconciliation(this.db, this.now); }
+    try { migrateMonetaryLedger(this.db, this.managed, this.walletIdentity, this.now()); migrateOriginalPaymentEvidence(this.db, this.now()); migrateHttpPurchaseBindings(this.db, this.now()); migrateDeliveryRecovery(this.db, this.now()); migrateMainnetAuthority(this.db, this.managed, this.now()); this.migrateResourceScopedGrants(); this.migratePostGrantConsent(); this.resources = new RuntimeResourceRegistry(this.db, this.now); this.reconciliation = new PaymentReconciliation(this.db, this.now); this.delivery = new PurchaseDeliveryStore(this.db, this.now); }
     catch (error) { this.db.close(); throw error; }
   }
   scope(mode: StoredPurchaseExecutionMode = this.defaultMode, network?: string, asset?: string, decimals = 6,
@@ -524,22 +526,9 @@ export class PurchaseLedger {
     return this.db.prepare("SELECT task_id,owner_card_member_id FROM purchases p JOIN purchase_delivery d ON d.purchase_id=p.id WHERE p.status IN ('PAYING','PAYMENT_UNKNOWN') OR (p.status='PAID' AND d.state IN ('PENDING','DELIVERING'))").all()
       .map(row => ({ requestId: String(row.task_id), ownerCardMemberId: row.owner_card_member_id ? String(row.owner_card_member_id) : undefined }));
   }
-  dueDeliveryRecovery(now = this.now()) {
-    return this.db.prepare(`SELECT task_id,owner_card_member_id FROM purchases p JOIN purchase_delivery d ON d.purchase_id=p.id
-      WHERE p.status='PAID' AND p.execution_mode IN ('live_devnet','live_mainnet') AND d.state='PENDING' AND d.next_attempt_at<=?`).all(now)
-      .map(row => ({ requestId: String(row.task_id), ownerCardMemberId: row.owner_card_member_id ? String(row.owner_card_member_id) : undefined }));
-  }
-  private deliveryState(purchaseId: string): DeliveryRecoveryState {
-    const row = this.db.prepare('SELECT * FROM purchase_delivery WHERE purchase_id=?').get(purchaseId);
-    if (!row) throw new Error('DELIVERY_STATE_MISSING');
-    return DeliveryRecoveryStateSchema.parse({ status: row.state, receiptStatus: row.receipt_state,
-      retryCount: Number(row.retry_count), retryLimit: DELIVERY_RETRY_LIMIT, nextAttemptAt: Number(row.next_attempt_at), lastError: row.last_error });
-  }
+  dueDeliveryRecovery(now = this.now()) { return this.delivery.due(now); }
   deliveryCapability(approvalId: string): DeliveryRecoveryCapability {
-    const record = this.recordForApproval(approvalId);
-    const row = this.db.prepare('SELECT capability FROM purchase_delivery WHERE purchase_id=?').get(record.intent.id);
-    if (!row) throw new Error('DELIVERY_STATE_MISSING');
-    return DeliveryRecoveryCapabilitySchema.parse(JSON.parse(String(row.capability)));
+    return this.delivery.capability(this.recordForApproval(approvalId).intent.id);
   }
   recordReceipt(approvalId: string, outcome: ReceiptStatus, receipt?: { transaction: string; network: string; payer?: string; amount?: string }) {
     this.atomic(() => {
@@ -548,9 +537,7 @@ export class PurchaseLedger {
       if (outcome === 'CONFIRMED' && (!this.hasVerifiedLivePayment(record) || !receipt || receipt.transaction !== record.transaction
         || receipt.network !== record.intent.network || (record.paymentEvidence?.version !== 1 && receipt.payer !== record.paymentEvidence?.payer)
         || (receipt.amount !== undefined && receipt.amount !== record.intent.amount))) throw new Error('SETTLEMENT_RECEIPT_BINDING_MISMATCH');
-      // Once verified, a later missing/invalid response does not erase that receipt fact.
-      this.db.prepare(`UPDATE purchase_delivery SET receipt_state=?,receipt=COALESCE(?,receipt)
-        WHERE purchase_id=? AND receipt_state<>'CONFIRMED'`).run(outcome, receipt ? JSON.stringify(receipt) : null, record.intent.id);
+      this.delivery.recordReceipt(record.intent.id, outcome, receipt);
     });
   }
   /** No money/authority writes. The durable claim is consumed before any recovery HTTP request. */
@@ -559,57 +546,34 @@ export class PurchaseLedger {
       if (this.stopping) return;
       const record = this.recordForApproval(approvalId);
       if (record.status !== 'PAID' || record.deliveryStatus !== 'PENDING') return;
-      if (!this.hasVerifiedLivePayment(record)) { this.deliveryTerminal(record, 'DELIVERY_PAYMENT_EVIDENCE_INVALID', 'UNSUPPORTED'); return; }
+      if (!this.hasVerifiedLivePayment(record)) { this.delivery.terminal(record.intent.id, 'DELIVERY_PAYMENT_EVIDENCE_INVALID', 'UNSUPPORTED'); return; }
       // Resource disablement stops new spending, not fulfillment of a paid order.
       // Delivery remains bound to the saved request, capability and payment evidence.
       validate?.(record);
-      const row = this.db.prepare('SELECT * FROM purchase_delivery WHERE purchase_id=?').get(record.intent.id)!;
-      if (kind === 'retry') {
-        const capability = DeliveryRecoveryCapabilitySchema.parse(JSON.parse(String(row.capability)));
-        if (capability.kind === 'none') { this.deliveryTerminal(record, 'DELIVERY_RECOVERY_UNSUPPORTED', 'UNSUPPORTED'); return; }
-        if (Number(row.retry_count) >= DELIVERY_RETRY_LIMIT) { this.deliveryTerminal(record, 'DELIVERY_RETRY_EXHAUSTED', 'EXHAUSTED'); return; }
-        if (Number(row.next_attempt_at) > now) return;
-      } else if (row.initial_attempted === 1) return;
-      const token = randomUUID();
-      const update = this.db.prepare(`UPDATE purchase_delivery SET state='DELIVERING',claim_token=?,claim_kind=?,claim_at=?,
-        retry_count=retry_count+?,initial_attempted=CASE WHEN ?='initial' THEN 1 ELSE initial_attempted END
-        WHERE purchase_id=? AND state='PENDING'`).run(token, kind, now, kind === 'retry' ? 1 : 0, kind, record.intent.id);
-      if (update.changes !== 1) return;
-      this.event(record.intent.id, kind === 'retry' ? 'delivery.RETRY_CLAIMED' : 'delivery.INITIAL_CLAIMED');
-      return token;
+      return this.delivery.claim(record.intent.id, kind, now);
     });
   }
   blockDeliveryRecovery(approvalId: string, code: string, state: 'UNSUPPORTED' | 'EXHAUSTED' = 'UNSUPPORTED') {
     this.atomic(() => {
       const record = this.recordForApproval(approvalId);
       if (record.status !== 'PAID') return;
-      this.deliveryTerminal(record, code, state);
+      this.delivery.terminal(record.intent.id, code, state);
     });
-  }
-  private deliveryTerminal(record: PurchaseRecord, code: string, state: 'UNSUPPORTED' | 'EXHAUSTED') {
-    const changed = this.db.prepare("UPDATE purchase_delivery SET state=?,last_error=? WHERE purchase_id=? AND state='PENDING'").run(state, code, record.intent.id);
-    if (changed.changes) this.event(record.intent.id, `delivery.${state}`);
   }
   failDeliveryAttempt(approvalId: string, token: string, code = 'DELIVERY_RESPONSE_UNAVAILABLE', now = this.now()) {
     this.atomic(() => {
       const record = this.recordForApproval(approvalId);
-      const row = this.db.prepare("SELECT * FROM purchase_delivery WHERE purchase_id=? AND state='DELIVERING' AND claim_token=?").get(record.intent.id, token);
-      if (!row) return; // A stale response cannot finish or release another owner's claim.
-      const capability = DeliveryRecoveryCapabilitySchema.parse(JSON.parse(String(row.capability)));
-      const state = capability.kind === 'none' ? 'UNSUPPORTED' : Number(row.retry_count) >= DELIVERY_RETRY_LIMIT ? 'EXHAUSTED' : 'PENDING';
-      const next = row.claim_kind === 'retry' ? now + 1000 * 2 ** Math.max(0, Number(row.retry_count) - 1) : now;
-      this.db.prepare(`UPDATE purchase_delivery SET state=?,claim_token=NULL,claim_kind=NULL,claim_at=NULL,next_attempt_at=?,last_error=?
-        WHERE purchase_id=? AND claim_token=?`).run(state, next, state === 'UNSUPPORTED' ? 'DELIVERY_RECOVERY_UNSUPPORTED' : code, record.intent.id, token);
-      this.event(record.intent.id, state === 'PENDING' ? 'delivery.RETRY_PENDING' : `delivery.${state}`);
+      this.delivery.failAttempt(record.intent.id, token, code, now);
     });
   }
   /** Sole data-directory owner only, before accepting requests. Interrupted claims
    * retain their consumed retry count; opening another SQLite handle never resets them. */
   recoverDeliveryClaimsOnStartup() {
-    for (const row of this.db.prepare("SELECT p.approval_id,d.claim_token FROM purchase_delivery d JOIN purchases p ON p.id=d.purchase_id WHERE d.state='DELIVERING'").all()) {
-      this.failDeliveryAttempt(String(row.approval_id), String(row.claim_token), 'DELIVERY_ATTEMPT_INTERRUPTED');
+    for (const claim of this.delivery.interruptedClaims()) {
+      this.failDeliveryAttempt(claim.approvalId, claim.token, 'DELIVERY_ATTEMPT_INTERRUPTED');
     }
   }
+
   get(idempotencyKey: string, memberId?: string): SpendReservation | undefined {
     const row = memberId
       ? this.db.prepare('SELECT * FROM purchases WHERE task_id=? AND owner_card_member_id=?').get(idempotencyKey, memberId)
@@ -627,7 +591,7 @@ export class PurchaseLedger {
     if (paymentPayloadPresent) {
       try { paymentPayloadHash = hash(JSON.parse(String(row.payload))); } catch { /* Malformed legacy payloads cannot prove a live payment. */ }
     }
-    const delivery = this.deliveryState(String(row.id));
+    const delivery = this.delivery.state(String(row.id));
     return { monetaryScope: monetary, intent, quote: JSON.parse(String(row.quote)), approvalId: String(row.approval_id), decision: parseStoredAuthorityDecision(JSON.parse(String(row.decision))), status: currentAuthorityStatus(String(row.status)),
       deliveryStatus: delivery.status, receiptStatus: delivery.receiptStatus, deliveryRecovery: delivery,
       executionMode: storedExecutionMode(row.execution_mode), paymentPayloadPresent,
@@ -712,7 +676,7 @@ export class PurchaseLedger {
       this.db.prepare('INSERT INTO purchases (id,task_id,approval_id,purchase,quote,decision,status,amount,owner_card_member_id,execution_mode,monetary_scope_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)')
         .run(intent.id, intent.idempotencyKey, randomUUID(), JSON.stringify(intent), JSON.stringify(quote), JSON.stringify(decision), decision.decision, intent.amount,
           ownerCardMemberId ?? intent.authority?.cardMemberId ?? null, mode === 'UNKNOWN' ? null : mode, storeMonetaryScope(this.db, monetary));
-      initializeDeliveryState(this.db, { id: intent.id, purchase: JSON.stringify(intent), owner: ownerCardMemberId ?? intent.authority?.cardMemberId,
+      this.delivery.initialize({ id: intent.id, purchase: JSON.stringify(intent), owner: ownerCardMemberId ?? intent.authority?.cardMemberId,
         status: decision.decision, delivered: false, receiptConfirmed: false });
       this.event(intent.id, `authority.${decision.decision}`);
       return this.get(intent.idempotencyKey, memberId)!;
@@ -933,14 +897,9 @@ export class PurchaseLedger {
       } else if (!record || record.status !== 'PAID' || !this.hasVerifiedPaymentProof(record)) {
         throw new Error('LIVE_PAYMENT_EVIDENCE_INVALID');
       }
-      const delivery = this.db.prepare('SELECT state,claim_token FROM purchase_delivery WHERE purchase_id=?').get(record!.intent.id)!;
       if (result.transaction !== record!.transaction && record!.executionMode !== 'simulated') throw new Error('DELIVERY_TRANSACTION_MISMATCH');
-      if ((deliveryClaim && (delivery.state !== 'DELIVERING' || delivery.claim_token !== deliveryClaim))
-        || (!deliveryClaim && delivery.state === 'DELIVERING')) throw new Error('DELIVERY_CLAIM_MISMATCH');
-      if (delivery.state === 'COMPLETE') return;
-      if (!['PENDING','NOT_PAID','DELIVERING'].includes(String(delivery.state))) throw new Error('DELIVERY_TERMINAL');
+      if (!this.delivery.complete(record!.intent.id, deliveryClaim)) return;
       const saved = this.db.prepare('UPDATE purchases SET data=? WHERE approval_id=? AND data IS NULL RETURNING id').get(JSON.stringify(data), approvalId);
-      this.db.prepare("UPDATE purchase_delivery SET state='COMPLETE',claim_token=NULL,claim_kind=NULL,claim_at=NULL,last_error=NULL WHERE purchase_id=?").run(record!.intent.id);
       if (saved) this.event(String(saved.id), 'delivery.COMPLETE');
     });
   }
@@ -984,7 +943,7 @@ export class PurchaseLedger {
       FROM purchases p JOIN monetary_scopes ms ON ms.id=p.monetary_scope_id
       ${memberId ? 'WHERE p.owner_card_member_id=?' : ''} ORDER BY created_at DESC,p.id DESC LIMIT ?`)
       .all(...(memberId ? [memberId, limit] : [limit]))
-      .map(row => { const delivery = this.deliveryState(String(row.id)); return ({ purchaseId: String(row.task_id), ownerCardMemberId: row.owner_card_member_id ? String(row.owner_card_member_id) : null,
+      .map(row => { const delivery = this.delivery.state(String(row.id)); return ({ purchaseId: String(row.task_id), ownerCardMemberId: row.owner_card_member_id ? String(row.owner_card_member_id) : null,
         status: currentAuthorityStatus(String(row.status)), deliveryStatus: delivery.status, receiptStatus: delivery.receiptStatus, deliveryRecovery: delivery,
         amount: String(row.amount), createdAt: Number(row.created_at), transaction: row.transaction_id ? String(row.transaction_id) : null,
         executionMode: storedExecutionMode(row.execution_mode), monetaryEnvironment: String(row.monetary_environment),

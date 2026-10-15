@@ -392,6 +392,33 @@ it('SQL rejects retry reset and changing the persisted recovery capability', asy
   } finally { db.close(); }
 });
 
+it.each(['data', 'delivery', 'audit'] as const)('rolls back result, delivery claim and audit together when %s persistence fails', async failedWrite => {
+  const f = await fixture(); await expect(f.paid()).rejects.toThrow();
+  const token = f.ledger.claimDelivery(f.record.approvalId, 'retry')!;
+  expect(token).toBeTruthy();
+  const before = f.ledger.get(f.intent.idempotencyKey, f.principal.cardMemberId)!;
+  const events = f.ledger.events(f.intent.idempotencyKey, f.principal.cardMemberId);
+  const original = f.ledger.savedOriginalPayment(f.record.approvalId);
+  const db = new DatabaseSync(f.path);
+  try {
+    const statement = failedWrite === 'data' ? 'BEFORE UPDATE OF data ON purchases'
+      : failedWrite === 'delivery' ? "BEFORE UPDATE OF state ON purchase_delivery WHEN NEW.state='COMPLETE'"
+        : "BEFORE INSERT ON purchase_events WHEN NEW.type='delivery.COMPLETE'";
+    db.exec(`CREATE TRIGGER fail_delivery_write ${statement} BEGIN SELECT RAISE(ABORT,'fixture persistence failure'); END`);
+    expect(() => f.ledger.finish(f.record.approvalId, { transaction: FIXTURE_TRANSACTION_SIGNATURE, data: { original: true } }, undefined, token))
+      .toThrow('fixture persistence failure');
+    expect(f.ledger.get(f.intent.idempotencyKey, f.principal.cardMemberId)).toEqual(before);
+    expect(f.ledger.events(f.intent.idempotencyKey, f.principal.cardMemberId)).toEqual(events);
+    expect(f.ledger.savedOriginalPayment(f.record.approvalId)).toEqual(original);
+    db.exec('DROP TRIGGER fail_delivery_write');
+    // The same consumed claim can complete after the local write failure, without another HTTP/payment attempt.
+    f.ledger.finish(f.record.approvalId, { transaction: FIXTURE_TRANSACTION_SIGNATURE, data: { original: true } }, undefined, token);
+    expect(f.ledger.get(f.intent.idempotencyKey, f.principal.cardMemberId)).toMatchObject({ status: 'PAID', deliveryStatus: 'COMPLETE',
+      data: { original: true }, deliveryRecovery: { retryCount: 1 } });
+    expect(prepareSolanaPayment).toHaveBeenCalledOnce();
+  } finally { db.close(); }
+});
+
 it.each(['PAID', 'PAYMENT_UNKNOWN'] as const)('009 migration preserves the original %s row and financial/evidence bindings', async status => {
   const f = await fixture();
   if (status === 'PAYMENT_UNKNOWN') vi.mocked(reconcileStoredOriginalPayment).mockResolvedValue({ status: 'UNKNOWN' });
