@@ -68,11 +68,11 @@ it('quotes both real 402 resources, then evaluates the same resource and amount 
       quote: { resourceId: 'market-snapshot', resourceUrl: listed.resources[0].resourceUrl, amount: listed.resources[0].amount } });
     expect(analysis).toMatchObject({ amount: '20000000', status: 'DENIED',
       decision: { reason: 'SPEND_GRANT_SINGLE_LIMIT_EXCEEDED' }, quote: { resourceId: 'market-analysis', resourceUrl: listed.resources[1].resourceUrl } });
-    expect(f.ledger.get('snapshot-policy')?.intent).toMatchObject({ resourceScopeId: PAID_RESOURCE_SCOPE_ID,
+    expect(f.ledger.getOwned('snapshot-policy', memberId)?.intent).toMatchObject({ resourceScopeId: PAID_RESOURCE_SCOPE_ID,
       resourcePath: '/api/paid/sol-market-snapshot?asset=SOL' });
-    expect(f.ledger.get('analysis-policy')?.intent).toMatchObject({ resourceScopeId: PAID_RESOURCE_SCOPE_ID,
+    expect(f.ledger.getOwned('analysis-policy', memberId)?.intent).toMatchObject({ resourceScopeId: PAID_RESOURCE_SCOPE_ID,
       resourcePath: '/api/paid/market-analysis?asset=SOL' });
-    expect(f.ledger.list().map(item => ({ resourceId: item.resourceId, status: item.status }))).toEqual(expect.arrayContaining([
+    expect(f.ledger.listForAdministration().map(item => ({ resourceId: item.resourceId, status: item.status }))).toEqual(expect.arrayContaining([
       { resourceId: 'market-analysis', status: 'DENIED' },
       { resourceId: 'market-snapshot', status: 'APPROVED' },
     ]));
@@ -95,13 +95,13 @@ it('registers token risk, approves its fresh 0.05 quote, and replays the persist
       status: 'APPROVED', decision: { reason: 'AUTHORITY_BUDGET_AND_GRANT_PASSED' },
       quote: { resourceUrl: '/api/paid/token-risk-report?asset=SOL', network: config.network,
         assetId: config.mint, payTo: config.merchant, amount: '50000' } });
-    expect(f.ledger.get('risk-report-approved')?.intent).toMatchObject({ resourceId: 'token-risk-report',
+    expect(f.ledger.getOwned('risk-report-approved', memberId)?.intent).toMatchObject({ resourceId: 'token-risk-report',
       resourcePath: '/api/paid/token-risk-report?asset=SOL',
       authority: { operation: PAID_RESOURCE_PURCHASE_OPERATION } });
     f.ledger.close();
     const reopened = new PurchaseLedger(path, { managed: true, mode: 'live_devnet', requireSpendGrant: true, now: () => now, timeZone: () => 'Asia/Shanghai' });
     try {
-      const saved = reopened.get('risk-report-approved')!;
+      const saved = reopened.getOwned('risk-report-approved', memberId)!;
       expect(paymentEndpointForIntent(origin, saved.intent)).toBe(`${origin}/api/paid/token-risk-report?asset=SOL`);
       const replay = await requestPaidResourcePurchase(request('risk-report-approved', 'token-risk-report'),
         { config, ledger: reopened, origin, principal, fetcher: f.fetcher, now: () => now, execute: false });
@@ -140,7 +140,7 @@ it('evaluates a changed fresh 402 amount rather than a token-risk price in purch
       { config, ledger: f.ledger, origin, principal, fetcher: repriced, now: () => now, execute: false });
     expect(result).toMatchObject({ amount: '60000', status: 'DENIED',
       decision: { reason: 'SPEND_GRANT_SINGLE_LIMIT_EXCEEDED' } });
-    expect(f.ledger.get('risk-report-repriced')?.quote.amount).toBe('60000');
+    expect(f.ledger.getOwned('risk-report-repriced', memberId)?.quote.amount).toBe('60000');
     expect(f.facilitator.verify).not.toHaveBeenCalled();
     expect(f.facilitator.settle).not.toHaveBeenCalled();
   } finally { f.ledger.close(); f.store.close(); }
@@ -159,7 +159,7 @@ it('rejects an unknown resource through the registry before quoting or reserving
     await expect(requestPaidResourcePurchase({ requestId: 'unknown-resource', resourceId: 'unknown-resource', reason: 'Need data' },
       { config, ledger: f.ledger, origin, principal, fetcher: f.fetcher, now: () => now, execute: false })).rejects.toThrow('UNKNOWN_PAID_RESOURCE');
     expect(f.fetcher).not.toHaveBeenCalled();
-    expect(f.ledger.get('unknown-resource')).toBeUndefined();
+    expect(f.ledger.getOwned('unknown-resource', memberId)).toBeUndefined();
   } finally { f.ledger.close(); f.store.close(); }
 });
 
@@ -174,13 +174,13 @@ it('uses a stored legacy grant for registered resources without rewriting its op
       const purchase = await requestPaidResourcePurchase(request('legacy-resource-grant', 'market-snapshot'),
         { config, ledger: reopened, origin, principal, fetcher: f.fetcher, now: () => now, execute: false });
       expect(purchase.decision.decision).toBe('APPROVED');
-      const record = reopened.get('legacy-resource-grant')!;
+      const record = reopened.getOwned('legacy-resource-grant', memberId)!;
       expect(record.intent.authority?.operation).toBe(LEGACY_MARKET_SNAPSHOT_OPERATION);
       expect(reopened.spendGrantSummary(now)?.operation).toBe(LEGACY_MARKET_SNAPSHOT_OPERATION);
     } finally { reopened.close(); }
     const recovering = new PurchaseLedger(path, { managed: true, mode: 'live_devnet', requireSpendGrant: true, now: () => now, timeZone: () => 'Asia/Shanghai' });
     try {
-      const record = recovering.get('legacy-resource-grant')!;
+      const record = recovering.getOwned('legacy-resource-grant', memberId)!;
       expect(record.intent.authority?.operation).toBe(LEGACY_MARKET_SNAPSHOT_OPERATION);
       const replay = await requestPaidResourcePurchase(request('legacy-resource-grant', 'market-snapshot'),
         { config, ledger: recovering, origin, principal, fetcher: f.fetcher, now: () => now, execute: false });
@@ -202,14 +202,14 @@ it('rejects a 402 for the wrong registered resource before any reservation', asy
     });
     await expect(requestPaidResourcePurchase(request('wrong-quote', 'market-snapshot'),
       { config, ledger: f.ledger, origin, principal, fetcher: wrong, now: () => now, execute: false })).rejects.toThrow('INVALID_X402_QUOTE');
-    expect(f.ledger.get('wrong-quote')).toBeUndefined();
+    expect(f.ledger.getOwned('wrong-quote', memberId)).toBeUndefined();
   } finally { f.ledger.close(); f.store.close(); }
 });
 
 it('routes a live approval to the existing executor with persisted 402 terms and no offerId', async () => {
   const f = setup();
   const pay = vi.fn(async (ledger: PurchaseLedger, approvalId: string, _config: PaymentConfig, endpoint: string) => {
-    const record = ledger.get('live-snapshot')!;
+    const record = ledger.getOwned('live-snapshot', memberId)!;
     expect(record.intent.offerId).toBeUndefined();
     expect(record.quote.amount).toBe('200000');
     expect(endpoint).toBe(`${origin}/api/paid/sol-market-snapshot?asset=SOL`);
@@ -242,7 +242,7 @@ it('reopens new purchases without offerId and reconstructs the exact selected en
     f.ledger.close();
     const reopened = new PurchaseLedger(path, { managed: true, mode: 'live_devnet', requireSpendGrant: true, now: () => now, timeZone: () => 'Asia/Shanghai' });
     try {
-      const record = reopened.get('restart-resource')!;
+      const record = reopened.getOwned('restart-resource', memberId)!;
       expect(record.intent.offerId).toBeUndefined();
       expect(record.intent.resourcePath).toBe('/api/paid/sol-market-snapshot?asset=SOL');
       expect(paymentEndpointForIntent(origin, record.intent)).toBe(`${origin}${record.intent.resourcePath}`);

@@ -174,7 +174,7 @@ describe('no Mainnet or simulated execution side effects', () => {
       expect(claim).not.toHaveBeenCalled();
       expect(fetcher).not.toHaveBeenCalled();
       expect(signer.signTransactions).not.toHaveBeenCalled();
-      expect(ledger.list()).toEqual([]);
+      expect(ledger.listForAdministration()).toEqual([]);
     } finally { ledger.close(); }
   });
 
@@ -184,7 +184,7 @@ describe('no Mainnet or simulated execution side effects', () => {
     try {
       await expect(purchaseMarketSnapshot({ purchaseId: 'new-mainnet', intent: 'disabled' },
         { config, ledger, origin: 'http://127.0.0.1:3049', mode: 'live_mainnet' })).rejects.toThrow('MAINNET_EXECUTION_DISABLED');
-      expect(ledger.list()).toEqual([]);
+      expect(ledger.listForAdministration()).toEqual([]);
     } finally { ledger.close(); }
   });
 

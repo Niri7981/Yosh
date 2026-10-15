@@ -294,11 +294,11 @@ export class AppRuntime {
         let paymentChecks = 0;
         for (const item of pending) {
           if (!this.accepting) break;
-          try { let record = this.ledger.get(item.requestId, item.ownerCardMemberId);
+          try { let record = (item.ownerCardMemberId ? this.ledger.getOwned(item.requestId, item.ownerCardMemberId) : this.ledger.getLegacy(item.requestId));
             // Exclusive startup has no live submitting executor. Preserve every possible send.
             if (record?.status === 'PAYING') {
               this.ledger.unknown(record.approvalId);
-              record = this.ledger.get(item.requestId, item.ownerCardMemberId);
+              record = (item.ownerCardMemberId ? this.ledger.getOwned(item.requestId, item.ownerCardMemberId) : this.ledger.getLegacy(item.requestId));
             }
             if (record?.status === 'PAYMENT_UNKNOWN' && paymentChecks++ >= 4) continue;
             if (record) await recoverApprovedPayment(this.ledger, item.requestId, config,
@@ -338,7 +338,7 @@ export class AppRuntime {
       if (config.mode !== this.purchaseExecutionMode() || config.buyer !== wallet.address) return;
       for (const item of due) {
         if (!this.accepting) break;
-        const record = this.ledger.get(item.requestId, item.ownerCardMemberId);
+        const record = (item.ownerCardMemberId ? this.ledger.getOwned(item.requestId, item.ownerCardMemberId) : this.ledger.getLegacy(item.requestId));
         if (!record) continue;
         await recoverApprovedPayment(this.ledger, item.requestId, config, paymentEndpointForIntent(origin, record.intent),
           () => {}, item.ownerCardMemberId, { fetcher: this.dependencies.fetcher });
@@ -587,7 +587,7 @@ export class AppRuntime {
     const now = this.dependencies.now?.() ?? Date.now();
     return { member, authority: this.authority(memberId), connection: this.connectionFor(memberId).status(),
       grant: this.spendGrantSummary(memberId), grants: this.ledger.spendGrantSummaries(now, this.purchaseExecutionMode(), memberId),
-      purchases: this.ledger.list(50, memberId),
+      purchases: this.ledger.listForOwner(memberId, 50),
       budget: this.ledger.managedSummary(now, this.purchaseExecutionMode()) };
   }
   membersOverview() { return this.ledger.cardMembers().map(member => ({ member, connection: this.connectionFor(member.id).status(),
@@ -747,11 +747,12 @@ export class AppRuntime {
       ? loadPaymentConfig(this.resourceConfiguration(), undefined, this.walletAddress)
       : loadPaymentConfig({ ...process.env, DEMO_BUYER_PUBLIC_KEY: wallet.address, DEMO_MERCHANT_PUBLIC_KEY: merchant }, 'simulated');
     if (config.mode !== this.purchaseExecutionMode() || config.buyer !== wallet.address) throw new Error('产品钱包配置不匹配。');
-    const authority = this.ledger.get(id) ? undefined : this.purchaseAuthority();
+    const ownerCardMemberId = this.ledger.defaultCardMember().id;
+    const authority = this.ledger.getOwned(id, ownerCardMemberId) ? undefined : this.purchaseAuthority();
     // This legacy intent is a persisted request-hash input; branding must not break replay.
     const result = await purchaseMarketSnapshot({ purchaseId: id, intent: '2049 App test purchase' }, {
       config, ledger: this.ledger, origin, mode,
-      authority,
+      authority, ownerCardMemberId,
       legacyBindings: mode === 'simulated' ? [hash(['simulated-devnet', wallet.address, merchant])] : undefined,
     });
     const saved = result.record;

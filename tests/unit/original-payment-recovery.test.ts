@@ -143,7 +143,7 @@ it('failure before signing/submission conclusively releases reservation without 
   const f = await fixture(); const calls = network(f, absentRpc);
   vi.mocked(prepareSolanaPayment).mockRejectedValueOnce(new Error('simulation rejected'));
   await expect(executeApprovedPayment(f.ledger, f.record.approvalId, f.config, endpoint)).rejects.toThrow('reconciliation');
-  expect(f.ledger.get('original-request')?.status).toBe('FAILED');
+  expect(f.ledger.getLegacy('original-request')?.status).toBe('FAILED');
   expect(accounting(f)).toMatchObject({ paid: '0', reserved: '0', unresolved: 0 });
   expect(calls.fetcher).not.toHaveBeenCalled();
 });
@@ -163,11 +163,11 @@ it('exclusive startup releases newly evidenced unsubmitted payload while concurr
   const path = persistentPath(); const f = await fixture(path); saveOriginal(f, false);
   const calls = network(f, absentRpc);
   expect(await reconcileApprovedPayment(f.ledger, 'original-request', f.config)).toEqual({ status: 'UNKNOWN' });
-  expect(f.ledger.get('original-request')?.status).toBe('PAYING');
+  expect(f.ledger.getLegacy('original-request')?.status).toBe('PAYING');
   expect(accounting(f).reserved).toBe('10000'); expect(calls.fetcher).not.toHaveBeenCalled();
   close(f); const reopened = new PurchaseLedger(path, { mode: 'live_devnet', walletIdentity: f.config.buyer }); ledgers.push(reopened);
   reopened.recoverUnsubmittedOnStartup();
-  expect(reopened.get('original-request')?.status).toBe('FAILED');
+  expect(reopened.getLegacy('original-request')?.status).toBe('FAILED');
   expect(reopened.savedOriginalPayment(f.record.approvalId)?.state).toBe('NOT_SUBMITTED');
 });
 
@@ -176,7 +176,7 @@ it('legacy unknown without payload remains reserved across startup rather than b
   f.ledger.claim(f.record.approvalId); f.ledger.unknown(f.record.approvalId); close(f);
   const reopened = new PurchaseLedger(path, { mode: 'live_devnet', walletIdentity: f.config.buyer }); ledgers.push(reopened);
   reopened.recoverUnsubmittedOnStartup();
-  expect(reopened.get('original-request')?.status).toBe('PAYMENT_UNKNOWN');
+  expect(reopened.getLegacy('original-request')?.status).toBe('PAYMENT_UNKNOWN');
   expect(reopened.managedSummary()).toMatchObject({ paid: '0', reserved: '10000', unresolved: 1 });
 });
 
@@ -187,7 +187,7 @@ it('persists receipt signature before RPC polling when the merchant response bod
     return originalRpc(f, request);
   }, () => receipt(f));
   await expect(executeApprovedPayment(f.ledger, f.record.approvalId, f.config, endpoint)).rejects.toThrow();
-  expect(f.ledger.get('original-request')).toMatchObject({ status: 'PAID', deliveryStatus: 'PENDING', transaction: f.signature,
+  expect(f.ledger.getLegacy('original-request')).toMatchObject({ status: 'PAID', deliveryStatus: 'PENDING', transaction: f.signature,
     paymentEvidence: { version: 3, source: 'buyer_rpc', settlementConfirmed: false } });
   expect(accounting(f)).toMatchObject({ reserved: '0', paid: '10000', unresolved: 0 });
   expect(calls.merchantRequests).toHaveLength(1); expect(prepareSolanaPayment).toHaveBeenCalledTimes(1);
@@ -196,7 +196,7 @@ it('persists receipt signature before RPC polling when the merchant response bod
 it('lost HTTP response still resolves the original transfer from chain without any merchant retry', async () => {
   const f = await fixture(); const calls = network(f, request => originalRpc(f, request));
   await expect(executeApprovedPayment(f.ledger, f.record.approvalId, f.config, endpoint)).rejects.toThrow();
-  expect(f.ledger.get('original-request')).toMatchObject({ status: 'PAID', transaction: f.signature, deliveryStatus: 'PENDING' });
+  expect(f.ledger.getLegacy('original-request')).toMatchObject({ status: 'PAID', transaction: f.signature, deliveryStatus: 'PENDING' });
   expect(accounting(f)).toMatchObject({ paid: '10000', reserved: '0' });
   await reconcileApprovedPayment(f.ledger, 'original-request', f.config);
   expect(calls.merchantRequests).toHaveLength(1);
@@ -273,7 +273,7 @@ it('a wrong merchant receipt observation does not prevent resolving the correct 
   network(f, request => request.method === 'getSignaturesForAddress' ? [{ signature: f.signature, memo: f.actualMemo }]
     : request.params[0] === unrelated.signature ? unrelated.rpc : f.rpc);
   expect(await reconcileApprovedPayment(f.ledger, 'original-request', f.config)).toMatchObject({ status: 'CONFIRMED', transaction: f.signature });
-  expect(f.ledger.get('original-request')?.transaction).toBe(f.signature);
+  expect(f.ledger.getLegacy('original-request')?.transaction).toBe(f.signature);
 });
 
 it('merchant configuration changes cannot change the stored recipient of read-only original-payment recovery', async () => {
@@ -289,13 +289,13 @@ it('restart preserves immutable original evidence and repeated recovery emits on
   const reopened = new PurchaseLedger(path, { mode: 'live_devnet', walletIdentity: f.config.buyer }); ledgers.push(reopened);
   reopened.recoverUnsubmittedOnStartup();
   expect(reopened.savedOriginalPayment(f.record.approvalId)).toEqual(original);
-  expect(reopened.get('original-request')?.status).toBe('PAYMENT_UNKNOWN');
+  expect(reopened.getLegacy('original-request')?.status).toBe('PAYMENT_UNKNOWN');
   const calls = network(f, request => originalRpc(f, request));
   await Promise.all([1, 2].map(() => reconcileApprovedPayment(reopened, 'original-request', f.config)));
   await reconcileApprovedPayment(reopened, 'original-request', f.config);
-  expect(reopened.get('original-request')).toMatchObject({ status: 'PAID', deliveryStatus: 'PENDING', transaction: f.signature });
+  expect(reopened.getLegacy('original-request')).toMatchObject({ status: 'PAID', deliveryStatus: 'PENDING', transaction: f.signature });
   expect(reopened.managedSummary()).toMatchObject({ paid: '10000', reserved: '0', unresolved: 0 });
-  expect(reopened.events('original-request').filter(event => event.type === 'payment.PAID')).toHaveLength(1);
+  expect(reopened.eventsForLegacy('original-request').filter(event => event.type === 'payment.PAID')).toHaveLength(1);
   expect(calls.merchantRequests).toHaveLength(0);
   expect(loadBuyerSigner).not.toHaveBeenCalled(); expect(prepareSolanaPayment).not.toHaveBeenCalled();
 });
@@ -310,10 +310,10 @@ it('legacy settlement mutations cannot confirm or release an original-evidence r
 
 it('repeated ambiguous recovery does not duplicate payment state events or release the reservation', async () => {
   const f = await fixture(); saveOriginal(f); network(f, absentRpc);
-  const before = f.ledger.events('original-request').filter(event => event.type === 'payment.PAYMENT_UNKNOWN').length;
+  const before = f.ledger.eventsForLegacy('original-request').filter(event => event.type === 'payment.PAYMENT_UNKNOWN').length;
   await reconcileApprovedPayment(f.ledger, 'original-request', f.config);
   await reconcileApprovedPayment(f.ledger, 'original-request', f.config);
-  expect(f.ledger.events('original-request').filter(event => event.type === 'payment.PAYMENT_UNKNOWN')).toHaveLength(before);
+  expect(f.ledger.eventsForLegacy('original-request').filter(event => event.type === 'payment.PAYMENT_UNKNOWN')).toHaveLength(before);
   expect(accounting(f)).toMatchObject({ reserved: '10000', paid: '0' });
   expect(prepareSolanaPayment).not.toHaveBeenCalled();
 });
@@ -323,10 +323,10 @@ it('legacy signed payload without a send marker remains possibly submitted and c
   f.ledger.claim(f.record.approvalId); f.ledger.savePayload(f.record.approvalId, f.payload); f.ledger.unknown(f.record.approvalId); close(f);
   const reopened = new PurchaseLedger(path, { mode: 'live_devnet', walletIdentity: f.config.buyer }); ledgers.push(reopened);
   reopened.recoverUnsubmittedOnStartup();
-  expect(reopened.get('original-request')?.status).toBe('PAYMENT_UNKNOWN');
+  expect(reopened.getLegacy('original-request')?.status).toBe('PAYMENT_UNKNOWN');
   const calls = network(f, request => originalRpc(f, request));
   await reconcileApprovedPayment(reopened, 'original-request', f.config);
-  expect(reopened.get('original-request')?.status).toBe('PAID');
+  expect(reopened.getLegacy('original-request')?.status).toBe('PAID');
   expect(reopened.savedOriginalPayment(f.record.approvalId)).toMatchObject({ state: 'CONFIRMED', submissionAttemptedAt: null });
   expect(calls.merchantRequests).toHaveLength(0); expect(prepareSolanaPayment).not.toHaveBeenCalled();
 });
@@ -363,7 +363,7 @@ it('persists history continuation and backoff across restart, then confirms the 
   close(f); const reopened = new PurchaseLedger(path, { mode: 'live_devnet', walletIdentity: f.config.buyer }); ledgers.push(reopened);
   expect(reopened.reconciliation.state(f.record.intent.id)).toEqual(state);
   await reconcileApprovedPayment(reopened, 'original-request', f.config);
-  expect(reopened.get('original-request')).toMatchObject({ status: 'PAID', transaction: f.signature });
+  expect(reopened.getLegacy('original-request')).toMatchObject({ status: 'PAID', transaction: f.signature });
   expect(reopened.savedOriginalPayment(f.record.approvalId)?.evidence).toEqual(original!.evidence);
   expect(reopened.reconciliation.state(f.record.intent.id)?.attempts).toBe(2);
   expect(calls.merchantRequests).toHaveLength(0); expect(loadBuyerSigner).not.toHaveBeenCalled(); expect(prepareSolanaPayment).not.toHaveBeenCalled();

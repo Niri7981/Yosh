@@ -119,7 +119,7 @@ it.skipIf(!executable)('uses the saved provider config in the real Codex host, o
     expect(seen).toEqual([memberId]);
     expect(app.memberOverview(other).connection.enabled).toBe(false);
     expect(app.spendGrantSummary(memberId)).toBeNull();
-    expect(app.ledger.list()).toHaveLength(0);
+    expect(app.ledger.listForAdministration()).toHaveLength(0);
 
     // Grant creation changes ledger authority without rotating the live host credential.
     app.createSpendGrant({ totalLimit: '500000', singleLimit: '200000', expiresAt: Date.now() + 3_600_000 });

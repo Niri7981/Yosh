@@ -25,10 +25,10 @@ it('adds immutable runtime data, immediately selectable and persistent after reo
 });
 it('tombstones user resources, reserves old IDs and leaves ledger history and grants untouched', () => {
   const ledger = new PurchaseLedger(':memory:', { managed: true }); ledger.resources.initialize([]);
-  const history = ledger.list(); ledger.resources.add(testResource);
+  const history = ledger.listForAdministration(); ledger.resources.add(testResource);
   ledger.resources.setState('runtime-test', 'DISABLED'); expect(ledger.resources.active().some(r => r.resourceId === 'runtime-test')).toBe(false);
   ledger.resources.setState('runtime-test', 'REMOVED'); expect(ledger.resources.inspect('runtime-test').state).toBe('REMOVED');
-  expect(() => ledger.resources.add(testResource)).toThrow('RESOURCE_ID_EXISTS'); expect(ledger.list()).toEqual(history);
+  expect(() => ledger.resources.add(testResource)).toThrow('RESOURCE_ID_EXISTS'); expect(ledger.listForAdministration()).toEqual(history);
   expect(() => ledger.resources.setState('you-web-search', 'REMOVED')).toThrow('RESOURCE_READ_ONLY'); ledger.close();
 });
 it('rejects credentials, unbounded prices, foreign assets, transaction facts and unsafe endpoints', () => {

@@ -138,8 +138,8 @@ it('separates authenticated MCP purchase intents from SpendGrant authority acros
       paymentStatus: 'NOT_STARTED', deliveryStatus: 'NOT_DELIVERED', grant: null,
     });
     expect(withoutGrant).not.toHaveProperty('resource');
-    expect(app.ledger.get('intent-no-grant')?.ownerCardMemberId).toBe(first.cardMemberId);
-    expect(app.ledger.events('intent-no-grant').map(event => event.type)).toEqual(['authority.DENIED']);
+    expect(app.ledger.getOwned('intent-no-grant', first.cardMemberId)?.ownerCardMemberId).toBe(first.cardMemberId);
+    expect(app.ledger.eventsForOwner('intent-no-grant', first.cardMemberId).map(event => event.type)).toEqual(['authority.DENIED']);
     expect(await call(initialClient, 'intent-risk-no-grant', 'token-risk-report')).toMatchObject({
       resourceId: 'token-risk-report', amount: '50000', status: 'DENIED',
       decision: { reason: 'SPEND_GRANT_REQUIRED' },
@@ -182,11 +182,11 @@ it('separates authenticated MCP purchase intents from SpendGrant authority acros
       paymentStatus: 'NOT_STARTED', deliveryStatus: 'NOT_DELIVERED', reused: false,
     });
     expect(revokedResult).not.toHaveProperty('resource');
-    const denied = app.ledger.get('intent-revoked');
+    const denied = app.ledger.getOwned('intent-revoked', first.cardMemberId);
     expect(denied).toMatchObject({ status: 'DENIED', paymentPayloadPresent: false });
     expect(denied).not.toHaveProperty('transaction');
     expect(denied).not.toHaveProperty('data');
-    expect(app.ledger.events('intent-revoked').map(event => event.type)).toEqual(['authority.DENIED']);
+    expect(app.ledger.eventsForOwner('intent-revoked', first.cardMemberId).map(event => event.type)).toEqual(['authority.DENIED']);
     expect(app.ledger.managedSummary(now, 'live_devnet')).toEqual(beforeBudget);
     expect(app.spendGrantSummary()?.committed).toBe(beforeCommitted);
     expect(store.getByQuote(String(denied?.quote.extra?.memo))).toBeUndefined();
@@ -202,21 +202,21 @@ it('separates authenticated MCP purchase intents from SpendGrant authority acros
     expect(expiredResult).not.toHaveProperty('resource');
 
     expect((await purchaseRequest(origin, 'invalid-token', 'intent-invalid-token')).status).toBe(401);
-    expect(app.ledger.get('intent-invalid-token')).toBeUndefined();
+    expect(app.ledger.getOwned('intent-invalid-token', first.cardMemberId)).toBeUndefined();
     const crossOrigin = await fetch(`${origin}/api/agent/purchases`, { method: 'POST',
       headers: { authorization: `Bearer ${readConnection(directory).token}`, origin: 'https://untrusted.invalid', 'content-type': 'application/json' },
       body: JSON.stringify({ requestId: 'intent-cross-origin', resourceId: 'market-snapshot', reason: 'Check origin validation' }) });
     expect(crossOrigin.status).toBe(401);
-    expect(app.ledger.get('intent-cross-origin')).toBeUndefined();
+    expect(app.ledger.getOwned('intent-cross-origin', first.cardMemberId)).toBeUndefined();
     const beforeDisable = readConnection(directory);
     app.setAgentConnection(false, origin);
     expect((await purchaseRequest(origin, beforeDisable.token, 'intent-disabled')).status).toBe(401);
-    expect(app.ledger.get('intent-disabled')).toBeUndefined();
+    expect(app.ledger.getOwned('intent-disabled', first.cardMemberId)).toBeUndefined();
     app.setAgentConnection(true, origin);
     const memberToken = readConnection(directory).token;
     app.ledger.revokeCardMember(first.cardMemberId, now + 1);
     expect((await purchaseRequest(origin, memberToken, 'intent-revoked-member')).status).toBe(401);
-    expect(app.ledger.get('intent-revoked-member')).toBeUndefined();
+    expect(app.ledger.getOwned('intent-revoked-member', first.cardMemberId)).toBeUndefined();
 
     expect(executeApprovedPayment).not.toHaveBeenCalled();
     expect(recoverApprovedPayment).not.toHaveBeenCalled();

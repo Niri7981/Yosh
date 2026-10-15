@@ -45,9 +45,9 @@ export async function requestRegisteredResourcePurchase(raw: unknown, options: {
     } else if (existing.status === 'APPROVED') {
       try { await executeApprovedPayment(ledger, existing.approvalId, config, request.url); } catch { /* Return authoritative persisted state, including unknown submission. */ }
     }
-    return ledger.get(input.requestId, principal.cardMemberId)!;
+    return ledger.getOwned(input.requestId, principal.cardMemberId)!;
   }
-  const existing = ledger.get(input.requestId, principal.cardMemberId);
+  const existing = ledger.getOwned(input.requestId, principal.cardMemberId);
   if (existing) return reuse(existing);
   const resource = config.registeredResources?.find(candidate => candidate.resourceId === input.resourceId);
   if (!resource) throw new Error('MAINNET_REGISTERED_RESOURCE_REQUIRED');
@@ -56,7 +56,7 @@ export async function requestRegisteredResourcePurchase(raw: unknown, options: {
   const quoteRequestedAt = options.now?.() ?? Date.now();
   assertGrantPostScope(resource, ledger.activeSpendGrant(quoteRequestedAt, principal.cardMemberId, config.mode, resource.resourceId), quoteRequestedAt);
   const { challenge, quote, paymentRequiredHeader } = await fetchResourceChallenge(approvedRequest, config, options.fetcher);
-  const winner = ledger.get(input.requestId, principal.cardMemberId);
+  const winner = ledger.getOwned(input.requestId, principal.cardMemberId);
   if (winner) return reuse(winner);
   const now = options.now?.() ?? Date.now();
   const authority = ledger.spendAuthorityForDecision(principal, PAID_RESOURCE_PURCHASE_OPERATION, now, config.mode, resource.resourceId);
@@ -67,5 +67,5 @@ export async function requestRegisteredResourcePurchase(raw: unknown, options: {
   if (record.status === 'APPROVED') {
     try { await executeApprovedPayment(ledger, record.approvalId, config, approvedRequest.request.url); } catch { /* Never translate a lost submission response into 'no payment'. */ }
   }
-  return ledger.get(input.requestId, principal.cardMemberId)!;
+  return ledger.getOwned(input.requestId, principal.cardMemberId)!;
 }

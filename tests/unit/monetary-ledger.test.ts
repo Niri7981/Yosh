@@ -74,12 +74,12 @@ it('reads Mainnet fixture accounting independently while refusing Mainnet reserv
     db.prepare("INSERT INTO purchase_delivery (purchase_id,capability,state,receipt_state) VALUES (?,?,?,?)")
       .run(production.intent.id, '{"kind":"none"}', 'NOT_PAID', 'UNAVAILABLE');
     db.close();
-    expect(ledger.list()[0]).toMatchObject({ monetaryEnvironment: 'live_mainnet', network: MAINNET_NETWORK,
+    expect(ledger.listForAdministration()[0]).toMatchObject({ monetaryEnvironment: 'live_mainnet', network: MAINNET_NETWORK,
       assetId: MAINNET_USDC_MINT, assetDecimals: 6, currency: 'USDC', providerId: 'fixture-provider' });
     expect(ledger.managedSummary(now, 'live_mainnet')).toMatchObject({ paid: '0', reserved: '20000', unresolved: 1, remaining: null, paused: true });
     expect(ledger.managedSummary(now, 'simulated')).toMatchObject({ reserved: '0', unresolved: 0, remaining: '100000' });
     const test = request(); expect(ledger.reserve(test.intent, test.quote, now).status).toBe('APPROVED');
-    expect(ledger.list().find(row => row.purchaseId === test.intent.idempotencyKey)).toMatchObject({
+    expect(ledger.listForAdministration().find(row => row.purchaseId === test.intent.idempotencyKey)).toMatchObject({
       monetaryEnvironment: 'simulated', network: DEVNET_NETWORK, assetId: DEVNET_USDC_MINT,
       currency: 'USDC', providerId: 'fixture-provider',
     });
@@ -122,7 +122,7 @@ it('rejects aggregate overflow before authorization or insertion', () => {
     // Model a pre-existing reservation at the storage bound without granting a payment.
     db.prepare("UPDATE purchases SET status='APPROVED' WHERE id=?").run(value.intent.id); db.close();
     const next = request('1'); expect(() => ledger.reserve(next.intent, next.quote, now)).toThrow('MONETARY_AGGREGATE_OVERFLOW');
-    expect(ledger.get(next.intent.idempotencyKey)).toBeUndefined();
+    expect(ledger.getForAdministration(next.intent.idempotencyKey)).toBeUndefined();
     expect(ledger.managedSummary(now)).toMatchObject({ reserved: MAX_ATOMIC_AMOUNT.toString(), remaining: '0' });
   } finally { ledger.close(); }
 });
@@ -159,7 +159,7 @@ it('migrates PAID, reservation, in-flight and unknown rows without rewriting evi
   const first = new PurchaseLedger(file, { mode: 'live_devnet', now: () => now });
   try {
     expect(first.managedSummary(now)).toMatchObject({ paid: '10000', reserved: '30000', unresolved: 2 });
-    for (let i = 0; i < values.length; i++) expect(first.get(values[i].intent.idempotencyKey)).toMatchObject({ approvalId: `approval-${i}`, status: states[i],
+    for (let i = 0; i < values.length; i++) expect(first.getForAdministration(values[i].intent.idempotencyKey)).toMatchObject({ approvalId: `approval-${i}`, status: states[i],
       intent: { amount: '10000', executionBinding: 'immutable-binding' }, monetaryScope: { environment: 'live_devnet' } });
   } finally { first.close(); }
   const check = new DatabaseSync(file);
@@ -188,7 +188,7 @@ it('quarantines legacy unknown-mode reservations and never assigns them Mainnet 
     JSON.stringify(value.quote), JSON.stringify({ decision: 'APPROVED', reason: 'OLD', committedBefore: 0, remainingAfter: 0 }), 'PAYMENT_UNKNOWN', 10000, null, null, null, 'payload', null, null, null);
   db.close(); const ledger = new PurchaseLedger(file, { walletIdentity: PRODUCT_TEST_WALLET_ID });
   try {
-    const saved = ledger.get(value.intent.idempotencyKey)!;
+    const saved = ledger.getForAdministration(value.intent.idempotencyKey)!;
     expect(saved.executionMode).toBe('UNKNOWN'); expect(saved.monetaryScope.environment).toBe('legacy_test');
     expect(ledger.managedSummary(now, 'UNKNOWN')).toMatchObject({ reserved: '10000', unresolved: 1 });
     expect(ledger.managedSummary(now, 'live_mainnet')).toMatchObject({ reserved: '0', dailyLimit: null });

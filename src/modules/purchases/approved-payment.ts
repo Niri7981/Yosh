@@ -87,7 +87,7 @@ function originalEvidence(record: PurchaseRecord, payload: PaymentPayload, confi
 /** Buyer-side accounting recovery. No signer, merchant request or transaction submission. */
 export async function reconcileApprovedPayment(ledger: PurchaseLedger, taskId: string, config: PaymentConfig, trace: Trace = () => {}, memberId?: string,
   options: { automatic?: boolean; signal?: AbortSignal } = {}): Promise<ChainOutcome | undefined> {
-  const record = ledger.get(taskId, memberId);
+  const record = memberId ? ledger.getOwned(taskId, memberId) : ledger.getLegacy(taskId);
   if (!record || !['live_devnet', 'live_mainnet'].includes(record.executionMode) || !['PAYING', 'PAYMENT_UNKNOWN'].includes(record.status)) return;
   if (record.executionMode === 'live_mainnet' || config.mode === 'live_mainnet') {
     ledger.assertReplayAllowed(record, config.mode);
@@ -175,10 +175,11 @@ export async function executeApprovedPayment(ledger: PurchaseLedger, approvalId:
       const signature = readSettlementTransactionHint(response);
       if (signature) ledger.observeTransactionSignature(approvalId, signature);
     } catch { /* A missing/unusable merchant receipt cannot erase buyer evidence. */ }
-    observeDeliveryReceipt(ledger, ledger.get(record.intent.idempotencyKey, record.ownerCardMemberId)!, response, config);
+    const submitted = record.ownerCardMemberId ? ledger.getOwned(record.intent.idempotencyKey, record.ownerCardMemberId) : ledger.getLegacy(record.intent.idempotencyKey);
+    observeDeliveryReceipt(ledger, submitted!, response, config);
     reconciliationStarted = true;
     await reconcileApprovedPayment(ledger, record.intent.idempotencyKey, config, trace, record.ownerCardMemberId);
-    const paid = ledger.get(record.intent.idempotencyKey, record.ownerCardMemberId)!;
+    const paid = (record.ownerCardMemberId ? ledger.getOwned(record.intent.idempotencyKey, record.ownerCardMemberId) : ledger.getLegacy(record.intent.idempotencyKey))!;
     if (paid.status !== 'PAID') { await response.body?.cancel().catch(() => {}); throw new Error('Original transaction unresolved or failed'); }
     return await receiveOriginalDelivery(ledger, paid, response, config, endpoint, trace);
   } catch {
@@ -195,7 +196,7 @@ export async function executeApprovedPayment(ledger: PurchaseLedger, approvalId:
 /** Original payment is reconciled first; existing delivery recovery is only used after PAID. */
 export async function recoverApprovedPayment(ledger: PurchaseLedger, taskId: string, config: PaymentConfig, endpoint: string, trace: Trace = () => {}, memberId?: string,
   options: { fetcher?: typeof fetch; automatic?: boolean; signal?: AbortSignal } = {}) {
-  let record = ledger.get(taskId, memberId);
+  let record = memberId ? ledger.getOwned(taskId, memberId) : ledger.getLegacy(taskId);
   if (!record || !['live_devnet', 'live_mainnet'].includes(record.executionMode)) return;
   if (record.executionMode === 'live_mainnet' || config.mode === 'live_mainnet') {
     ledger.assertReplayAllowed(record, config.mode);
@@ -203,7 +204,7 @@ export async function recoverApprovedPayment(ledger: PurchaseLedger, taskId: str
   }
   if (['PAYING', 'PAYMENT_UNKNOWN'].includes(record.status)) {
     await reconcileApprovedPayment(ledger, taskId, config, trace, memberId, options);
-    record = ledger.get(taskId, memberId);
+    record = memberId ? ledger.getOwned(taskId, memberId) : ledger.getLegacy(taskId);
   }
   if (!record || record.status !== 'PAID' || record.deliveryStatus !== 'PENDING') return;
   return recoverPaidDelivery(ledger, record, config, endpoint, current => checkPaymentBinding(current, config, endpoint), trace, options.fetcher);

@@ -14,7 +14,7 @@ const TaskSchema = z.object({ taskId: z.string().regex(/^[a-zA-Z0-9_-]{1,80}$/),
 function publicResult(record: PurchaseRecord, ledger: PurchaseLedger) {
   const snapshot = record.data ? MarketSnapshotOutputSchema.parse(record.data) : undefined;
   return { taskId: record.intent.idempotencyKey, status: record.status, deliveryStatus: record.deliveryStatus, policy: record.decision, amountUSDC: Number(record.intent.amount) / 1_000_000,
-    transaction: record.transaction, data: snapshot, answer: record.answer, events: ledger.events(record.intent.idempotencyKey),
+    transaction: record.transaction, data: snapshot, answer: record.answer, events: ledger.eventsForLegacy(record.intent.idempotencyKey),
     summary: snapshot ? `示例快照（${snapshot.as_of}）：SOL 价格 $${snapshot.spot_price_usd}，24 小时变化 ${snapshot.change_24h_pct}%，RSI ${snapshot.rsi_14d}。数据来自 Demo fixture，不是实时行情。` : undefined };
 }
 export async function runTask(input: { taskId: string; task: string }, options: {
@@ -40,9 +40,9 @@ export async function runTask(input: { taskId: string; task: string }, options: 
         trace('COMPLETED');
       } catch { answerStatus = 'FAILED'; trace('ANALYSIS_FAILED'); }
     }
-    return { ...publicResult(ledger.get(taskId) ?? record, ledger), answerStatus };
+    return { ...publicResult(ledger.getLegacy(taskId) ?? record, ledger), answerStatus };
   }
-  const existing = ledger.get(taskId);
+  const existing = ledger.getLegacy(taskId);
   if (existing) {
     if (existing.deliveryStatus === 'COMPLETE') trace('CACHE_HIT', '复用已购买的数据，本次新增付款 0 USDC');
     const purchase = await purchaseMarketSnapshot({ purchaseId: taskId, intent: task }, {

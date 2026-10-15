@@ -81,7 +81,7 @@ it('cannot regress a paid original transaction, release it as failed, or claim a
   expect(() => f.ledger.claim(f.reserved.approvalId, f.now)).toThrow();
 
   expect(f.snapshot()).toEqual(before);
-  expect(f.ledger.get('state-fixture')).toMatchObject({ status: 'PAID', transaction: FIXTURE_TRANSACTION_SIGNATURE,
+  expect(f.ledger.getLegacy('state-fixture')).toMatchObject({ status: 'PAID', transaction: FIXTURE_TRANSACTION_SIGNATURE,
     deliveryStatus: 'PENDING' });
   expect(f.ledger.managedSummary(f.now, 'live_devnet')).toMatchObject({ paid: '10000', reserved: '0', unresolved: 0 });
 });
@@ -99,7 +99,7 @@ it('retains UNKNOWN authority and immutable evidence after a submitted attempt, 
 
   expect(f.snapshot()).toEqual(before);
   expect(f.ledger.savedOriginalPayment(f.reserved.approvalId)).toMatchObject({ evidence: original, state: 'OUTCOME_UNKNOWN' });
-  expect(f.ledger.get('state-fixture')).toMatchObject({ status: 'PAYMENT_UNKNOWN', paymentPayloadPresent: true });
+  expect(f.ledger.getLegacy('state-fixture')).toMatchObject({ status: 'PAYMENT_UNKNOWN', paymentPayloadPresent: true });
   expect(f.ledger.managedSummary(f.now + 600_000, 'live_devnet')).toMatchObject({ paid: '0', reserved: '10000', unresolved: 1 });
 });
 
@@ -110,7 +110,7 @@ it.each([false, true])('releases only demonstrably unsubmitted startup work (sig
   f.restart();
   f.ledger.recoverUnsubmittedOnStartup();
 
-  expect(f.ledger.get('state-fixture')).toMatchObject({ status: 'FAILED', deliveryStatus: 'NOT_PAID' });
+  expect(f.ledger.getLegacy('state-fixture')).toMatchObject({ status: 'FAILED', deliveryStatus: 'NOT_PAID' });
   expect(f.ledger.managedSummary(f.now, 'live_devnet')).toMatchObject({ paid: '0', reserved: '0', unresolved: 0 });
   if (signed) expect(f.ledger.savedOriginalPayment(f.reserved.approvalId)).toMatchObject({ state: 'NOT_SUBMITTED', evidence: originalBefore });
   const after = f.snapshot();
@@ -126,8 +126,8 @@ it.each([
   const before = f.snapshot();
   f.restart();
 
-  expect(f.ledger.get('state-fixture')).toMatchObject({ status: canonical });
-  expect(f.ledger.list()[0]).toMatchObject({ status: canonical });
+  expect(f.ledger.getLegacy('state-fixture')).toMatchObject({ status: canonical });
+  expect(f.ledger.listForAdministration()[0]).toMatchObject({ status: canonical });
   expect(f.snapshot()).toEqual(before);
 });
 
@@ -135,7 +135,7 @@ it('rejects a foreign persisted status at record and list boundaries while prese
   const f = fixture();
   f.database(db => db.prepare("UPDATE purchases SET status='COMPLETE'").run());
   const before = f.snapshot();
-  expect(() => f.ledger.get('state-fixture')).toThrow();
-  expect(() => f.ledger.list()).toThrow();
+  expect(() => f.ledger.getLegacy('state-fixture')).toThrow();
+  expect(() => f.ledger.listForAdministration()).toThrow();
   expect(f.snapshot()).toEqual(before);
 });

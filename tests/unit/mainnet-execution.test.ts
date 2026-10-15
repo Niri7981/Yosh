@@ -156,7 +156,7 @@ it.each(['disabled', 'wallet', 'genesis', 'mint', 'recipient', 'unregistered', '
         : condition === 'request' ? { registeredResources: [{ ...f.resource, request: { ...f.resource.request, body: 'changed' } }] } : {}) };
     await expect(executeApprovedPayment(f.ledger, record.approvalId, changed, f.resource.request.url)).rejects.toThrow();
     expect(loadBuyerSigner).not.toHaveBeenCalled(); expect(prepareSolanaPayment).not.toHaveBeenCalled(); expect(f.fetcher).not.toHaveBeenCalled();
-    expect(f.ledger.get(condition, f.principal.cardMemberId)?.status).toBe('APPROVED');
+    expect(f.ledger.getOwned(condition, f.principal.cardMemberId)?.status).toBe('APPROVED');
   } finally { f.ledger.close(); }
 });
 
@@ -168,7 +168,7 @@ it('fully valid registered Mainnet request reaches the shared execution boundary
     const quoteFetch = vi.fn<typeof fetch>().mockResolvedValue(new Response(null, { status: 402, headers: { 'PAYMENT-REQUIRED': encodePaymentRequiredHeader(f.challenge) } }));
     expect(await requestRegisteredResourcePurchase({ requestId: 'original', resourceId: f.resource.resourceId, reason: 'fixture' },
       { config: f.config, ledger: f.ledger, principal: f.principal, fetcher: quoteFetch })).toMatchObject({ status: 'PAYMENT_UNKNOWN' });
-    const original = f.ledger.get('original', f.principal.cardMemberId)!;
+    const original = f.ledger.getOwned('original', f.principal.cardMemberId)!;
     expect(original.status).toBe('PAYMENT_UNKNOWN');
     const evidence = f.ledger.savedOriginalPayment(original.approvalId)!;
     expect(evidence).toMatchObject({ state: 'OUTCOME_UNKNOWN', evidence: { monetaryScope: { environment: 'live_mainnet' }, identity: { payer: f.config.buyer, recipient: f.resource.recipient } } });
@@ -180,13 +180,13 @@ it('fully valid registered Mainnet request reaches the shared execution boundary
     const reopened = new PurchaseLedger(path, { managed: true, requireSpendGrant: true, mode: 'live_mainnet' });
     try {
       reopened.recoverUnsubmittedOnStartup();
-      expect(reopened.get('original', f.principal.cardMemberId)?.status).toBe('PAYMENT_UNKNOWN');
+      expect(reopened.getOwned('original', f.principal.cardMemberId)?.status).toBe('PAYMENT_UNKNOWN');
       reopened.setPaused(true, 'live_mainnet');
       vi.mocked(reconcileStoredOriginalPayment).mockResolvedValue({ status: 'CONFIRMED', transaction: FIXTURE_TRANSACTION_SIGNATURE, confirmationStatus: 'confirmed' });
       f.fetcher.mockClear();
       f.fetcher.mockResolvedValue(Response.json({ data: 'recovered using original credential' }));
       await recoverApprovedPayment(reopened, 'original', { ...f.config, productionExecutionEnabled: false }, f.resource.request.url, undefined, f.principal.cardMemberId);
-      expect(reopened.get('original', f.principal.cardMemberId)).toMatchObject({ status: 'PAID', deliveryStatus: 'COMPLETE' });
+      expect(reopened.getOwned('original', f.principal.cardMemberId)).toMatchObject({ status: 'PAID', deliveryStatus: 'COMPLETE' });
       expect(reopened.managedSummary(Date.now(), 'live_mainnet')).toMatchObject({ reserved: '0', paid: '10000', paused: true });
       expect(f.fetcher).toHaveBeenCalledOnce();
       expect(f.fetcher.mock.calls[0][1]?.headers).toHaveProperty('PAYMENT-SIGNATURE');
@@ -236,7 +236,7 @@ it('activation migration quarantines pre-enablement Mainnet authority without mo
     try {
       expect(reopened.controls('live_mainnet')).toMatchObject({ dailyBudget: '234567', paused: false });
       expect(reopened.spendGrantSummary(f.now, 'live_mainnet', f.principal.cardMemberId)?.status).toBe('ACTIVE');
-      expect(reopened.get('pre-enablement', f.principal.cardMemberId)?.status).toBe('PAYMENT_UNKNOWN');
+      expect(reopened.getOwned('pre-enablement', f.principal.cardMemberId)?.status).toBe('PAYMENT_UNKNOWN');
     } finally { reopened.close(); }
   } finally { if (!closed) f.ledger.close(); rmSync(directory, { recursive: true, force: true }); }
 });
@@ -294,7 +294,7 @@ it.each(['HEAD', 'PUT', 'PATCH', 'DELETE'] as const)('historical %s resource can
     expect(() => assertProductionPaymentGate(f.ledger, record, { ...f.config, registeredResources: [historical] }, request.url))
       .toThrow('MAINNET_RESOURCE_METHOD_UNSUPPORTED');
     expect(loadBuyerSigner).not.toHaveBeenCalled(); expect(prepareSolanaPayment).not.toHaveBeenCalled();
-    expect(f.ledger.get(original.intent.idempotencyKey, f.principal.cardMemberId)).toEqual(original);
+    expect(f.ledger.getOwned(original.intent.idempotencyKey, f.principal.cardMemberId)).toEqual(original);
   } finally { f.ledger.close(); }
 });
 it('accepts a 600-second route quote through the approval gate and expires it before signing', async () => {

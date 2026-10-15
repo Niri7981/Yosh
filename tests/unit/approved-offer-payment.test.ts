@@ -88,7 +88,7 @@ it('executes the persisted basic offer through claim, 0.20 signing controls, pay
     expect(runPaymentPreflight).toHaveBeenCalledWith(f.config, { amount: '200000' });
     expect(prepareSolanaPayment).toHaveBeenCalledWith(f.config, expect.anything(), f.quote, expect.any(Function),
       { amount: '200000', resource: '/api/paid/market-snapshot?asset=SOL&offer=basic' }, expect.any(Function));
-    expect(f.ledger.get('offer-basic')).toMatchObject({ status: 'PAID', deliveryStatus: 'COMPLETE', transaction: FIXTURE_TRANSACTION_SIGNATURE });
+    expect(f.ledger.getOwned('offer-basic', cardMemberId)).toMatchObject({ status: 'PAID', deliveryStatus: 'COMPLETE', transaction: FIXTURE_TRANSACTION_SIGNATURE });
   } finally { f.ledger.close(); }
 });
 
@@ -132,7 +132,7 @@ it('does not submit when authority is revoked after payload persistence', async 
   try {
     await expect(executeApprovedPayment(f.ledger, f.record.approvalId, f.config, f.endpoint)).rejects.toThrow();
     expect(fetcher).not.toHaveBeenCalled();
-    expect(f.ledger.get('offer-basic')?.status).toBe('FAILED');
+    expect(f.ledger.getOwned('offer-basic', cardMemberId)?.status).toBe('FAILED');
     expect(f.ledger.savedOriginalPayment(f.record.approvalId)?.state).toBe('NOT_SUBMITTED');
   } finally { f.ledger.close(); }
 });
@@ -158,9 +158,9 @@ it('recovers a timed-out offer with the original payload and never signs again',
   vi.mocked(reconcileStoredOriginalPayment).mockResolvedValueOnce({ status: 'UNKNOWN' });
   try {
     await expect(executeApprovedPayment(f.ledger, f.record.approvalId, f.config, f.endpoint)).rejects.toThrow();
-    expect(f.ledger.get('offer-basic')?.status).toBe('PAYMENT_UNKNOWN');
-    await recoverApprovedPayment(f.ledger, 'offer-basic', f.config, f.endpoint);
-    expect(f.ledger.get('offer-basic')).toMatchObject({ status: 'PAID', deliveryStatus: 'COMPLETE' });
+    expect(f.ledger.getOwned('offer-basic', cardMemberId)?.status).toBe('PAYMENT_UNKNOWN');
+    await recoverApprovedPayment(f.ledger, 'offer-basic', f.config, f.endpoint, undefined, cardMemberId);
+    expect(f.ledger.getOwned('offer-basic', cardMemberId)).toMatchObject({ status: 'PAID', deliveryStatus: 'COMPLETE' });
     expect(loadBuyerSigner).toHaveBeenCalledOnce();
     expect(prepareSolanaPayment).toHaveBeenCalledOnce();
     expect(fetcher.mock.calls[1][1].headers['PAYMENT-SIGNATURE']).toBe(fetcher.mock.calls[0][1].headers['PAYMENT-SIGNATURE']);
@@ -179,8 +179,8 @@ it('reopens SQLite and recovers the original unknown offer payload without re-si
     const reopened = new PurchaseLedger(path, { managed: true, mode: 'live_devnet', requireSpendGrant: true, now: () => f.initialNow, timeZone: () => 'Asia/Shanghai' });
     try {
       reopened.recoverUnsubmittedOnStartup();
-      await recoverApprovedPayment(reopened, 'offer-basic', f.config, f.endpoint);
-      expect(reopened.get('offer-basic')).toMatchObject({ status: 'PAID', deliveryStatus: 'COMPLETE' });
+      await recoverApprovedPayment(reopened, 'offer-basic', f.config, f.endpoint, undefined, cardMemberId);
+      expect(reopened.getOwned('offer-basic', cardMemberId)).toMatchObject({ status: 'PAID', deliveryStatus: 'COMPLETE' });
       expect(loadBuyerSigner).toHaveBeenCalledOnce();
       expect(prepareSolanaPayment).toHaveBeenCalledOnce();
     } finally { reopened.close(); }

@@ -87,7 +87,7 @@ it('preserves relevant extensions through decoding, intent creation and persiste
   const ledger = new PurchaseLedger(':memory:');
   try {
     expect(() => ledger.reserve(intent, decoded.accepts[0], Date.now(), 'live_mainnet')).toThrow('MAINNET_AUTHORITY_REQUIRED');
-    expect(ledger.get('production-approval')).toBeUndefined();
+    expect(ledger.getForAdministration('production-approval')).toBeUndefined();
   } finally { ledger.close(); }
 });
 
@@ -166,7 +166,7 @@ it('uses the same existing executor for declarative external Devnet facts, prese
     await executeApprovedPayment(ledger, record.approvalId, config, declared.request.url);
     expect(fetcher).toHaveBeenCalledExactlyOnceWith(declared.request.url, expect.objectContaining({ method: 'POST', body: declared.request.body,
       headers: expect.objectContaining(declared.request.headers) }));
-    expect(ledger.get('external-devnet')).toMatchObject({ status: 'PAID', deliveryStatus: 'COMPLETE', data: { data: 'fixture' } });
+    expect(ledger.getForAdministration('external-devnet')).toMatchObject({ status: 'PAID', deliveryStatus: 'COMPLETE', data: { data: 'fixture' } });
     expect(ledger.savedOriginalPayment(record.approvalId)?.evidence.identity.actualMemo).toBe('fixture-random-sdk-memo');
     const database = new DatabaseSync(path);
     expect(() => database.prepare('UPDATE purchases SET purchase=? WHERE id=?').run(JSON.stringify({ ...intent, httpRequest: { ...intent.httpRequest, body: 'changed' } }), intent.id))
@@ -174,7 +174,7 @@ it('uses the same existing executor for declarative external Devnet facts, prese
     database.close();
     ledger.close(); closed = true;
     const reopened = new PurchaseLedger(path, { mode: 'live_devnet', walletIdentity: signer.address });
-    try { expect(reopened.get('external-devnet')?.intent.x402Challenge?.extensions).toEqual(required.extensions); }
+    try { expect(reopened.getForAdministration('external-devnet')?.intent.x402Challenge?.extensions).toEqual(required.extensions); }
     finally { reopened.close(); }
     expect(prepareSolanaPayment).toHaveBeenCalledOnce();
   } finally { if (!closed) ledger.close(); rmSync(directory, { recursive: true, force: true }); }

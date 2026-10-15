@@ -90,9 +90,9 @@ export async function requestMarketPurchase(raw: unknown, options: {
     } else if (['PAYING', 'PAYMENT_UNKNOWN'].includes(record.status) || record.deliveryStatus === 'PENDING') {
       await (options.recover ?? recoverApprovedPayment)(options.ledger, input.requestId, options.config, endpoint, undefined, principal.cardMemberId);
     }
-    return result(options.ledger.get(input.requestId, principal.cardMemberId)!, input.offerId, reused, executionMode);
+    return result(options.ledger.getOwned(input.requestId, principal.cardMemberId)!, input.offerId, reused, executionMode);
   }
-  const existing = options.ledger.get(input.requestId, principal.cardMemberId);
+  const existing = options.ledger.getOwned(input.requestId, principal.cardMemberId);
   if (existing) {
     options.ledger.assertReplayAllowed(existing, executionMode, options.ledger.paymentScope(options.config, executionMode));
     if (existing.intent.requestHash !== requestHash || existing.intent.offerId !== input.offerId) throw new Error('REQUEST_ID_CONFLICT');
@@ -125,7 +125,7 @@ export async function requestMarketPurchase(raw: unknown, options: {
     executionBinding: paymentBinding(config, endpoint.href, quote), authority, offerId: input.offerId, reason: input.reason, now: requestStartedAt });
   // Another request can finish its quote while this one is in flight. Reuse its
   // immutable nonce/quote instead of comparing or replacing it with a new one.
-  const winner = options.ledger.get(input.requestId, principal.cardMemberId);
+  const winner = options.ledger.getOwned(input.requestId, principal.cardMemberId);
   if (winner) {
     options.ledger.assertReplayAllowed(winner, executionMode, options.ledger.paymentScope(options.config, executionMode));
     if (winner.intent.requestHash !== requestHash || winner.intent.offerId !== input.offerId) throw new Error('REQUEST_ID_CONFLICT');

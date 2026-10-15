@@ -94,7 +94,7 @@ it.each(['market-snapshot', 'market-analysis', 'token-risk-report'] as const)('p
     expect(runPaymentPreflight).toHaveBeenCalledWith(f.config, { amount: f.amount });
     expect(prepareSolanaPayment).toHaveBeenCalledWith(f.config, expect.anything(), f.quote, expect.any(Function),
       { amount: f.amount, resource: paidResource(id).path }, expect.any(Function));
-    expect(f.ledger.get(`new-${id}`)).toMatchObject({ status: 'PAID', deliveryStatus: 'COMPLETE', data: payloads[id] });
+    expect(f.ledger.getOwned(`new-${id}`, memberId)).toMatchObject({ status: 'PAID', deliveryStatus: 'COMPLETE', data: payloads[id] });
   } finally { f.ledger.close(); }
 });
 
@@ -118,10 +118,10 @@ it('rejects malformed token risk delivery, then recovers with the original payme
   vi.stubGlobal('fetch', fetcher);
   try {
     await expect(executeApprovedPayment(f.ledger, f.record.approvalId, f.config, f.endpoint)).rejects.toThrow();
-    expect(f.ledger.get('new-token-risk-report')).toMatchObject({ status: 'PAID', deliveryStatus: 'PENDING' });
-    expect(f.ledger.get('new-token-risk-report')?.data).toBeUndefined();
-    await recoverApprovedPayment(f.ledger, 'new-token-risk-report', f.config, f.endpoint);
-    expect(f.ledger.get('new-token-risk-report')).toMatchObject({ status: 'PAID', deliveryStatus: 'COMPLETE',
+    expect(f.ledger.getOwned('new-token-risk-report', memberId)).toMatchObject({ status: 'PAID', deliveryStatus: 'PENDING' });
+    expect(f.ledger.getOwned('new-token-risk-report', memberId)?.data).toBeUndefined();
+    await recoverApprovedPayment(f.ledger, 'new-token-risk-report', f.config, f.endpoint, undefined, memberId);
+    expect(f.ledger.getOwned('new-token-risk-report', memberId)).toMatchObject({ status: 'PAID', deliveryStatus: 'COMPLETE',
       data: payloads['token-risk-report'] });
     expect(loadBuyerSigner).toHaveBeenCalledOnce();
     expect(prepareSolanaPayment).toHaveBeenCalledOnce();
@@ -138,15 +138,15 @@ it('recovers a resource purchase after restart from the saved payload and resour
   vi.mocked(reconcileStoredOriginalPayment).mockResolvedValueOnce({ status: 'UNKNOWN' });
   try {
     await expect(executeApprovedPayment(f.ledger, f.record.approvalId, f.config, f.endpoint)).rejects.toThrow();
-    expect(f.ledger.get('new-market-analysis')?.status).toBe('PAYMENT_UNKNOWN');
+    expect(f.ledger.getOwned('new-market-analysis', memberId)?.status).toBe('PAYMENT_UNKNOWN');
     f.ledger.close();
     const reopened = new PurchaseLedger(path, { managed: true, mode: 'live_devnet', requireSpendGrant: true, now: () => now, timeZone: () => 'Asia/Shanghai' });
     try {
       reopened.recoverUnsubmittedOnStartup();
-      const stored = reopened.get('new-market-analysis')!;
+      const stored = reopened.getOwned('new-market-analysis', memberId)!;
       expect(stored.intent.offerId).toBeUndefined();
-      await recoverApprovedPayment(reopened, 'new-market-analysis', f.config, paymentEndpointForIntent('http://127.0.0.1:3049', stored.intent));
-      expect(reopened.get('new-market-analysis')).toMatchObject({ status: 'PAID', deliveryStatus: 'COMPLETE', data: payloads['market-analysis'] });
+      await recoverApprovedPayment(reopened, 'new-market-analysis', f.config, paymentEndpointForIntent('http://127.0.0.1:3049', stored.intent), undefined, memberId);
+      expect(reopened.getOwned('new-market-analysis', memberId)).toMatchObject({ status: 'PAID', deliveryStatus: 'COMPLETE', data: payloads['market-analysis'] });
       expect(loadBuyerSigner).toHaveBeenCalledOnce();
       expect(prepareSolanaPayment).toHaveBeenCalledOnce();
       expect(fetcher.mock.calls[1][1].headers['PAYMENT-SIGNATURE']).toBe(fetcher.mock.calls[0][1].headers['PAYMENT-SIGNATURE']);

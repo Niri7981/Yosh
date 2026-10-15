@@ -129,13 +129,13 @@ it('reuses the member, grant, ledger, purchase replay and wallet when only confi
     expect(second.ledger.defaultCardMember()).toEqual(member);
     expect((await second.overview()).budget).toMatchObject({ dailyLimit: '1000000', paused: true });
     expect(second.ledger.spendGrantSummary()).toMatchObject({ id: grant.id, version: grant.version, status: 'ACTIVE', totalLimit: '1000000' });
-    const restored = second.ledger.get('pre-rename-purchase');
+    const restored = second.ledger.getForAdministration('pre-rename-purchase');
     expect(restored?.intent.authority?.grantId).toBe(grant.id);
     expect(restored?.ownerCardMemberId).toBe(member.id);
     expect(restored?.intent.requestHash).toBe(hash('2049 App test purchase'));
     expect(await second.createTestPurchase('pre-rename-purchase', origin)).toEqual(purchase);
     expect(await second.initializeWallet()).toEqual({ address: wallet.address, reused: true });
-    expect(second.ledger.list()).toHaveLength(1);
+    expect(second.ledger.listForAdministration()).toHaveLength(1);
     expect(creates).toBe(1);
     expect(APP_WALLET_KEYCHAIN).toEqual({ service: 'com.2049.wallet.v1', account: 'consumer-wallet-v1' });
   } finally { second.close(); }

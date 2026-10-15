@@ -84,7 +84,7 @@ describe('durable approval and budget ledger', () => {
       expect(() => ledger.reserve({ ...f.intent,
         httpRequest: { url: 'https://provider.fixture.example/data', method: 'GET', access: 'https', headers: {} },
       }, f.quote, now)).toThrow();
-      expect(ledger.list()).toHaveLength(0);
+      expect(ledger.listForAdministration()).toHaveLength(0);
       expect(ledger.summary(now).reservedUSDC).toBe(0);
     } finally { ledger.close(); }
   });
@@ -116,7 +116,7 @@ describe('durable approval and budget ledger', () => {
       const f = fixture();
       expect(b.reserve(f.intent, f.quote, now).decision.reason).toBe('DAILY_BUDGET_EXCEEDED');
       const c = new PurchaseLedger(path);
-      try { expect(c.get(f.intent.idempotencyKey)?.status).toBe('DENIED'); } finally { c.close(); }
+      try { expect(c.getLegacy(f.intent.idempotencyKey)?.status).toBe('DENIED'); } finally { c.close(); }
     } finally { a.close(); b.close(); rmSync(dir, { recursive: true, force: true }); }
   });
   it('a crash after claim remains locked after reopen', () => {
@@ -124,7 +124,7 @@ describe('durable approval and budget ledger', () => {
     const a = new PurchaseLedger(path); const f = fixture();
     const r = a.reserve(f.intent, f.quote, now); a.claim(r.approvalId, now); a.close();
     const b = new PurchaseLedger(path);
-    try { expect(() => b.claim(r.approvalId, now)).toThrow(); expect(b.get(f.intent.idempotencyKey)?.status).toBe('PAYING'); }
+    try { expect(() => b.claim(r.approvalId, now)).toThrow(); expect(b.getLegacy(f.intent.idempotencyKey)?.status).toBe('PAYING'); }
     finally { b.close(); rmSync(dir, { recursive: true, force: true }); }
   });
 });
@@ -137,8 +137,8 @@ it('expired unclaimed approvals release budget but claimed payments stay frozen'
     const record = ledger.reserve(claimed.intent, claimed.quote, now);
     ledger.claim(record.approvalId, now);
     ledger.releaseExpired(now + 300001);
-    expect(ledger.get(first.intent.idempotencyKey)?.status).toBe('EXPIRED');
-    expect(ledger.get(claimed.intent.idempotencyKey)?.status).toBe('PAYING');
+    expect(ledger.getLegacy(first.intent.idempotencyKey)?.status).toBe('EXPIRED');
+    expect(ledger.getLegacy(claimed.intent.idempotencyKey)?.status).toBe('PAYING');
     expect(ledger.summary(now + 300001)).toEqual({ paidUSDC: 0, reservedUSDC: 0.1, remainingUSDC: 0.9, unresolved: 1 });
     expect(() => ledger.claim(record.approvalId, now + 300001)).toThrow();
     const next = fixture(); next.intent.createdAt += 300001; next.intent.expiresAt += 300001;

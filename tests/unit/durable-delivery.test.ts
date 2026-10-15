@@ -110,7 +110,7 @@ it('keeps evidenced UNKNOWN money reserved while another member buys an independ
   f.ledger.close(); const reopened = f.reopen();
   expect(reopened.claim(independent.approvalId, f.now(), undefined, 'live_mainnet').status).toBe('PAYING');
   expect(reopened.managedSummary(f.now(), 'live_mainnet')).toMatchObject({ reserved: '20000', paid: '0', remaining: '80000' });
-  expect(reopened.get(f.intent.idempotencyKey, f.principal.cardMemberId)?.status).toBe('PAYMENT_UNKNOWN');
+  expect(reopened.getOwned(f.intent.idempotencyKey, f.principal.cardMemberId)?.status).toBe('PAYMENT_UNKNOWN');
   expect(reopened.savedOriginalPayment(f.record.approvalId)).toEqual(original);
   expect(prepareSolanaPayment).toHaveBeenCalledOnce();
 });
@@ -146,7 +146,7 @@ it('keeps legacy or invalid-evidence UNKNOWN payments blocking the scope rather 
 
 it.each(['DISABLED', 'REMOVED'] as const)('recovers the same paid Mainnet order after resource %s and restart without new spending', async state => {
   const f = await fixture(TEST_CACHED_DELIVERY, 'live_mainnet'); await expect(f.paid()).rejects.toThrow();
-  const before = f.ledger.get(f.intent.idempotencyKey, f.principal.cardMemberId)!;
+  const before = f.ledger.getOwned(f.intent.idempotencyKey, f.principal.cardMemberId)!;
   expect(before).toMatchObject({ status: 'PAID', deliveryStatus: 'PENDING' });
   const original = f.ledger.savedOriginalPayment(f.record.approvalId);
   const payload = f.ledger.savedPayload(f.record.approvalId);
@@ -163,7 +163,7 @@ it.each(['DISABLED', 'REMOVED'] as const)('recovers the same paid Mainnet order 
   }));
   expect(new Headers(fetcher.mock.calls[0][1]?.headers).get('PAYMENT-SIGNATURE'))
     .toBe(new Headers(f.initial.mock.calls[0][1]?.headers).get('PAYMENT-SIGNATURE'));
-  expect(reopened.get(f.intent.idempotencyKey, f.principal.cardMemberId)).toMatchObject({
+  expect(reopened.getOwned(f.intent.idempotencyKey, f.principal.cardMemberId)).toMatchObject({
     status: 'PAID', deliveryStatus: 'COMPLETE', transaction: before.transaction, paymentEvidence: before.paymentEvidence,
     intent: before.intent, data: { result: 'original-data' }, deliveryRecovery: { retryCount: 1 },
   });
@@ -171,7 +171,7 @@ it.each(['DISABLED', 'REMOVED'] as const)('recovers the same paid Mainnet order 
   expect(reopened.savedPayload(f.record.approvalId)).toEqual(payload);
   expect(reopened.managedSummary(f.now(), 'live_mainnet')).toEqual(summary);
   expect(reopened.spendGrantSummary(f.now(), 'live_mainnet', f.principal.cardMemberId, f.resource.resourceId)).toEqual(grant);
-  expect(reopened.events(f.intent.idempotencyKey, f.principal.cardMemberId).filter(event => event.type === 'payment.PAID')).toHaveLength(1);
+  expect(reopened.eventsForOwner(f.intent.idempotencyKey, f.principal.cardMemberId).filter(event => event.type === 'payment.PAID')).toHaveLength(1);
   expect(loadBuyerSigner).toHaveBeenCalledOnce(); expect(prepareSolanaPayment).toHaveBeenCalledOnce();
   expect(reconcileStoredOriginalPayment).toHaveBeenCalledOnce(); expect(f.initial).toHaveBeenCalledOnce();
 });
@@ -183,8 +183,8 @@ it('rejects fresh purchases and unclaimed Mainnet approvals after disabling the 
   await expect(requestRegisteredResourcePurchase({ requestId: 'new-after-disable', resourceId: f.resource.resourceId, reason: 'fixture' },
     { ledger: f.ledger, config: f.config, principal: f.principal, fetcher })).rejects.toThrow('MAINNET_REGISTERED_RESOURCE_REQUIRED');
   await expect(f.paid()).rejects.toThrow('MAINNET_REGISTERED_RESOURCE_REQUIRED');
-  expect(f.ledger.get('new-after-disable', f.principal.cardMemberId)).toBeUndefined();
-  expect(f.ledger.get(f.intent.idempotencyKey, f.principal.cardMemberId)?.status).toBe('APPROVED');
+  expect(f.ledger.getOwned('new-after-disable', f.principal.cardMemberId)).toBeUndefined();
+  expect(f.ledger.getOwned(f.intent.idempotencyKey, f.principal.cardMemberId)?.status).toBe('APPROVED');
   expect(fetcher).not.toHaveBeenCalled(); expect(f.initial).not.toHaveBeenCalled();
   expect(loadBuyerSigner).not.toHaveBeenCalled(); expect(prepareSolanaPayment).not.toHaveBeenCalled();
 });
@@ -221,7 +221,7 @@ it('accepts the initial delivery if the resource is disabled after submission an
     return { status: 'CONFIRMED', transaction: FIXTURE_TRANSACTION_SIGNATURE, confirmationStatus: 'finalized' };
   });
   await f.paid();
-  expect(f.ledger.get(f.intent.idempotencyKey, f.principal.cardMemberId)).toMatchObject({
+  expect(f.ledger.getOwned(f.intent.idempotencyKey, f.principal.cardMemberId)).toMatchObject({
     status: 'PAID', deliveryStatus: 'COMPLETE', deliveryRecovery: { retryCount: 0 },
   });
   expect(prepareSolanaPayment).toHaveBeenCalledOnce(); expect(f.initial).toHaveBeenCalledOnce();
@@ -231,17 +231,21 @@ it('inactive resource recovery cannot read another owner or send the original cr
   const f = await fixture(TEST_CACHED_DELIVERY, 'live_mainnet'); await expect(f.paid()).rejects.toThrow();
   f.deactivate();
   const fetcher = vi.fn<typeof fetch>();
+  const before = f.ledger.getOwned(f.intent.idempotencyKey, f.principal.cardMemberId);
+  await recoverApprovedPayment(f.ledger, f.intent.idempotencyKey, f.config, f.resource.request.url, undefined, undefined, { fetcher });
+  expect(fetcher).not.toHaveBeenCalled();
+  expect(f.ledger.getOwned(f.intent.idempotencyKey, f.principal.cardMemberId)).toEqual(before);
   const other = f.ledger.createCardMember('Other fixture member');
   await recoverApprovedPayment(f.ledger, f.intent.idempotencyKey, f.config, f.resource.request.url, undefined, other.id, { fetcher });
-  expect(f.ledger.get(f.intent.idempotencyKey, other.id)).toBeUndefined();
-  expect(f.ledger.get(f.intent.idempotencyKey, f.principal.cardMemberId)).toMatchObject({
+  expect(f.ledger.getOwned(f.intent.idempotencyKey, other.id)).toBeUndefined();
+  expect(f.ledger.getOwned(f.intent.idempotencyKey, f.principal.cardMemberId)).toMatchObject({
     status: 'PAID', deliveryStatus: 'PENDING', deliveryRecovery: { retryCount: 0 },
   });
   const original = f.ledger.savedOriginalPayment(f.record.approvalId);
   await recoverApprovedPayment(f.ledger, f.intent.idempotencyKey, f.config, 'https://unapproved.example/steal', undefined,
     f.principal.cardMemberId, { fetcher });
   expect(fetcher).not.toHaveBeenCalled();
-  expect(f.ledger.get(f.intent.idempotencyKey, f.principal.cardMemberId)).toMatchObject({
+  expect(f.ledger.getOwned(f.intent.idempotencyKey, f.principal.cardMemberId)).toMatchObject({
     status: 'PAID', deliveryStatus: 'UNSUPPORTED', deliveryRecovery: { retryCount: 0, lastError: 'DELIVERY_RECOVERY_BINDING_INVALID' },
   });
   expect(f.ledger.savedOriginalPayment(f.record.approvalId)).toEqual(original);
@@ -251,13 +255,13 @@ it('inactive resource recovery cannot read another owner or send the original cr
 it('persists independent PAID, receipt CONFIRMED and delivered success without a delivery retry', async () => {
   const f = await fixture(); f.initial.mockResolvedValue(f.response());
   await f.paid();
-  expect(f.ledger.get(f.intent.idempotencyKey, f.principal.cardMemberId)).toMatchObject({ status: 'PAID', receiptStatus: 'CONFIRMED', deliveryStatus: 'COMPLETE', deliveryRecovery: { retryCount: 0 } });
+  expect(f.ledger.getOwned(f.intent.idempotencyKey, f.principal.cardMemberId)).toMatchObject({ status: 'PAID', receiptStatus: 'CONFIRMED', deliveryStatus: 'COMPLETE', deliveryRecovery: { retryCount: 0 } });
 });
 it('lost response remains paid and receipt unavailable until a later delivery-only retry succeeds', async () => {
   const f = await fixture(); await expect(f.paid()).rejects.toThrow();
-  expect(f.ledger.get(f.intent.idempotencyKey, f.principal.cardMemberId)).toMatchObject({ status: 'PAID', receiptStatus: 'UNAVAILABLE', deliveryStatus: 'PENDING' });
+  expect(f.ledger.getOwned(f.intent.idempotencyKey, f.principal.cardMemberId)).toMatchObject({ status: 'PAID', receiptStatus: 'UNAVAILABLE', deliveryStatus: 'PENDING' });
   const retry = vi.fn<typeof fetch>().mockResolvedValue(f.response()); await f.retry(retry);
-  expect(f.ledger.get(f.intent.idempotencyKey, f.principal.cardMemberId)).toMatchObject({ status: 'PAID', receiptStatus: 'CONFIRMED', deliveryStatus: 'COMPLETE', deliveryRecovery: { retryCount: 1 } });
+  expect(f.ledger.getOwned(f.intent.idempotencyKey, f.principal.cardMemberId)).toMatchObject({ status: 'PAID', receiptStatus: 'CONFIRMED', deliveryStatus: 'COMPLETE', deliveryRecovery: { retryCount: 1 } });
   const request = retry.mock.calls[0][1]; expect(request).toMatchObject({ method: 'POST', body: f.resource.request.body, redirect: 'error' });
   expect(request?.headers).toMatchObject({ 'PAYMENT-RECOVERY': '1', 'PAYMENT-SIGNATURE': f.initial.mock.calls[0][1]?.headers && new Headers(f.initial.mock.calls[0][1]?.headers).get('PAYMENT-SIGNATURE') });
   expect(loadBuyerSigner).toHaveBeenCalledOnce(); expect(prepareSolanaPayment).toHaveBeenCalledOnce();
@@ -266,21 +270,21 @@ it('lost response remains paid and receipt unavailable until a later delivery-on
 it('valid delivery can be complete while the independent receipt remains unavailable', async () => {
   const f = await fixture(); await expect(f.paid()).rejects.toThrow();
   await f.retry(vi.fn<typeof fetch>().mockResolvedValue(f.response(false)));
-  expect(f.ledger.get(f.intent.idempotencyKey, f.principal.cardMemberId)).toMatchObject({ status: 'PAID', receiptStatus: 'UNAVAILABLE', deliveryStatus: 'COMPLETE' });
+  expect(f.ledger.getOwned(f.intent.idempotencyKey, f.principal.cardMemberId)).toMatchObject({ status: 'PAID', receiptStatus: 'UNAVAILABLE', deliveryStatus: 'COMPLETE' });
 });
 it('accepts a bounded JSON POST creation response with HTTP 201 as delivered data', async () => {
   const f = await fixture(); await expect(f.paid()).rejects.toThrow();
   await f.retry(vi.fn<typeof fetch>().mockResolvedValue(new Response('{"created":true}', {
     status: 201, headers: { 'content-type': 'application/json' },
   })));
-  expect(f.ledger.get(f.intent.idempotencyKey, f.principal.cardMemberId)).toMatchObject({ status: 'PAID', deliveryStatus: 'COMPLETE', data: { created: true } });
+  expect(f.ledger.getOwned(f.intent.idempotencyKey, f.principal.cardMemberId)).toMatchObject({ status: 'PAID', deliveryStatus: 'COMPLETE', data: { created: true } });
 });
 it('claims only one concurrent retry and repeated completed calls send no request', async () => {
   const f = await fixture(); await expect(f.paid()).rejects.toThrow();
   let release!: (response: Response) => void;
   const retry = vi.fn<typeof fetch>().mockImplementation(() => new Promise(resolve => { release = resolve; }));
   const first = f.retry(retry); await f.retry(retry);
-  expect(retry).toHaveBeenCalledOnce(); expect(f.ledger.get(f.intent.idempotencyKey, f.principal.cardMemberId)?.deliveryRecovery.retryCount).toBe(1);
+  expect(retry).toHaveBeenCalledOnce(); expect(f.ledger.getOwned(f.intent.idempotencyKey, f.principal.cardMemberId)?.deliveryRecovery.retryCount).toBe(1);
   release(f.response()); await first; await f.retry(retry);
   expect(retry).toHaveBeenCalledOnce();
 });
@@ -289,22 +293,22 @@ it('another SQLite handle cannot steal an active delivery claim', async () => {
   const token = f.ledger.claimDelivery(f.record.approvalId, 'retry'); expect(token).toBeTypeOf('string');
   const other = f.reopen();
   expect(other.claimDelivery(f.record.approvalId, 'retry')).toBeUndefined();
-  expect(other.get(f.intent.idempotencyKey, f.principal.cardMemberId)?.deliveryRecovery.retryCount).toBe(1);
+  expect(other.getOwned(f.intent.idempotencyKey, f.principal.cardMemberId)?.deliveryRecovery.retryCount).toBe(1);
 });
 it('restart preserves consumed attempts, recovers an interrupted claim and rejects the stale owner', async () => {
   const f = await fixture(); await expect(f.paid()).rejects.toThrow();
   const token = f.ledger.claimDelivery(f.record.approvalId, 'retry')!; f.ledger.close();
   const reopened = f.reopen(); reopened.recoverDeliveryClaimsOnStartup();
-  expect(reopened.get(f.intent.idempotencyKey, f.principal.cardMemberId)).toMatchObject({ status: 'PAID', deliveryStatus: 'PENDING', deliveryRecovery: { retryCount: 1, lastError: 'DELIVERY_ATTEMPT_INTERRUPTED' } });
+  expect(reopened.getOwned(f.intent.idempotencyKey, f.principal.cardMemberId)).toMatchObject({ status: 'PAID', deliveryStatus: 'PENDING', deliveryRecovery: { retryCount: 1, lastError: 'DELIVERY_ATTEMPT_INTERRUPTED' } });
   expect(() => reopened.finish(f.record.approvalId, { transaction: FIXTURE_TRANSACTION_SIGNATURE, data: { stale: true } }, undefined, token)).toThrow('DELIVERY_CLAIM_MISMATCH');
   f.advance(); await f.retry(vi.fn<typeof fetch>().mockResolvedValue(f.response()), reopened);
-  expect(reopened.get(f.intent.idempotencyKey, f.principal.cardMemberId)).toMatchObject({ deliveryStatus: 'COMPLETE', deliveryRecovery: { retryCount: 2 } });
+  expect(reopened.getOwned(f.intent.idempotencyKey, f.principal.cardMemberId)).toMatchObject({ deliveryStatus: 'COMPLETE', deliveryRecovery: { retryCount: 2 } });
 });
 it('four failed retries exhaust durably; requests and restart cannot reset the budget', async () => {
   const f = await fixture(); await expect(f.paid()).rejects.toThrow();
   const retry = vi.fn<typeof fetch>().mockRejectedValue(new Error('Unavailable'));
   for (let i = 0; i < DELIVERY_RETRY_LIMIT; i++) { await f.retry(retry); f.advance(); }
-  expect(f.ledger.get(f.intent.idempotencyKey, f.principal.cardMemberId)).toMatchObject({ status: 'PAID', deliveryStatus: 'EXHAUSTED', deliveryRecovery: { retryCount: 4 } });
+  expect(f.ledger.getOwned(f.intent.idempotencyKey, f.principal.cardMemberId)).toMatchObject({ status: 'PAID', deliveryStatus: 'EXHAUSTED', deliveryRecovery: { retryCount: 4 } });
   expect(f.ledger.pendingRecovery()).toEqual([]); await f.retry(retry);
   f.ledger.close(); const reopened = f.reopen(); reopened.recoverDeliveryClaimsOnStartup(); await f.retry(retry, reopened);
   expect(retry).toHaveBeenCalledTimes(4); expect(prepareSolanaPayment).toHaveBeenCalledOnce();
@@ -314,12 +318,12 @@ it('a crash during the last attempt becomes exhausted without granting a fifth a
   for (let i = 0; i < 3; i++) { await f.retry(vi.fn<typeof fetch>().mockRejectedValue(new Error('Unavailable'))); f.advance(); }
   expect(f.ledger.claimDelivery(f.record.approvalId, 'retry')).toBeTypeOf('string'); f.ledger.close();
   const reopened = f.reopen(); reopened.recoverDeliveryClaimsOnStartup();
-  expect(reopened.get(f.intent.idempotencyKey, f.principal.cardMemberId)).toMatchObject({ deliveryStatus: 'EXHAUSTED', deliveryRecovery: { retryCount: 4 } });
+  expect(reopened.getOwned(f.intent.idempotencyKey, f.principal.cardMemberId)).toMatchObject({ deliveryStatus: 'EXHAUSTED', deliveryRecovery: { retryCount: 4 } });
   expect(reopened.claimDelivery(f.record.approvalId, 'retry')).toBeUndefined();
 });
 it('backoff survives restart and repeated early calls do not consume another attempt', async () => {
   const f = await fixture(); await expect(f.paid()).rejects.toThrow(); const retry = vi.fn<typeof fetch>().mockRejectedValue(new Error('Unavailable'));
-  await f.retry(retry); const state = f.ledger.get(f.intent.idempotencyKey, f.principal.cardMemberId)!.deliveryRecovery;
+  await f.retry(retry); const state = f.ledger.getOwned(f.intent.idempotencyKey, f.principal.cardMemberId)!.deliveryRecovery;
   expect(state.nextAttemptAt).toBe(f.now() + 1000); f.ledger.close(); const reopened = f.reopen();
   await f.retry(retry, reopened); expect(retry).toHaveBeenCalledOnce();
   f.advance(1000); await f.retry(retry, reopened); expect(retry).toHaveBeenCalledTimes(2);
@@ -327,12 +331,12 @@ it('backoff survives restart and repeated early calls do not consume another att
 it.each([{ kind: 'none' } as const, null])('unsupported or absent capability never sends a delivery request', async capability => {
   const f = await fixture(capability); await expect(f.paid()).rejects.toThrow();
   const retry = vi.fn<typeof fetch>(); await f.retry(retry); await f.retry(retry);
-  expect(retry).not.toHaveBeenCalled(); expect(f.ledger.get(f.intent.idempotencyKey, f.principal.cardMemberId)).toMatchObject({ status: 'PAID', deliveryStatus: 'UNSUPPORTED', deliveryRecovery: { retryCount: 0 } });
+  expect(retry).not.toHaveBeenCalled(); expect(f.ledger.getOwned(f.intent.idempotencyKey, f.principal.cardMemberId)).toMatchObject({ status: 'PAID', deliveryStatus: 'UNSUPPORTED', deliveryRecovery: { retryCount: 0 } });
 });
 it('unknown payment never enters paid-delivery recovery or consumes an attempt', async () => {
   const f = await fixture(); vi.mocked(reconcileStoredOriginalPayment).mockResolvedValue({ status: 'UNKNOWN' });
   await expect(f.paid()).rejects.toThrow(); const retry = vi.fn<typeof fetch>(); await f.retry(retry);
-  expect(retry).not.toHaveBeenCalled(); expect(f.ledger.get(f.intent.idempotencyKey, f.principal.cardMemberId)).toMatchObject({ status: 'PAYMENT_UNKNOWN', deliveryStatus: 'NOT_PAID', deliveryRecovery: { retryCount: 0 } });
+  expect(retry).not.toHaveBeenCalled(); expect(f.ledger.getOwned(f.intent.idempotencyKey, f.principal.cardMemberId)).toMatchObject({ status: 'PAYMENT_UNKNOWN', deliveryStatus: 'NOT_PAID', deliveryRecovery: { retryCount: 0 } });
   expect(prepareSolanaPayment).toHaveBeenCalledOnce();
 });
 it('delivery retry changes no daily paid/reserved/remaining amounts or grant commitment, even after pause/revocation', async () => {
@@ -343,24 +347,24 @@ it('delivery retry changes no daily paid/reserved/remaining amounts or grant com
   const after = f.ledger.managedSummary(f.now(), 'live_devnet'); const nextGrant = f.ledger.spendGrantSummary(f.now(), 'live_devnet', f.principal.cardMemberId);
   expect([after.paid, after.reserved, after.remaining]).toEqual([before.paid, before.reserved, before.remaining]);
   expect(nextGrant).toMatchObject({ committed: grant!.committed, remaining: grant!.remaining });
-  expect(f.ledger.events(f.intent.idempotencyKey, f.principal.cardMemberId).filter(event => event.type === 'payment.PAID')).toHaveLength(1);
+  expect(f.ledger.eventsForOwner(f.intent.idempotencyKey, f.principal.cardMemberId).filter(event => event.type === 'payment.PAID')).toHaveLength(1);
 });
 it.each(['not json', ' '.repeat(16_385)])('malformed recovered delivery remains paid and consumes a bounded retry', async body => {
   const f = await fixture(); await expect(f.paid()).rejects.toThrow(); await f.retry(vi.fn<typeof fetch>().mockResolvedValue(f.response(true, body)));
-  expect(f.ledger.get(f.intent.idempotencyKey, f.principal.cardMemberId)).toMatchObject({ status: 'PAID', receiptStatus: 'CONFIRMED', deliveryStatus: 'PENDING', deliveryRecovery: { retryCount: 1 } });
-  expect(f.ledger.get(f.intent.idempotencyKey, f.principal.cardMemberId)?.data).toBeUndefined();
+  expect(f.ledger.getOwned(f.intent.idempotencyKey, f.principal.cardMemberId)).toMatchObject({ status: 'PAID', receiptStatus: 'CONFIRMED', deliveryStatus: 'PENDING', deliveryRecovery: { retryCount: 1 } });
+  expect(f.ledger.getOwned(f.intent.idempotencyKey, f.principal.cardMemberId)?.data).toBeUndefined();
 });
 it.each(['[]', '1', '"text"'])('protocol-valid non-object JSON delivery survives recovery', async body => {
   const f = await fixture(); await expect(f.paid()).rejects.toThrow();
   await f.retry(vi.fn<typeof fetch>().mockResolvedValue(f.response(true, body)));
-  expect(f.ledger.get(f.intent.idempotencyKey, f.principal.cardMemberId)).toMatchObject({ status: 'PAID', deliveryStatus: 'COMPLETE' });
-  expect(f.ledger.get(f.intent.idempotencyKey, f.principal.cardMemberId)?.data).toEqual(JSON.parse(body));
+  expect(f.ledger.getOwned(f.intent.idempotencyKey, f.principal.cardMemberId)).toMatchObject({ status: 'PAID', deliveryStatus: 'COMPLETE' });
+  expect(f.ledger.getOwned(f.intent.idempotencyKey, f.principal.cardMemberId)?.data).toEqual(JSON.parse(body));
   expect(prepareSolanaPayment).toHaveBeenCalledOnce();
 });
 it('malformed/wrong transaction receipt cannot satisfy delivery and cannot erase confirmed payment', async () => {
   const f = await fixture(); await expect(f.paid()).rejects.toThrow();
   const response = f.response(); response.headers.set('PAYMENT-RESPONSE', 'malformed'); await f.retry(vi.fn<typeof fetch>().mockResolvedValue(response));
-  expect(f.ledger.get(f.intent.idempotencyKey, f.principal.cardMemberId)).toMatchObject({ status: 'PAID', receiptStatus: 'INVALID', deliveryStatus: 'PENDING' });
+  expect(f.ledger.getOwned(f.intent.idempotencyKey, f.principal.cardMemberId)).toMatchObject({ status: 'PAID', receiptStatus: 'INVALID', deliveryStatus: 'PENDING' });
 });
 it('idempotent replay reuses the original signature without injecting a Demo recovery header', async () => {
   const f = await fixture({ kind: 'idempotent_replay' }); await expect(f.paid()).rejects.toThrow();
@@ -377,7 +381,7 @@ it.each(['query', 'header'] as const)('declared payment identifier lookup uses %
   const [url, request] = retry.mock.calls[0]; expect(request?.method).toBe('GET'); const headers = new Headers(request?.headers);
   expect(headers.has('PAYMENT-SIGNATURE')).toBe(false); expect(headers.has('PAYMENT-RECOVERY')).toBe(false);
   expect(location === 'query' ? new URL(String(url)).searchParams.get('payment-id') : headers.get('payment-id')).toBe(FIXTURE_TRANSACTION_SIGNATURE);
-  expect(f.ledger.get(f.intent.idempotencyKey, f.principal.cardMemberId)?.deliveryStatus).toBe('COMPLETE'); expect(prepareSolanaPayment).toHaveBeenCalledOnce();
+  expect(f.ledger.getOwned(f.intent.idempotencyKey, f.principal.cardMemberId)?.deliveryStatus).toBe('COMPLETE'); expect(prepareSolanaPayment).toHaveBeenCalledOnce();
 });
 it('capability request cannot change origin or weaken access', () => {
   expect(() => validateDeliveryCapability({ kind: 'payment_identifier', request: { url: 'https://other.provider.example/cache', method: 'GET', access: 'https', headers: {} },
@@ -396,8 +400,8 @@ it.each(['data', 'delivery', 'audit'] as const)('rolls back result, delivery cla
   const f = await fixture(); await expect(f.paid()).rejects.toThrow();
   const token = f.ledger.claimDelivery(f.record.approvalId, 'retry')!;
   expect(token).toBeTruthy();
-  const before = f.ledger.get(f.intent.idempotencyKey, f.principal.cardMemberId)!;
-  const events = f.ledger.events(f.intent.idempotencyKey, f.principal.cardMemberId);
+  const before = f.ledger.getOwned(f.intent.idempotencyKey, f.principal.cardMemberId)!;
+  const events = f.ledger.eventsForOwner(f.intent.idempotencyKey, f.principal.cardMemberId);
   const original = f.ledger.savedOriginalPayment(f.record.approvalId);
   const db = new DatabaseSync(f.path);
   try {
@@ -407,13 +411,13 @@ it.each(['data', 'delivery', 'audit'] as const)('rolls back result, delivery cla
     db.exec(`CREATE TRIGGER fail_delivery_write ${statement} BEGIN SELECT RAISE(ABORT,'fixture persistence failure'); END`);
     expect(() => f.ledger.finish(f.record.approvalId, { transaction: FIXTURE_TRANSACTION_SIGNATURE, data: { original: true } }, undefined, token))
       .toThrow('fixture persistence failure');
-    expect(f.ledger.get(f.intent.idempotencyKey, f.principal.cardMemberId)).toEqual(before);
-    expect(f.ledger.events(f.intent.idempotencyKey, f.principal.cardMemberId)).toEqual(events);
+    expect(f.ledger.getOwned(f.intent.idempotencyKey, f.principal.cardMemberId)).toEqual(before);
+    expect(f.ledger.eventsForOwner(f.intent.idempotencyKey, f.principal.cardMemberId)).toEqual(events);
     expect(f.ledger.savedOriginalPayment(f.record.approvalId)).toEqual(original);
     db.exec('DROP TRIGGER fail_delivery_write');
     // The same consumed claim can complete after the local write failure, without another HTTP/payment attempt.
     f.ledger.finish(f.record.approvalId, { transaction: FIXTURE_TRANSACTION_SIGNATURE, data: { original: true } }, undefined, token);
-    expect(f.ledger.get(f.intent.idempotencyKey, f.principal.cardMemberId)).toMatchObject({ status: 'PAID', deliveryStatus: 'COMPLETE',
+    expect(f.ledger.getOwned(f.intent.idempotencyKey, f.principal.cardMemberId)).toMatchObject({ status: 'PAID', deliveryStatus: 'COMPLETE',
       data: { original: true }, deliveryRecovery: { retryCount: 1 } });
     expect(prepareSolanaPayment).toHaveBeenCalledOnce();
   } finally { db.close(); }
@@ -429,7 +433,7 @@ it.each(['PAID', 'PAYMENT_UNKNOWN'] as const)('009 migration preserves the origi
   const original = db.prepare('SELECT * FROM original_payments').all();
   db.exec("DROP TRIGGER purchase_delivery_payment_state; DROP TABLE purchase_delivery; DELETE FROM ledger_schema_migrations WHERE id='009_durable_delivery_recovery'");
   db.close(); const reopened = f.reopen();
-  expect(reopened.get(f.intent.idempotencyKey, f.principal.cardMemberId)).toMatchObject({ status, deliveryStatus: status === 'PAID' ? 'PENDING' : 'NOT_PAID', deliveryRecovery: { retryCount: 0 } });
+  expect(reopened.getOwned(f.intent.idempotencyKey, f.principal.cardMemberId)).toMatchObject({ status, deliveryStatus: status === 'PAID' ? 'PENDING' : 'NOT_PAID', deliveryRecovery: { retryCount: 0 } });
   const after = new DatabaseSync(f.path);
   try {
     expect(after.prepare('SELECT * FROM purchases').all()).toEqual(before);
@@ -449,10 +453,10 @@ it('backend automatically retries due paid deliveries after restart, even while 
   try {
     app.ledger.setPaused(true);
     await app.start('http://127.0.0.1:3049');
-    expect(app.ledger.get(f.intent.idempotencyKey, f.principal.cardMemberId)?.deliveryRecovery.retryCount).toBe(1);
+    expect(app.ledger.getOwned(f.intent.idempotencyKey, f.principal.cardMemberId)?.deliveryRecovery.retryCount).toBe(1);
     f.advance(1000); await vi.advanceTimersByTimeAsync(1000);
     expect(fetcher).toHaveBeenCalledOnce();
-    expect(app.ledger.get(f.intent.idempotencyKey, f.principal.cardMemberId)).toMatchObject({ status: 'PAID', deliveryStatus: 'COMPLETE', deliveryRecovery: { retryCount: 2 } });
+    expect(app.ledger.getOwned(f.intent.idempotencyKey, f.principal.cardMemberId)).toMatchObject({ status: 'PAID', deliveryStatus: 'COMPLETE', deliveryRecovery: { retryCount: 2 } });
     expect(loadBuyerSigner).toHaveBeenCalledOnce(); expect(prepareSolanaPayment).toHaveBeenCalledOnce();
     await app.prepareQuit(); await vi.advanceTimersByTimeAsync(10_000); expect(fetcher).toHaveBeenCalledOnce();
   } finally { await app.prepareQuit(); app.close(); }
@@ -469,12 +473,12 @@ it('backend continuously reconciles UNKNOWN after RPC recovery without another p
   try {
     app.ledger.setPaused(true);
     await app.start('http://127.0.0.1:3049');
-    expect(app.ledger.get(f.intent.idempotencyKey, f.principal.cardMemberId)?.status).toBe('PAYMENT_UNKNOWN');
+    expect(app.ledger.getOwned(f.intent.idempotencyKey, f.principal.cardMemberId)?.status).toBe('PAYMENT_UNKNOWN');
     expect(reconcileStoredOriginalPayment).toHaveBeenCalledOnce(); // Startup must respect the persisted first backoff.
     vi.mocked(reconcileStoredOriginalPayment).mockResolvedValue({ status: 'CONFIRMED', transaction: FIXTURE_TRANSACTION_SIGNATURE });
     f.advance(999); await vi.advanceTimersByTimeAsync(999); expect(reconcileStoredOriginalPayment).toHaveBeenCalledOnce();
     f.advance(1); await vi.advanceTimersByTimeAsync(1);
-    expect(app.ledger.get(f.intent.idempotencyKey, f.principal.cardMemberId)?.status).toBe('PAID');
+    expect(app.ledger.getOwned(f.intent.idempotencyKey, f.principal.cardMemberId)?.status).toBe('PAID');
     expect(app.ledger.managedSummary(f.now(), 'live_devnet')).toMatchObject({ paid: '10000', reserved: '0' });
     expect(fetcher).not.toHaveBeenCalled(); expect(prepareSolanaPayment).toHaveBeenCalledOnce();
     const count = vi.mocked(reconcileStoredOriginalPayment).mock.calls.length;
@@ -521,11 +525,11 @@ it('cached-result retries never invoke the fixture token-transfer dispatcher a s
   for (let i = 0; i < DELIVERY_RETRY_LIMIT; i++) { await f.retry(cache); f.advance(); }
   expect(transfer).toHaveBeenCalledOnce(); expect(cache).toHaveBeenCalledTimes(4);
   expect(prepareSolanaPayment).toHaveBeenCalledOnce();
-  expect(f.ledger.list()).toHaveLength(1); expect(f.ledger.get(f.intent.idempotencyKey, f.principal.cardMemberId)?.deliveryStatus).toBe('EXHAUSTED');
+  expect(f.ledger.listForAdministration()).toHaveLength(1); expect(f.ledger.getOwned(f.intent.idempotencyKey, f.principal.cardMemberId)?.deliveryStatus).toBe('EXHAUSTED');
 });
 it('rejects a test purchase with a Mainnet recovery environment before a delivery request or claim', async () => {
   const f = await fixture(); await expect(f.paid()).rejects.toThrow(); const fetcher = vi.fn<typeof fetch>();
   const mainnet = { ...f.config, ...resolvePaymentEnvironment({ YOSH_EXECUTION_MODE: 'live_mainnet' }) };
   await expect(recoverApprovedPayment(f.ledger, f.intent.idempotencyKey, mainnet, f.resource.request.url, undefined, f.principal.cardMemberId, { fetcher })).rejects.toThrow('PURCHASE_EXECUTION_MODE_MISMATCH');
-  expect(fetcher).not.toHaveBeenCalled(); expect(f.ledger.get(f.intent.idempotencyKey, f.principal.cardMemberId)?.deliveryRecovery.retryCount).toBe(0);
+  expect(fetcher).not.toHaveBeenCalled(); expect(f.ledger.getOwned(f.intent.idempotencyKey, f.principal.cardMemberId)?.deliveryRecovery.retryCount).toBe(0);
 });

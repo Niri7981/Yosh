@@ -40,7 +40,7 @@ it('uses generic MCP discovery-to-registration without management access, Grant 
     expect(parse(results[0])).toMatchObject({ source: 'agent', state: 'ACTIVE' });
     expect(ledger.resources.list().filter(entry => entry.source === 'agent')).toHaveLength(1);
     expect(ledger.activeSpendGrant(Date.now(), principal.cardMemberId, 'live_mainnet', args.resourceId)).toBeUndefined();
-    expect(ledger.list()).toHaveLength(0); expect(outbound).toHaveBeenCalledTimes(1); expect(purchase).not.toHaveBeenCalled();
+    expect(ledger.listForAdministration()).toHaveLength(0); expect(outbound).toHaveBeenCalledTimes(1); expect(purchase).not.toHaveBeenCalled();
     const tools = await client.listTools();
     expect(tools.tools.map(tool => tool.name)).not.toContain('create_spend_grant');
   } finally { await client.close(); await server.close(); ledger.close(); }

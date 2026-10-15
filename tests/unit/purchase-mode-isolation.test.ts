@@ -53,13 +53,13 @@ function seedVerifiedLivePurchase(ledger: PurchaseLedger, id: string) {
 it('rejects Mainnet reservation before any write without changing the ledger schema or existing rows', () => {
   const ledger = new PurchaseLedger(':memory:');
   seedVerifiedLivePurchase(ledger, 'original-devnet');
-  const before = ledger.list();
+  const before = ledger.listForAdministration();
   const quote = liveQuote('mainnet-disabled');
   try {
     expect(() => ledger.reserve(reserveIntent('mainnet-disabled', quote), quote, Date.now(), 'live_mainnet'))
       .toThrow('MAINNET_AUTHORITY_REQUIRED');
-    expect(ledger.list()).toEqual(before);
-    expect(ledger.get('mainnet-disabled')).toBeUndefined();
+    expect(ledger.listForAdministration()).toEqual(before);
+    expect(ledger.getForAdministration('mainnet-disabled')).toBeUndefined();
   } finally { ledger.close(); }
 });
 
@@ -96,7 +96,7 @@ it('keeps a persisted execution mode immutable in the ledger', async () => {
       expect(() => database.prepare("UPDATE purchases SET execution_mode='live_devnet' WHERE task_id=?").run(id))
         .toThrow('purchase execution mode is immutable');
     } finally { database.close(); }
-    expect(ledger.get(id)?.executionMode).toBe('simulated');
+    expect(ledger.getForAdministration(id)?.executionMode).toBe('simulated');
   } finally { ledger.close(); }
 });
 
@@ -153,7 +153,7 @@ it('keeps a migrated legacy purchase UNKNOWN and preserves its saved resource', 
 
   const ledger = new PurchaseLedger(path, { managed: true });
   try {
-    const record = ledger.get(id);
+    const record = ledger.getForAdministration(id);
     expect(record).toMatchObject({ status: 'PAID', executionMode: 'UNKNOWN', data: demoSnapshot, paymentPayloadPresent: false });
     expect(() => ledger.assertReplayAllowed(record!, 'live_devnet')).toThrow('PURCHASE_EXECUTION_MODE_MISMATCH');
     expect(() => ledger.assertReplayAllowed(record!, 'simulated')).toThrow('PURCHASE_EXECUTION_MODE_MISMATCH');

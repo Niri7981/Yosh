@@ -58,7 +58,7 @@ async function main() {
       results.push({ taskId, transaction: result.transaction, fresh: !('reused' in result), retryPassed: true });
       console.log(JSON.stringify({ run: i, taskId, status: 'PAID', answerStatus: 'COMPLETE', fresh: !('reused' in result), retryPassed: true, transaction: result.transaction }));
     }
-    const first = ledger.get(`${prefix}-1`)!;
+    const first = ledger.getLegacy(`${prefix}-1`)!;
     const payload = ledger.savedPayload(first.approvalId)!;
     assert(payload);
     // Reconstruct a crashed client in an isolated in-memory ledger. Original production
@@ -68,8 +68,8 @@ async function main() {
       const reserved = shadow.reserve(first.intent, first.quote, first.intent.createdAt, first.executionMode);
       shadow.claim(reserved.approvalId, first.intent.createdAt); shadow.savePayload(reserved.approvalId, payload); shadow.unknown(reserved.approvalId);
       await recoverApprovedPayment(shadow, first.intent.idempotencyKey, config, paymentEndpoint(origin));
-      assert.equal(shadow.get(first.intent.idempotencyKey)?.status, 'PAID');
-      assert.equal(shadow.get(first.intent.idempotencyKey)?.transaction, first.transaction);
+      assert.equal(shadow.getLegacy(first.intent.idempotencyKey)?.status, 'PAID');
+      assert.equal(shadow.getLegacy(first.intent.idempotencyKey)?.transaction, first.transaction);
     } finally { shadow.close(); }
     // Reconstruct a server that lost the settlement receipt. No facilitator method may
     // run. It must find the original transaction on the real chain by the unique memo.

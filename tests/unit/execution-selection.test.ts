@@ -38,7 +38,7 @@ it('authenticated selection reaches backend truth, never provisions Mainnet or c
   expect(await response.json()).toMatchObject({ mode: 'live_mainnet', cluster: 'mainnet-beta', network: MAINNET_NETWORK,
     asset: { mint: MAINNET_USDC_MINT, decimals: 6 }, productionExecutionEnabled: false, spendingAuthorized: false, configurationReady: false });
   expect(app.ledger.controls('live_mainnet')).toMatchObject({ dailyBudget: null, paused: true });
-  expect(app.spendGrantSummary()).toBeNull(); expect(app.ledger.list()).toEqual([]);
+  expect(app.spendGrantSummary()).toBeNull(); expect(app.ledger.listForAdministration()).toEqual([]);
   expect((await app.overview()).service).toMatchObject({ purchaseMode: 'live_mainnet', paymentEnabled: false });
   expect(initializeWallet).toHaveBeenCalledOnce(); expect(process.env.DEMO_MERCHANT_PUBLIC_KEY).toBeUndefined();
   expect(resolvePaymentEnvironment().productionExecutionEnabled).toBe(false);

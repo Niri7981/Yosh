@@ -14,7 +14,7 @@ export async function GET(request: Request, context: Context) {
   const offset = z.coerce.number().int().min(0).max(1_048_576).safeParse(query.get('offset') ?? '0');
   if (!id.success || !offset.success || [...query.keys()].some(key => key !== 'offset'))
     return Response.json({ code: 'INVALID_DELIVERY_CURSOR' }, { status: 400 });
-  const record = app.ledger.get(id.data, principal.cardMemberId);
+  const record = app.ledger.getOwned(id.data, principal.cardMemberId);
   if (!record || record.status !== 'PAID' || record.deliveryStatus !== 'COMPLETE' || record.data === undefined)
     return Response.json({ code: 'DELIVERY_NOT_AVAILABLE' }, { status: 404 });
   const data = Buffer.from(JSON.stringify(record.data));

@@ -21,14 +21,14 @@ it('persists a validated discovery, registers once across restart and leaves mon
   const dir = mkdtempSync(join(tmpdir(), 'yosh-agent-registry-')); dirs.push(dir); const path = join(dir, 'ledger.sqlite');
   let ledger = new PurchaseLedger(path, { managed: true }); ledger.resources.initialize([]);
   const discovered = ledger.resources.recordDiscovery(await discoverResource(input, read), principal);
-  const oldPurchases = ledger.list(); const oldGrants = ledger.spendGrantSummaries(Date.now(), 'live_mainnet', principal.cardMemberId);
+  const oldPurchases = ledger.listForAdministration(); const oldGrants = ledger.spendGrantSummaries(Date.now(), 'live_mainnet', principal.cardMemberId);
   ledger.close(); ledger = new PurchaseLedger(path, { managed: true });
   const entry = ledger.resources.addDiscovered(registration(discovered.discoveryId), principal);
   expect(entry).toMatchObject({ source: 'agent', state: 'ACTIVE', submission: { cardMemberId: principal.cardMemberId,
     sample: input.sample, documentation: input.documentation }, definition: { request: { url: input.url, method: 'GET' },
     requestInputs: input.requestInputs, deliveryPolicy: input.deliveryPolicy, deliveryRecovery: { kind: 'none' }, maximumAmount: '1000' } });
   expect(ledger.resources.addDiscovered(registration(discovered.discoveryId), principal)).toEqual(entry);
-  expect(ledger.list()).toEqual(oldPurchases); expect(ledger.spendGrantSummaries(Date.now(), 'live_mainnet', principal.cardMemberId)).toEqual(oldGrants);
+  expect(ledger.listForAdministration()).toEqual(oldPurchases); expect(ledger.spendGrantSummaries(Date.now(), 'live_mainnet', principal.cardMemberId)).toEqual(oldGrants);
   expect(read).toHaveBeenCalledTimes(1); ledger.close();
   ledger = new PurchaseLedger(path, { managed: true }); expect(ledger.resources.inspect(entry.definition.resourceId)).toEqual(entry);
   expect(ledger.resources.active().some(r => r.resourceId === entry.definition.resourceId)).toBe(true);

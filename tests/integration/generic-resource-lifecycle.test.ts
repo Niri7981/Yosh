@@ -66,7 +66,7 @@ it('takes an unknown JSON POST from unpaid discovery to resource-scoped purchase
     ledger.close();
     const reopened = new PurchaseLedger(path, { managed: true, requireRegisteredResource: true, requireSpendGrant: true, mode: 'live_mainnet' });
     try {
-      expect(reopened.get('unknown-post-1', principal.cardMemberId)?.status).toBe('APPROVED');
+      expect(reopened.getOwned('unknown-post-1', principal.cardMemberId)?.status).toBe('APPROVED');
       expect(reopened.resources.inspect(definition.resourceId).state).toBe('ACTIVE');
       expect(reopened.spendGrantSummaries(now, 'live_mainnet', principal.cardMemberId).filter(grant => grant.status === 'ACTIVE')).toHaveLength(2);
       reopened.revokeActiveSpendGrant(now, 'grant.REVOKED', principal.cardMemberId, second.resourceId);

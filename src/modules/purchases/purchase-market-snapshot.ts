@@ -23,6 +23,7 @@ export type MarketSnapshotPurchaseOptions = {
   now?: () => number;
   legacyBindings?: string[];
   authority?: SpendAuthorityBinding;
+  ownerCardMemberId?: string;
 };
 
 export type MarketSnapshotPurchaseResult = {
@@ -46,15 +47,17 @@ export async function purchaseMarketSnapshot(
   const trace = options.trace ?? (() => {});
   const endpoint = paymentEndpoint(options.origin);
   const binding = paymentBinding(config, endpoint);
-  const existing = ledger.get(input.purchaseId);
+  const ownerCardMemberId = options.ownerCardMemberId ?? options.authority?.cardMemberId;
+  const savedRecord = () => ownerCardMemberId ? ledger.getOwned(input.purchaseId, ownerCardMemberId) : ledger.getLegacy(input.purchaseId);
+  const existing = savedRecord();
   if (existing) {
     ledger.assertReplayAllowed(existing, options.mode, ledger.paymentScope(config, options.mode));
     const acceptedBindings = [binding, ...(options.legacyBindings ?? [])];
     if (existing.intent.requestHash !== hash(input.intent) || !acceptedBindings.includes(existing.intent.executionBinding)) {
       throw new Error('Purchase ID already belongs to different input or configuration');
     }
-    if (options.mode === 'live_devnet') await recoverApprovedPayment(ledger, input.purchaseId, config, endpoint, trace);
-    const saved = ledger.get(input.purchaseId)!;
+    if (options.mode === 'live_devnet') await recoverApprovedPayment(ledger, input.purchaseId, config, endpoint, trace, ownerCardMemberId);
+    const saved = savedRecord()!;
     return { record: saved, reused: true, simulated: saved.executionMode === 'simulated' };
   }
   const resources = createStaticResourceRegistry({
@@ -91,7 +94,7 @@ export async function purchaseMarketSnapshot(
     now,
     authority: options.authority,
   });
-  const reserved = ledger.reserve(spendIntent, quote, now, options.mode, undefined, ledger.paymentScope(config, options.mode));
+  const reserved = ledger.reserve(spendIntent, quote, now, options.mode, ownerCardMemberId, ledger.paymentScope(config, options.mode));
   trace(reserved.status === 'APPROVED' ? 'POLICY_APPROVED' : 'POLICY_STOPPED', reserved.decision.reason);
   if (reserved.intent.id !== spendIntent.id || reserved.status !== 'APPROVED') {
     return { record: reserved, reused: reserved.intent.id !== spendIntent.id, simulated: options.mode === 'simulated' };
@@ -104,8 +107,8 @@ export async function purchaseMarketSnapshot(
     try { await (options.pay ?? executeApprovedPayment)(ledger, reserved.approvalId, config, endpoint, trace); }
     catch {
       trace('PAYMENT_PAUSED');
-      await recoverApprovedPayment(ledger, input.purchaseId, config, endpoint, trace);
+      await recoverApprovedPayment(ledger, input.purchaseId, config, endpoint, trace, ownerCardMemberId);
     }
   }
-  return { record: ledger.get(input.purchaseId)!, reused: false, simulated: options.mode === 'simulated' };
+  return { record: savedRecord()!, reused: false, simulated: options.mode === 'simulated' };
 }

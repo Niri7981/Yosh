@@ -177,11 +177,11 @@ describe('managed budget and Devnet test records', () => {
     app.setAgentConnection(true, origin);
     try {
       await expect(app.createTestPurchase('app-canonical-without-grant', origin)).rejects.toThrow('消费授权');
-      expect(app.ledger.get('app-canonical-without-grant')).toBeUndefined();
+      expect(app.ledger.getForAdministration('app-canonical-without-grant')).toBeUndefined();
       const { grant } = await authorize(app, Date.now(), '1000000');
       const purchase = await app.createTestPurchase('app-canonical-with-grant', origin);
       expect(purchase).toMatchObject({ status: 'PAID', simulated: true });
-      expect(app.ledger.get('app-canonical-with-grant')?.intent.authority?.grantId).toBe(grant.id);
+      expect(app.ledger.getForAdministration('app-canonical-with-grant')?.intent.authority?.grantId).toBe(grant.id);
     } finally { app.close(); }
   });
 
@@ -193,7 +193,7 @@ describe('managed budget and Devnet test records', () => {
       await expect(app.requestPurchase({ requestId: 'no-wallet', offerId: 'basic', reason: 'Need data' }, origin,
         { cardMemberId: app.ledger.defaultCardMember().id, connectionId: randomUUID(), connectionGeneration: 1 })).rejects.toThrow('尚未初始化');
       expect(initializeWallet).not.toHaveBeenCalled();
-      expect(app.ledger.list()).toHaveLength(0);
+      expect(app.ledger.listForAdministration()).toHaveLength(0);
     } finally { app.close(); }
   });
 
@@ -262,7 +262,7 @@ describe('managed budget and Devnet test records', () => {
       await Promise.resolve(); expect(ready).toBe(false);
       await expect(app.createTestPurchase('after-quit', 'http://127.0.0.1:3049')).rejects.toThrow('正在退出');
       release(); await rejected; await quit;
-      expect(ready).toBe(true); expect(app.ledger.list()).toHaveLength(0);
+      expect(ready).toBe(true); expect(app.ledger.listForAdministration()).toHaveLength(0);
     } finally { app.close(); }
   });
 
@@ -299,7 +299,7 @@ describe('managed budget and Devnet test records', () => {
       release(); await Promise.all([startup, repeated, quit]);
       expect(recoverApprovedPayment).toHaveBeenCalledTimes(1);
       expect(vi.mocked(recoverApprovedPayment).mock.calls[0]?.[1]).toBe('startup-original');
-      expect(app.ledger.get('startup-original')?.status).toBe('PAYMENT_UNKNOWN');
+      expect(app.ledger.getForAdministration('startup-original')?.status).toBe('PAYMENT_UNKNOWN');
       expect(app.ledger.savedPayload(record.approvalId)).toEqual({ x402Version: 2, accepted: quote, payload: { transaction: 'test-wire' } });
       expect(app.ledger.managedSummary(now, 'live_devnet')).toMatchObject({ reserved: '10000', paid: '0', unresolved: 1 });
       expect(app.ledger.controls().paused).toBe(true);
@@ -341,17 +341,17 @@ describe('managed budget and Devnet test records', () => {
       const first = await app.createTestPurchase(id, 'http://127.0.0.1:3049');
       const replay = await app.createTestPurchase(id, 'http://127.0.0.1:3049');
       expect(first.status).toBe('PAID'); expect(replay.status).toBe('PAID');
-      expect(app.ledger.list()).toHaveLength(1);
-      expect(app.ledger.list()[0]).toMatchObject({ executionMode: 'simulated', network: DEVNET_NETWORK,
+      expect(app.ledger.listForAdministration()).toHaveLength(1);
+      expect(app.ledger.listForAdministration()[0]).toMatchObject({ executionMode: 'simulated', network: DEVNET_NETWORK,
         assetId: DEVNET_USDC_MINT, assetDecimals: 6, currency: 'USDC', deliveryStatus: 'COMPLETE' });
-      expect(app.ledger.list()[0]).not.toHaveProperty('paymentEvidence');
+      expect(app.ledger.listForAdministration()[0]).not.toHaveProperty('paymentEvidence');
       app.setDailyLimit('5000');
       const blocked = await app.createTestPurchase(`app-${randomUUID()}`, 'http://127.0.0.1:3049');
       expect(blocked.policy.reason).toBe('DAILY_BUDGET_EXCEEDED');
       app.setPaused(true);
     } finally { app.close(); }
     const restarted = create();
-    try { expect(restarted.ledger.managedSummary()).toMatchObject({ dailyLimit: '5000', paid: '10000', remaining: '0', paused: true }); expect(restarted.ledger.list()).toHaveLength(2); }
+    try { expect(restarted.ledger.managedSummary()).toMatchObject({ dailyLimit: '5000', paid: '10000', remaining: '0', paused: true }); expect(restarted.ledger.listForAdministration()).toHaveLength(2); }
     finally { restarted.close(); }
   });
 
@@ -375,7 +375,7 @@ describe('managed budget and Devnet test records', () => {
       expect(app.spendGrantSummary()).toMatchObject({ committed: '10000', remaining: '990000' });
       vi.stubEnv('APP2049_ENABLE_DEVNET_PURCHASES', '1');
       expect(app.spendGrantSummary()).toBeNull();
-      expect(app.ledger.list()).toHaveLength(1);
+      expect(app.ledger.listForAdministration()).toHaveLength(1);
     } finally { app.close(); }
   });
 

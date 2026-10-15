@@ -75,10 +75,10 @@ it('releases expired simulated approvals while reading the shared managed budget
     expect(value.reserve(intent(requestId, 200_000, binding), quote, now, 'simulated').status).toBe('APPROVED');
 
     expect(value.managedSummary(now + 299_999, 'simulated')).toMatchObject({ paid: '0', reserved: '200000', remaining: '800000' });
-    expect(value.get(requestId)?.status).toBe('APPROVED');
+    expect(value.getOwned(requestId, cardMemberId)?.status).toBe('APPROVED');
 
     expect(value.managedSummary(now + 300_000, 'simulated')).toMatchObject({ paid: '0', reserved: '0', remaining: '1000000' });
-    expect(value.get(requestId)?.status).toBe('EXPIRED');
+    expect(value.getOwned(requestId, cardMemberId)?.status).toBe('EXPIRED');
   } finally { value.close(); }
 });
 
@@ -135,8 +135,8 @@ it('scopes grants and requestIds per member while enforcing one shared daily bud
     expect(firstPurchase.decision.decision).toBe('APPROVED');
     expect(secondPurchase.decision.reason).toBe('DAILY_BUDGET_EXCEEDED');
     expect(firstPurchase.intent.id).not.toBe(secondPurchase.intent.id);
-    expect(value.list(50, cardMemberId)).toHaveLength(1);
-    expect(value.list(50, secondMember.id)).toHaveLength(1);
+    expect(value.listForOwner(cardMemberId, 50)).toHaveLength(1);
+    expect(value.listForOwner(secondMember.id, 50)).toHaveLength(1);
     expect(value.spendGrantSummary(now, 'simulated', cardMemberId)).toMatchObject({ status: 'ACTIVE', committed: '200000' });
     expect(value.spendGrantSummary(now, 'simulated', secondMember.id)).toMatchObject({ status: 'ACTIVE', committed: '0' });
     const concurrentReader = new PurchaseLedger(path, { managed: true, mode: 'simulated', requireSpendGrant: true, now: () => now, timeZone: () => 'Asia/Shanghai' });
@@ -150,8 +150,8 @@ it('scopes grants and requestIds per member while enforcing one shared daily bud
   } finally { value.close(); }
   const reopened = ledger(path);
   try {
-    expect(reopened.get('shared-id', cardMemberId)?.ownerCardMemberId).toBe(cardMemberId);
-    expect(reopened.get('shared-id', reopened.cardMembers().find(member => member.label === 'Research')!.id)?.status).toBe('DENIED');
+    expect(reopened.getOwned('shared-id', cardMemberId)?.ownerCardMemberId).toBe(cardMemberId);
+    expect(reopened.getOwned('shared-id', reopened.cardMembers().find(member => member.label === 'Research')!.id)?.status).toBe('DENIED');
   } finally { reopened.close(); }
 });
 
@@ -169,10 +169,10 @@ it('keeps payment state and events attached to the right owner for duplicate mem
     value.finish(firstPurchase.approvalId, { transaction: 'simulated-first', data: demoSnapshot }, now);
     value.claim(secondPurchase.approvalId, now);
     value.finish(secondPurchase.approvalId, { transaction: 'simulated-second', data: demoSnapshot }, now);
-    expect(value.get('same-id', cardMemberId)?.transaction).toBe('simulated-first');
-    expect(value.get('same-id', secondMember.id)?.transaction).toBe('simulated-second');
-    expect(value.events('same-id', cardMemberId).map(event => event.type)).toContain('delivery.COMPLETE');
-    expect(value.events('same-id', secondMember.id).map(event => event.type)).toContain('delivery.COMPLETE');
+    expect(value.getOwned('same-id', cardMemberId)?.transaction).toBe('simulated-first');
+    expect(value.getOwned('same-id', secondMember.id)?.transaction).toBe('simulated-second');
+    expect(value.eventsForOwner('same-id', cardMemberId).map(event => event.type)).toContain('delivery.COMPLETE');
+    expect(value.eventsForOwner('same-id', secondMember.id).map(event => event.type)).toContain('delivery.COMPLETE');
     expect(value.managedSummary(now, 'simulated')).toMatchObject({ paid: '400000' });
   } finally { value.close(); }
 });
@@ -216,7 +216,7 @@ it('never projects persisted Devnet daily authority or grants into Mainnet', () 
     expect(value.summary(now, 'live_mainnet')).toMatchObject({ reservedUSDC: 0, paidUSDC: 0 });
     expect(() => value.spendAuthority(principal, MARKET_SNAPSHOT_OPERATION, now, 'live_mainnet')).toThrow('没有可用的消费授权');
     expect(() => value.reserve(intent('mainnet-grant-replay', 10_000, binding), quote, now, 'live_mainnet')).toThrow('MONETARY_SCOPE_MISMATCH');
-    expect(value.list()).toHaveLength(0);
+    expect(value.listForAdministration()).toHaveLength(0);
     expect(value.spendGrantSummary(now)).toEqual(original);
     expect(value.controls()).toEqual(savedControls);
   } finally { value.close(); }
@@ -236,7 +236,7 @@ it('rejects Mainnet grant scopes and purchases even if their execution mode is o
     expect(() => value.reserve(intent('quote-mainnet', 10_000, binding), { ...quote, network: MAINNET_NETWORK,
       asset: MAINNET_USDC_MINT }, now, 'live_devnet')).toThrow('MAINNET_AUTHORITY_SCOPE_REQUIRED');
     expect(value.spendGrantSummary(now)).toEqual(original);
-    expect(value.list()).toHaveLength(0);
+    expect(value.listForAdministration()).toHaveLength(0);
   } finally { value.close(); }
 });
 
@@ -254,7 +254,7 @@ it('an ambient environment switch cannot reinterpret immutable ledger scope or i
     expect(() => value.spendAuthority(principal, MARKET_SNAPSHOT_OPERATION, now, 'live_mainnet')).toThrow('没有可用的消费授权');
     expect(value.spendAuthorityForDecision(principal, MARKET_SNAPSHOT_OPERATION, now, 'live_mainnet')).toBeUndefined();
     value.unknown(reserved.approvalId);
-    expect(value.get('before-switch')?.status).toBe('PAYMENT_UNKNOWN');
+    expect(value.getOwned('before-switch', cardMemberId)?.status).toBe('PAYMENT_UNKNOWN');
     expect(value.controls()).toMatchObject({ dailyBudget: '50000000', paused: false });
     expect(value.spendGrantSummary(now, 'live_devnet')).toEqual(original);
     expect(value.spendAuthority(principal, MARKET_SNAPSHOT_OPERATION, now, 'live_devnet')).toEqual(binding);

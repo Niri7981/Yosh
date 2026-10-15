@@ -13,7 +13,7 @@ import { atomicAmount, addAtomic, remainingAtomic } from '../authority/atomic-mo
 import { MonetaryScopeSchema, monetaryScope, monetaryScopeId, PRODUCT_MAINNET_WALLET_ID, PRODUCT_TEST_WALLET_ID, LEGACY_TEST_WALLET_ID, type MonetaryScope } from './monetary-scope';
 import { migrateMonetaryLedger, storeMonetaryScope } from './monetary-migration';
 import { RuntimeResourceRegistry } from '../resources/runtime-resource-registry';
-import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
+import { DatabaseSync, type SQLOutputValue, type SQLInputValue } from 'node:sqlite';
 import { mkdirSync, chmodSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -492,8 +492,7 @@ export class PurchaseLedger {
   /** Called synchronously immediately before the signer and before submission. */
   assertCanSign(approvalId: string, now = this.now(), validate?: (record: PurchaseRecord) => void) {
     if (this.stopping) throw new Error('Service is stopping');
-    const row = this.db.prepare('SELECT task_id,owner_card_member_id FROM purchases WHERE approval_id=?').get(approvalId);
-    const record = row ? this.get(String(row.task_id), row.owner_card_member_id ? String(row.owner_card_member_id) : undefined) : undefined;
+    const record = this.recordForApproval(approvalId);
     if (!isLiveMode(record?.executionMode)) throw new Error('PURCHASE_EXECUTION_MODE_MISMATCH');
     if (record?.status !== 'PAYING' || record.intent.expiresAt <= now) throw new Error('Approval inactive or expired');
     if (record.executionMode === 'live_mainnet' && (!this.managed || !this.requireSpendGrant)) throw new Error('MAINNET_AUTHORITY_REQUIRED');
@@ -579,13 +578,25 @@ export class PurchaseLedger {
     }
   }
 
-  get(idempotencyKey: string, memberId?: string): SpendReservation | undefined {
-    const row = memberId
-      ? this.db.prepare('SELECT * FROM purchases WHERE task_id=? AND owner_card_member_id=?').get(idempotencyKey, memberId)
-      : this.managed
-        ? this.db.prepare(`SELECT * FROM purchases WHERE task_id=? ORDER BY
-          CASE WHEN owner_card_member_id=(SELECT id FROM card_members WHERE is_default=1) THEN 0 ELSE 1 END, rowid LIMIT 1`).get(idempotencyKey)
-        : this.db.prepare('SELECT * FROM purchases WHERE task_id=?').get(idempotencyKey);
+  /** Authenticated member reads always require the backend-resolved owner. */
+  getOwned(idempotencyKey: string, memberId: string): SpendReservation | undefined {
+    this.assertReadOwner(memberId);
+    return this.readRecord(this.db.prepare('SELECT * FROM purchases WHERE task_id=? AND owner_card_member_id=?').get(idempotencyKey, memberId));
+  }
+  /** Compatibility for genuinely unowned history, never a default-member lookup. */
+  getLegacy(idempotencyKey: string): SpendReservation | undefined {
+    return this.readRecord(this.db.prepare('SELECT * FROM purchases WHERE task_id=? AND owner_card_member_id IS NULL').get(idempotencyKey));
+  }
+  /** Trusted management lookup. A request ID alone cannot choose between owners. */
+  getForAdministration(idempotencyKey: string): SpendReservation | undefined {
+    const rows = this.db.prepare('SELECT * FROM purchases WHERE task_id=? LIMIT 2').all(idempotencyKey);
+    if (rows.length > 1) throw new Error('PURCHASE_REQUEST_OWNER_REQUIRED');
+    return this.readRecord(rows[0]);
+  }
+  private assertReadOwner(memberId: string) {
+    if (typeof memberId !== 'string' || !memberId.trim()) throw new Error('PURCHASE_REQUEST_OWNER_REQUIRED');
+  }
+  private readRecord(row: Record<string, SQLOutputValue> | undefined): SpendReservation | undefined {
     if (!row) return undefined;
     const ownerCardMemberId = row.owner_card_member_id ? String(row.owner_card_member_id) : undefined;
     const intent = parseStoredSpendIntent(JSON.parse(String(row.purchase)), ownerCardMemberId);
@@ -657,7 +668,7 @@ export class PurchaseLedger {
     if (ownerCardMemberId && intent.authority && ownerCardMemberId !== intent.authority.cardMemberId) throw new Error('PURCHASE_REQUEST_OWNER_MISMATCH');
     return this.atomic(() => {
       const memberId = ownerCardMemberId ?? intent.authority?.cardMemberId;
-      const existing = this.get(intent.idempotencyKey, memberId);
+      const existing = (memberId ? this.getOwned(intent.idempotencyKey, memberId) : this.getLegacy(intent.idempotencyKey));
       if (existing) {
         if (monetaryScopeId(existing.monetaryScope) !== monetaryScopeId(monetary)) throw new Error('MONETARY_SCOPE_MISMATCH');
         if (this.requireSpendGrant && existing.ownerCardMemberId !== (ownerCardMemberId ?? intent.authority?.cardMemberId)) {
@@ -684,7 +695,7 @@ export class PurchaseLedger {
       this.delivery.initialize({ id: intent.id, purchase: JSON.stringify(intent), owner: ownerCardMemberId ?? intent.authority?.cardMemberId,
         status: decision.decision, delivered: false, receiptConfirmed: false });
       this.event(intent.id, `authority.${decision.decision}`);
-      return this.get(intent.idempotencyKey, memberId)!;
+      return (memberId ? this.getOwned(intent.idempotencyKey, memberId) : this.getLegacy(intent.idempotencyKey))!;
     });
   }
   /** Release only approvals that never reached the signer. Caller holds the write lock. */
@@ -696,7 +707,7 @@ export class PurchaseLedger {
   saveAnswer(taskId: string, answer: string, memberId?: string) {
     if (!answer.trim() || answer.length > 12000) throw new Error('Invalid final answer');
     this.atomic(() => {
-      const record = this.get(taskId, memberId);
+      const record = (memberId ? this.getOwned(taskId, memberId) : this.getLegacy(taskId));
       if (record?.status !== 'PAID' || !record.data) throw new Error('Answer requires paid data');
       const result = this.db.prepare('INSERT OR IGNORE INTO purchase_answers (purchase_id,answer) VALUES (?,?)').run(record.intent.id, answer);
       if (result.changes) this.event(record.intent.id, 'task.ANSWERED');
@@ -705,9 +716,7 @@ export class PurchaseLedger {
   claim(approvalId: string, now = this.now(), validate?: (record: PurchaseRecord) => void, expectedMode?: PurchaseExecutionMode): SpendReservation {
     return this.atomic(() => {
       if (this.stopping) throw new Error('Service is stopping');
-      const row = this.db.prepare('SELECT task_id,owner_card_member_id FROM purchases WHERE approval_id=?').get(approvalId);
-      if (!row) throw new Error('Unknown approval');
-      const record = this.get(String(row.task_id), row.owner_card_member_id ? String(row.owner_card_member_id) : undefined)!;
+      const record = this.recordForApproval(approvalId);
       if (expectedMode && record.executionMode !== expectedMode) throw new Error('PURCHASE_EXECUTION_MODE_MISMATCH');
       if (record.status !== 'APPROVED' || record.decision.decision !== 'APPROVED' || record.intent.expiresAt <= now) throw new Error('Approval inactive or expired');
       if (record.executionMode === 'live_mainnet' && (!this.managed || !this.requireSpendGrant)) throw new Error('MAINNET_AUTHORITY_REQUIRED');
@@ -725,7 +734,7 @@ export class PurchaseLedger {
       if (this.hasBlockingPayment(record.intent, record.monetaryScope)) throw new Error('Another payment requires reconciliation');
       this.db.prepare("UPDATE purchases SET status=? WHERE approval_id=? AND status='APPROVED'").run(purchaseStatusAfter(record.status, 'START_PAYMENT'), approvalId);
       this.event(record.intent.id, 'payment.PAYING');
-      return this.get(record.intent.idempotencyKey, record.ownerCardMemberId)!;
+      return this.recordForApproval(approvalId);
     });
   }
   savePayload(approvalId: string, payload: unknown, validate?: (record: PurchaseRecord) => void, original?: OriginalPaymentRecord) {
@@ -736,9 +745,9 @@ export class PurchaseLedger {
     });
   }
   private recordForApproval(approvalId: string) {
-    const row = this.db.prepare('SELECT task_id,owner_card_member_id FROM purchases WHERE approval_id=?').get(approvalId);
-    if (!row) throw new Error('Unknown approval');
-    return this.get(String(row.task_id), row.owner_card_member_id ? String(row.owner_card_member_id) : undefined)!;
+    const record = this.readRecord(this.db.prepare('SELECT * FROM purchases WHERE approval_id=?').get(approvalId));
+    if (!record) throw new Error('Unknown approval');
+    return record;
   }
   private assertOriginalBindings(record: PurchaseRecord, original: OriginalPaymentRecord) {
     const payload = this.savedPayload(record.approvalId);
@@ -867,7 +876,7 @@ export class PurchaseLedger {
     }
     const row = this.db.prepare('SELECT task_id,owner_card_member_id,payload,payment_evidence,status,execution_mode FROM purchases WHERE approval_id=?').get(approvalId);
     if (!row) throw new Error('Unknown approval');
-    const record = this.get(String(row.task_id), row.owner_card_member_id ? String(row.owner_card_member_id) : undefined);
+    const record = this.recordForApproval(approvalId);
     if (!record || record.executionMode === 'simulated' || !row.payload) throw new Error('LIVE_PAYMENT_EVIDENCE_INVALID');
     let payload: unknown;
     try { payload = JSON.parse(String(row.payload)); } catch { throw new Error('LIVE_PAYMENT_EVIDENCE_INVALID'); }
@@ -893,7 +902,7 @@ export class PurchaseLedger {
       const data = z.json().parse(result.data);
       const row = this.db.prepare('SELECT task_id,owner_card_member_id,status,execution_mode FROM purchases WHERE approval_id=?').get(approvalId);
       if (!row) throw new Error('Unknown approval');
-      const record = this.get(String(row.task_id), row.owner_card_member_id ? String(row.owner_card_member_id) : undefined);
+      const record = this.recordForApproval(approvalId);
       if (record?.executionMode === 'simulated') {
         if (!result.transaction.startsWith('simulated-') || !['PAYING', 'PAID'].includes(record.status)) throw new Error('Simulated purchase cannot be completed from this state');
         if (record.status !== 'PAID') {
@@ -941,7 +950,12 @@ export class PurchaseLedger {
         unresolved: Number(this.db.prepare(`SELECT COUNT(*) AS n FROM purchases WHERE status IN ('PAYING','PAYMENT_UNKNOWN')${filter}`).get()!.n) };
     });
   }
-  list(limit = 50, memberId?: string) {
+  listForOwner(memberId: string, limit = 50) {
+    this.assertReadOwner(memberId);
+    return this.listRecords(limit, memberId);
+  }
+  listForAdministration(limit = 50) { return this.listRecords(limit); }
+  private listRecords(limit: number, memberId?: string) {
     if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new Error('Invalid record limit');
     return this.db.prepare(`SELECT p.id,p.task_id,p.status,p.amount,p.transaction_id,p.data IS NOT NULL AS delivered,p.execution_mode,
       json_extract(p.purchase,'$.createdAt') AS created_at,json_extract(p.purchase,'$.offerId') AS offer_id,
@@ -964,9 +978,18 @@ export class PurchaseLedger {
         ...(row.reason ? { reason: String(row.reason) } : {}),
         ...(row.decision_reason ? { decisionReason: String(row.decision_reason) } : {}), ...(row.grant_id ? { grantId: String(row.grant_id) } : {}) }); });
   }
-  events(taskId: string, memberId?: string) {
+  eventsForOwner(taskId: string, memberId: string) {
+    this.assertReadOwner(memberId);
     return this.db.prepare(`SELECT e.sequence,e.type,e.at FROM purchase_events e JOIN purchases p ON p.id=e.purchase_id
-      WHERE p.task_id=? ${memberId ? 'AND p.owner_card_member_id=?' : ''} ORDER BY e.sequence`).all(...(memberId ? [taskId, memberId] : [taskId]));
+      WHERE p.task_id=? AND p.owner_card_member_id=? ORDER BY e.sequence`).all(taskId, memberId);
+  }
+  eventsForLegacy(taskId: string) {
+    return this.db.prepare(`SELECT e.sequence,e.type,e.at FROM purchase_events e JOIN purchases p ON p.id=e.purchase_id
+      WHERE p.task_id=? AND p.owner_card_member_id IS NULL ORDER BY e.sequence`).all(taskId);
+  }
+  eventsForAdministration(taskId: string) {
+    return this.db.prepare(`SELECT e.sequence,e.type,e.at,p.id AS purchaseId,p.task_id AS requestId,p.owner_card_member_id AS ownerCardMemberId
+      FROM purchase_events e JOIN purchases p ON p.id=e.purchase_id WHERE p.task_id=? ORDER BY e.sequence`).all(taskId);
   }
   private denied(reason: string, committed: bigint, controls: SpendingControls): AuthorityDecision {
     return { decision: 'DENIED', reason, committedBefore: committed.toString(), remainingAfter: controls.dailyBudget === null ? '0' : remainingAtomic(controls.dailyBudget, committed).toString() };

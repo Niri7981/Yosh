@@ -79,7 +79,7 @@ it('Agent-created resources appear in both read models but cannot spend without 
   expect(f.app.listRegisteredResources().find(item => item.resourceId === 'agent-generic-price')).toMatchObject({ source: 'agent', submission: { sample: input.sample } });
   expect(f.app.registeredResources().find(item => item.resourceId === 'agent-generic-price')).toMatchObject({ source: 'agent', submission: { sample: input.sample } });
   expect(f.app.ledger.spendGrantSummary(Date.now(), 'live_mainnet', principal.cardMemberId, 'agent-generic-price')).toBeNull();
-  expect(f.app.ledger.list()).toHaveLength(0);
+  expect(f.app.ledger.listForAdministration()).toHaveLength(0);
   f.quoteFetch.mockImplementation(async (url) => new Response(null, { status: 402, headers: await read(String(url)) }));
   const denied = await f.call('agent-without-grant', descriptor.token, { resourceId: 'agent-generic-price', request: input.sample });
   expect(denied.status).toBe(200);
@@ -95,7 +95,7 @@ it('real App management and MCP tool reach the shared Mainnet signing boundary; 
     const first = await client.callTool({ name: 'request_purchase', arguments: input }); expect(first.isError).not.toBe(true);
     expect(JSON.stringify(first)).toContain('PAYMENT_UNKNOWN'); expect(JSON.stringify(first)).not.toMatch(/buyerSignature|PAYMENT-SIGNATURE|transactionBase64/);
     await client.callTool({ name: 'request_purchase', arguments: input });
-    expect(prepareSolanaPayment).toHaveBeenCalledOnce(); expect(f.quoteFetch).toHaveBeenCalledOnce(); expect(f.app.ledger.list()).toHaveLength(1);
+    expect(prepareSolanaPayment).toHaveBeenCalledOnce(); expect(f.quoteFetch).toHaveBeenCalledOnce(); expect(f.app.ledger.listForAdministration()).toHaveLength(1);
     expect((await f.app.overview()).service).toMatchObject({ network: 'Solana Mainnet', testEnvironment: false });
   } finally { await client.close(); await server.close(); }
 });
@@ -239,7 +239,7 @@ it('the shipped stdio MCP bridge uses a registered member capability and the pro
     const first = await client.callTool({ name: 'request_purchase', arguments: args });
     expect(first.isError).not.toBe(true); expect(JSON.stringify(first)).toContain('PAYMENT_UNKNOWN');
     await client.callTool({ name: 'request_purchase', arguments: args });
-    expect(prepareSolanaPayment).toHaveBeenCalledOnce(); expect(f.app.ledger.list()).toHaveLength(1);
+    expect(prepareSolanaPayment).toHaveBeenCalledOnce(); expect(f.app.ledger.listForAdministration()).toHaveLength(1);
     f.app.revokeSpendGrant();
     const stale = await client.callTool({ name: 'request_purchase', arguments: { ...args, requestId: 'stale' } });
     expect(stale.isError).not.toBe(true);
@@ -252,7 +252,7 @@ it('the shipped stdio MCP bridge uses a registered member capability and the pro
 it('Mainnet original-payment recovery survives backend restart with production disabled and authority revoked', async () => {
   const f = await fixture(); await f.daily(); await f.grant();
   expect(await (await f.call('restart-original')).json()).toMatchObject({ paymentStatus: 'PAYMENT_UNKNOWN' });
-  const before = f.app.ledger.get('restart-original', f.app.ledger.defaultCardMember().id)!;
+  const before = f.app.ledger.getOwned('restart-original', f.app.ledger.defaultCardMember().id)!;
   const evidence = f.app.ledger.savedOriginalPayment(before.approvalId)!;
   f.app.setPaused(true); await f.app.prepareQuit(); f.app.close(); context.app = undefined;
   vi.stubEnv('YOSH_ENABLE_MAINNET_EXECUTION', '');
@@ -283,7 +283,7 @@ it('concurrent product requests share one original payment and reject changed in
   const f = await fixture(); await f.daily(); await f.grant();
   const responses = await Promise.all([f.call('concurrent'), f.call('concurrent')]);
   expect(responses.every(response => response.status === 200)).toBe(true);
-  expect(f.app.ledger.list()).toHaveLength(1); expect(prepareSolanaPayment).toHaveBeenCalledOnce();
+  expect(f.app.ledger.listForAdministration()).toHaveLength(1); expect(prepareSolanaPayment).toHaveBeenCalledOnce();
   expect(f.app.ledger.managedSummary(Date.now(), 'live_mainnet').reserved).toBe('10000');
   expect((await f.call('concurrent', undefined, { reason: 'changed purpose' })).status).toBe(409);
   expect(prepareSolanaPayment).toHaveBeenCalledOnce();
@@ -322,7 +322,7 @@ it('lists production registration while paused and disabled, even when live quot
   expect(result.registeredResources).toEqual(before.service.registeredResources);
   expect(result.resources[0]).toMatchObject({ resourceId: f.resource.resourceId, quoteStatus: 'unavailable', code: 'RESOURCE_QUOTE_UNAVAILABLE' });
   expect(f.app.spendGrantSummary()).toBeNull();
-  expect(f.app.ledger.list()).toHaveLength(0);
+  expect(f.app.ledger.listForAdministration()).toHaveLength(0);
   expect((await f.app.overview()).budget.paused).toBe(true);
   expect(loadBuyerSigner).not.toHaveBeenCalled(); expect(prepareSolanaPayment).not.toHaveBeenCalled();
 });
@@ -355,7 +355,7 @@ it('only an explicit management request creates a challenge-bound Mainnet grant,
   await create();
   expect(f.app.spendGrantSummary()).toMatchObject({ totalLimit: '10000', singleLimit: '5000', payTo: f.resource.recipient, status: 'ACTIVE' });
   expect(f.app.execution().productionExecutionEnabled).toBe(false); expect((await f.app.overview()).budget.paused).toBe(true);
-  expect(f.app.ledger.list()).toHaveLength(0); expect(loadBuyerSigner).not.toHaveBeenCalled(); expect(prepareSolanaPayment).not.toHaveBeenCalled();
+  expect(f.app.ledger.listForAdministration()).toHaveLength(0); expect(loadBuyerSigner).not.toHaveBeenCalled(); expect(prepareSolanaPayment).not.toHaveBeenCalled();
 });
 it('a failed challenge cannot create a grant or rotate the member credential', async () => {
   const f = await fixture(false); challengeBoundRegistration(f);
@@ -365,7 +365,7 @@ it('a failed challenge cannot create a grant or rotate the member credential', a
       totalLimit: '10000', singleLimit: '5000', expiresAt: Date.now() + 3600000 }) }));
   expect(response.status).toBe(500); expect(await response.text()).not.toContain('upstream details');
   expect(readConnection(f.dir)).toEqual(connection); expect(f.app.spendGrantSummary()).toBeNull();
-  expect(f.app.ledger.list()).toHaveLength(0); expect(loadBuyerSigner).not.toHaveBeenCalled();
+  expect(f.app.ledger.listForAdministration()).toHaveLength(0); expect(loadBuyerSigner).not.toHaveBeenCalled();
 });
 it('revoking the connection during challenge discovery prevents the pending Grant from being created', async () => {
   const f = await fixture(false); challengeBoundRegistration(f);
@@ -407,9 +407,9 @@ it('removing a user resource keeps real ledger records and Grants intact and blo
   const f = await fixture(); challengeBoundRegistration(f); f.quoteFetch.mockImplementation(async () => readOnlyChallenge(f, f.resource.recipient, 300));
   await f.daily(); await f.grant(); expect(await (await f.call('historical-runtime')).json()).toMatchObject({ paymentStatus: 'PAYMENT_UNKNOWN' });
   const member = f.app.ledger.defaultCardMember().id;
-  const purchase = f.app.ledger.get('historical-runtime', member); const grant = f.app.spendGrantSummary();
+  const purchase = f.app.ledger.getOwned('historical-runtime', member); const grant = f.app.spendGrantSummary();
   f.app.disableRegisteredResource(f.resource.resourceId, 'REMOVED');
-  expect(f.app.ledger.get('historical-runtime', member)).toEqual(purchase); expect(f.app.spendGrantSummary()).toEqual(grant);
+  expect(f.app.ledger.getOwned('historical-runtime', member)).toEqual(purchase); expect(f.app.spendGrantSummary()).toEqual(grant);
   expect((await f.call('after-removal')).status).toBe(400); expect(prepareSolanaPayment).toHaveBeenCalledOnce();
 });
 it('resource disable between quote and signing aborts before producing a payment', async () => {
@@ -424,7 +424,7 @@ it('resource disable between quote and signing aborts before producing a payment
   await vi.waitFor(() => expect(prepareSolanaPayment).toHaveBeenCalledOnce());
   f.app.disableRegisteredResource(f.resource.resourceId, 'DISABLED'); resume(); await requesting;
   expect(signed).not.toHaveBeenCalled();
-  const record = f.app.ledger.get('disable-before-sign', f.app.ledger.defaultCardMember().id)!;
+  const record = f.app.ledger.getOwned('disable-before-sign', f.app.ledger.defaultCardMember().id)!;
   expect(record.status).toBe('FAILED'); expect(record.transaction).toBeUndefined(); expect(f.app.ledger.savedOriginalPayment(record.approvalId)).toBeUndefined();
 });
 it('runtime resource selection survives an App backend restart and ignores later installation configuration', async () => {
@@ -435,5 +435,5 @@ it('runtime resource selection survives an App backend restart and ignores later
   const restarted = new AppRuntime(f.dir, { initializeWallet: async () => ({ address: '11111111111111111111111111111111', reused: true }) }); context.app = restarted;
   expect(restarted.inspectRegisteredResource(id)).toEqual(before);
   expect((await restarted.overview()).service.registeredResources.some(resource => resource.resourceId === id)).toBe(true);
-  expect(restarted.spendGrantSummary()).toBeNull(); expect(restarted.ledger.list()).toHaveLength(0);
+  expect(restarted.spendGrantSummary()).toBeNull(); expect(restarted.ledger.listForAdministration()).toHaveLength(0);
 });

@@ -2,7 +2,7 @@ import { expect, it, vi } from 'vitest';
 const state = vi.hoisted(() => ({ record: null as null | { status: string; deliveryStatus: string; data: unknown }, owner: 'member-1' }));
 vi.mock('../../src/modules/app/app-runtime', () => ({ appRuntime: () => ({
   authenticateAgent: () => ({ cardMemberId: state.owner }),
-  ledger: { get: (_id: string, memberId: string) => memberId === 'member-1' ? state.record : null },
+  ledger: { getOwned: (_id: string, memberId: string) => memberId === 'member-1' ? state.record : null },
 }) }));
 import { GET } from '../../src/app/api/agent/purchases/[purchaseId]/delivery/route';
 

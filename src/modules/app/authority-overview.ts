@@ -10,5 +10,5 @@ export function assembleAuthorityOverview(ledger: PurchaseLedger, agentConnectio
   return { service: { ...service, network: mode === 'live_mainnet' ? 'Solana Mainnet' : 'Solana Devnet', testEnvironment: mode !== 'live_mainnet', purchaseMode: mode },
     wallet, budget: { ...budget, dailyLimitDisplay: display(budget.dailyLimit), paidDisplay: display(budget.paid),
       reservedDisplay: display(budget.reserved), remainingDisplay: display(budget.remaining) },
-    grant: ledger.spendGrantSummary(now, mode, memberId), purchases: ledger.list(50, memberId), connection: agentConnection.status() };
+    grant: ledger.spendGrantSummary(now, mode, memberId), purchases: ledger.listForOwner(memberId, 50), connection: agentConnection.status() };
 }

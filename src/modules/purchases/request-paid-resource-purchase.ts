@@ -64,7 +64,7 @@ export async function requestPaidResourcePurchase(raw: unknown, options: {
 }): Promise<PurchaseRequestResult> {
   if (options.config.mode === 'live_mainnet') {
     const input = PurchaseRequestInputSchema.parse(raw);
-    const reused = Boolean(options.ledger.get(input.requestId, options.principal.cardMemberId));
+    const reused = Boolean(options.ledger.getOwned(input.requestId, options.principal.cardMemberId));
     const record = await requestRegisteredResourcePurchase(input, options);
     return result(record, reused, 'live_mainnet');
   }
@@ -87,9 +87,9 @@ export async function requestPaidResourcePurchase(raw: unknown, options: {
     } else if (['PAYING', 'PAYMENT_UNKNOWN'].includes(record.status) || record.deliveryStatus === 'PENDING') {
       await (options.recover ?? recoverApprovedPayment)(options.ledger, input.requestId, options.config, endpoint, undefined, principal.cardMemberId);
     }
-    return result(options.ledger.get(input.requestId, principal.cardMemberId)!, reused, executionMode);
+    return result(options.ledger.getOwned(input.requestId, principal.cardMemberId)!, reused, executionMode);
   }
-  const existing = options.ledger.get(input.requestId, principal.cardMemberId);
+  const existing = options.ledger.getOwned(input.requestId, principal.cardMemberId);
   if (existing) {
     options.ledger.assertReplayAllowed(existing, executionMode, options.ledger.paymentScope(options.config, executionMode));
     if (existing.intent.requestHash !== requestHash || existing.intent.resourceId !== input.resourceId || !existing.intent.resourcePath) throw new Error('REQUEST_ID_CONFLICT');
@@ -107,7 +107,7 @@ export async function requestPaidResourcePurchase(raw: unknown, options: {
     quoteFingerprint: hash(quote), createdAt: requestStartedAt,
     expiresAt: now + Math.min(quote.maxTimeoutSeconds, 300) * 1000,
     executionBinding: resourcePaymentBinding(options.config, options.config.buyer, request, challenge, TEST_CACHED_DELIVERY), ...(authority ? { authority } : {}) });
-  const winner = options.ledger.get(input.requestId, principal.cardMemberId);
+  const winner = options.ledger.getOwned(input.requestId, principal.cardMemberId);
   if (winner) {
     options.ledger.assertReplayAllowed(winner, executionMode, options.ledger.paymentScope(options.config, executionMode));
     if (winner.intent.requestHash !== requestHash || winner.intent.resourceId !== input.resourceId || !winner.intent.resourcePath) throw new Error('REQUEST_ID_CONFLICT');

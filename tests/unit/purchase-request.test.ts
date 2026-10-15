@@ -78,7 +78,7 @@ it('runs real quote → SpendGrant → policy for APPROVED and DENIED without pa
     expect(basic.quote).toMatchObject({ resourceId: SOL_MARKET_SNAPSHOT_RESOURCE_ID, network: config.network, assetId: config.mint, payTo: config.merchant, amount: '200000' });
     expect(basic.grant).toMatchObject({ id: expect.any(String), version: 1 });
     expect(premium.grant?.id).toBe(basic.grant?.id);
-    expect(ledger.list()).toHaveLength(2);
+    expect(ledger.listForAdministration()).toHaveLength(2);
     expect(ledger.spendGrantSummary(now, 'simulated')).toMatchObject({ committed: '200000', remaining: '4800000' });
     expect(remote.verify).not.toHaveBeenCalled();
     expect(remote.settle).not.toHaveBeenCalled();
@@ -91,7 +91,7 @@ it('bridges basic APPROVED through the existing claim path using the one persist
   const signer = vi.fn();
   const pay = vi.fn(async (paymentLedger: PurchaseLedger, approvalId: string, _config: PaymentConfig, endpoint: string) => {
     signer();
-    const claimed = paymentLedger.get('executed-basic');
+    const claimed = paymentLedger.getOwned('executed-basic', cardMemberId);
     if (!claimed) throw new Error('purchase reservation missing');
     expect(claimed.quote.amount).toBe('200000');
     expect(endpoint).toBe('http://127.0.0.1:3049/api/paid/market-snapshot?asset=SOL&offer=basic');
@@ -133,8 +133,8 @@ it('does not replay another CardMember purchase with the same requestId', async 
       principal: { cardMemberId: otherCardMemberId, connectionId: randomUUID(), connectionGeneration: 1 }, fetcher, now: () => now, pay });
     expect(other).toMatchObject({ reused: false, status: 'DENIED', paymentStatus: 'NOT_STARTED' });
     expect(other).not.toHaveProperty('resource');
-    expect(ledger.get(input.requestId, cardMemberId)).toMatchObject({ ownerCardMemberId: cardMemberId, status: 'PAID' });
-    expect(ledger.get(input.requestId, otherCardMemberId)).toMatchObject({ ownerCardMemberId: otherCardMemberId, status: 'DENIED' });
+    expect(ledger.getOwned(input.requestId, cardMemberId)).toMatchObject({ ownerCardMemberId: cardMemberId, status: 'PAID' });
+    expect(ledger.getOwned(input.requestId, otherCardMemberId)).toMatchObject({ ownerCardMemberId: otherCardMemberId, status: 'DENIED' });
     expect(fetcher).toHaveBeenCalledTimes(2);
     expect(pay).toHaveBeenCalledOnce();
   } finally {
@@ -152,7 +152,7 @@ it('CardMember revoke blocks new spending and completed resource access without 
   try {
     await requestMarketPurchase(input, { config, ledger, origin: 'http://127.0.0.1:3049', principal, fetcher, now: () => now, pay });
     expect(ledger.revokeCardMember(cardMemberId, now + 1)).toBe(true);
-    expect(ledger.get(input.requestId)?.ownerCardMemberId).toBe(cardMemberId);
+    expect(ledger.getOwned(input.requestId, cardMemberId)?.ownerCardMemberId).toBe(cardMemberId);
     await expect(requestMarketPurchase(input, { config, ledger, origin: 'http://127.0.0.1:3049', principal, fetcher, now: () => now + 2, pay }))
       .rejects.toThrow('CARD_MEMBER_REVOKED');
     await expect(requestMarketPurchase({ requestId: 'revoked-member-new', offerId: 'basic', reason: 'Need new data' },
@@ -232,7 +232,7 @@ it('replays the same request without another quote and rejects changed input', a
     const rotated = await requestMarketPurchase(input, { config, ledger, execute: false, origin: 'http://127.0.0.1:3049',
       principal: { ...principal, connectionGeneration: 99 }, fetcher, now: () => now });
     expect(rotated).toMatchObject({ purchaseId: first.purchaseId, reused: true });
-    expect(ledger.list()).toHaveLength(1);
+    expect(ledger.listForAdministration()).toHaveLength(1);
     expect(remote.verify).not.toHaveBeenCalled(); expect(remote.settle).not.toHaveBeenCalled();
   } finally { ledger.close(); store.close(); }
 });
@@ -251,7 +251,7 @@ it('rejects simulated APPROVED replay in live mode before payment, recovery, or 
     })).rejects.toThrow('PURCHASE_EXECUTION_MODE_MISMATCH');
 
     expect(simulated).toMatchObject({ status: 'APPROVED', executionMode: 'simulated', reused: false });
-    expect(ledger.get(input.requestId)).toMatchObject({ status: 'APPROVED', executionMode: 'simulated', paymentPayloadPresent: false });
+    expect(ledger.getOwned(input.requestId, cardMemberId)).toMatchObject({ status: 'APPROVED', executionMode: 'simulated', paymentPayloadPresent: false });
     expect(fetcher).toHaveBeenCalledOnce();
     expect(pay).not.toHaveBeenCalled();
     expect(recover).not.toHaveBeenCalled();
@@ -275,7 +275,7 @@ it('concurrent identical request IDs persist one quote and claim payment once', 
     ]);
     expect(first.purchaseId).toBe(second.purchaseId);
     expect([first.reused, second.reused].sort()).toEqual([false, true]);
-    expect(ledger.list()).toHaveLength(1);
+    expect(ledger.listForAdministration()).toHaveLength(1);
     expect(pay).toHaveBeenCalledOnce();
   } finally { ledger.close(); store.close(); }
 });
@@ -287,7 +287,7 @@ it('rejects Agent-supplied payment terms before fetching a quote', async () => {
       amount: '1', payTo: buyer, approved: true, transaction: 'forged' },
     { config, ledger, execute: false, origin: 'http://127.0.0.1:3049', principal, fetcher, now: () => now })).rejects.toThrow();
     expect(fetcher).not.toHaveBeenCalled();
-    expect(ledger.list()).toHaveLength(0);
+    expect(ledger.listForAdministration()).toHaveLength(0);
     expect(remote.verify).not.toHaveBeenCalled(); expect(remote.settle).not.toHaveBeenCalled();
   } finally { ledger.close(); store.close(); }
 });
@@ -303,7 +303,7 @@ it('rejects a changed server quote before reserving any budget', async () => {
   try {
     await expect(requestMarketPurchase({ requestId: 'changed-quote', offerId: 'basic', reason: 'Need data' },
       { config, ledger, execute: false, origin: 'http://127.0.0.1:3049', principal, fetcher: changed, now: () => now })).rejects.toThrow('INVALID_X402_QUOTE');
-    expect(ledger.list()).toHaveLength(0);
+    expect(ledger.listForAdministration()).toHaveLength(0);
     expect(ledger.spendGrantSummary(now)?.committed).toBe('0');
     expect(remote.verify).not.toHaveBeenCalled(); expect(remote.settle).not.toHaveBeenCalled();
   } finally { ledger.close(); store.close(); }
@@ -343,11 +343,11 @@ it('persists a structured DENIED request when the grant is already revoked', asy
       deliveryStatus: 'NOT_DELIVERED', reused: false,
     });
     expect(denied).not.toHaveProperty('resource');
-    const record = ledger.get('revoked-during-quote');
+    const record = ledger.getOwned('revoked-during-quote', cardMemberId);
     expect(record).toMatchObject({ status: 'DENIED', executionMode: 'live_devnet', paymentPayloadPresent: false });
     expect(record).not.toHaveProperty('transaction');
     expect(record).not.toHaveProperty('data');
-    expect(ledger.events('revoked-during-quote').map(event => event.type)).toEqual(['authority.DENIED']);
+    expect(ledger.eventsForOwner('revoked-during-quote', cardMemberId).map(event => event.type)).toEqual(['authority.DENIED']);
     expect(ledger.managedSummary(now + 2, 'live_devnet')).toEqual(beforeBudget);
     expect(ledger.spendGrantSummary(now + 2, 'live_devnet')).toEqual(beforeGrant);
     expect(beforeGrant).toMatchObject({ status: 'REVOKED', committed: '0' });
@@ -359,7 +359,7 @@ it('persists a structured DENIED request when the grant is already revoked', asy
     ledger.close();
     reopened = new PurchaseLedger(ledgerPath, { managed: true, mode: 'live_devnet', requireSpendGrant: true, now: () => now + 2,
       timeZone: () => 'Asia/Shanghai', defaultCardMemberId: cardMemberId });
-    expect(reopened.get('revoked-during-quote')).toMatchObject({
+    expect(reopened.getOwned('revoked-during-quote', cardMemberId)).toMatchObject({
       status: 'DENIED', executionMode: 'live_devnet', decision: { decision: 'DENIED', reason: 'SPEND_GRANT_REVOKED' },
       paymentPayloadPresent: false,
     });
