@@ -558,8 +558,9 @@ export class PurchaseLedger {
       const record = this.recordForApproval(approvalId);
       if (record.status !== 'PAID' || record.deliveryStatus !== 'PENDING') return;
       if (!this.hasVerifiedLivePayment(record)) { this.deliveryTerminal(record, 'DELIVERY_PAYMENT_EVIDENCE_INVALID', 'UNSUPPORTED'); return; }
-      if (record.executionMode === 'live_mainnet' && this.requireRegisteredResource && !this.resources.active().some(resource => resource.resourceId === record.intent.resourceId)) throw new Error('MAINNET_REGISTERED_RESOURCE_REQUIRED');
-    validate?.(record);
+      // Resource disablement stops new spending, not fulfillment of a paid order.
+      // Delivery remains bound to the saved request, capability and payment evidence.
+      validate?.(record);
       const row = this.db.prepare('SELECT * FROM purchase_delivery WHERE purchase_id=?').get(record.intent.id)!;
       if (kind === 'retry') {
         const capability = DeliveryRecoveryCapabilitySchema.parse(JSON.parse(String(row.capability)));
