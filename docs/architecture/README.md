@@ -4,6 +4,7 @@
 
 ## 当前产品架构
 
+- [Buyer Reliability v1.1 Backlog](buyer-reliability-backlog.md)：当前 HEAD 的可靠性问题核查、分类、逐项修复与验收记录。
 - [macOS App 壳与本地服务生命周期](macos-app-shell.md)：窗口、进程和本地服务。
 - [钥匙串读取与签名审计](keychain-access.md)：本机访问授权和签名身份。
 - [Authority Core（阶段一）](authority-core.md)：消费意图、授权决策和预算预占。
