@@ -15,7 +15,7 @@ import { PAID_RESOURCE_PURCHASE_OPERATION } from '../../src/modules/authority/sp
 import { checkPaymentBinding, executeApprovedPayment, recoverApprovedPayment } from '../../src/modules/purchases/approved-payment';
 import { requestRegisteredResourcePurchase } from '../../src/modules/purchases/request-registered-resource-purchase';
 import { requestForPurchase } from '../../src/modules/purchases/request-registered-resource-purchase';
-import { assertProductionPaymentGate } from '../../src/modules/payment/production-execution-gate';
+import { assertProductionPaymentGate } from '../../src/modules/purchases/production-execution-gate';
 import { resourcePaymentBinding } from '../../src/modules/payment/resource-challenge';
 import { loadBuyerSigner } from '../../src/modules/payment/wallet';
 import { prepareSolanaPayment } from '../../src/modules/payment/solana-payment';
@@ -248,7 +248,7 @@ it('challenge-derived recipients still enforce the Grant payee and immutable pro
   const resource: X402Resource = { ...base, recipientSource: 'live_challenge', maximumAmount: '10000' };
   const config: PaymentConfig = { ...f.config, merchant: '', registeredResources: [resource] };
   try {
-    const { assertProductionPaymentGate } = await import('../../src/modules/payment/production-execution-gate');
+    const { assertProductionPaymentGate } = await import('../../src/modules/purchases/production-execution-gate');
     const record = f.request('challenge-bound-approved');
     expect(() => assertProductionPaymentGate(f.ledger, record, config, resource.request.url)).not.toThrow();
     expect(() => assertProductionPaymentGate(f.ledger, record, { ...config, registeredResources: [{ ...resource, maximumAmount: '9999' }] }, resource.request.url)).toThrow();

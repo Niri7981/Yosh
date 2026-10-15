@@ -5,6 +5,7 @@ import { resolvePaymentEnvironment, DEVNET_GENESIS, TOKEN_PROGRAM } from '../../
 import type { PaymentConfig } from '../../src/modules/payment/payment-config';
 import { prepareSolanaPayment } from '../../src/modules/payment/solana-payment';
 import { PurchaseLedger } from '../../src/modules/purchases/purchase-ledger';
+import { purchaseSigningAuthorization } from '../../src/modules/purchases/purchase-signing-authorization';
 import { createX402SpendIntent } from '../../src/modules/resources/market-spend-adapter';
 import { PAID_RESOURCE_PURCHASE_OPERATION } from '../../src/modules/authority/spend-grant';
 import type { X402Resource } from '../../src/modules/resources/http-resource';
@@ -70,7 +71,7 @@ function fixture() {
     return { x402Version: 2, payload: { transaction: 'fixture' } };
   });
   const sign = (selected = config) => prepareSolanaPayment(selected, signer, challenge.accepts[0], () => {},
-    { amount: '10000', resource: resource.request.url, challenge }, () => {}, { ledger, approvalId: record.approvalId, endpoint: resource.request.url });
+    { amount: '10000', resource: resource.request.url, challenge }, () => {}, purchaseSigningAuthorization(ledger, record.approvalId, selected, resource.request.url));
   return { config, ledger, state, signer, signTransactions, fetcher, record, sign, challenge, resource };
 }
 
@@ -122,12 +123,35 @@ it('requires the exact reserved quote at the SDK boundary and checks signer iden
   try {
     await expect(prepareSolanaPayment(f.config, f.signer, { ...f.challenge.accepts[0], amount: '10001' }, () => {},
       { amount: '10001', resource: f.resource.request.url, challenge: f.challenge }, () => {},
-      { ledger: f.ledger, approvalId: f.record.approvalId, endpoint: f.resource.request.url })).rejects.toThrow('MAINNET_PAYMENT_BINDING_MISMATCH');
+      purchaseSigningAuthorization(f.ledger, f.record.approvalId, f.config, f.resource.request.url))).rejects.toThrow('MAINNET_PAYMENT_BINDING_MISMATCH');
     const signer: TransactionSigner = { address: address(f.config.merchant), signTransactions: f.signTransactions };
     await expect(prepareSolanaPayment(f.config, signer, f.challenge.accepts[0], () => {},
       { amount: '10000', resource: f.resource.request.url, challenge: f.challenge }, () => {},
-      { ledger: f.ledger, approvalId: f.record.approvalId, endpoint: f.resource.request.url })).rejects.toThrow('matching the configured buyer');
+      purchaseSigningAuthorization(f.ledger, f.record.approvalId, f.config, f.resource.request.url))).rejects.toThrow('matching the configured buyer');
     expect(f.fetcher).not.toHaveBeenCalled(); expect(sdk.constructor).not.toHaveBeenCalled(); expect(f.signTransactions).not.toHaveBeenCalled();
+  } finally { f.ledger.close(); }
+});
+
+it.each(['resource', 'challenge', 'approval'])(
+  'the purchase authorization capability rejects a different reserved %s before RPC or signing', async binding => {
+    const f = fixture();
+    try {
+      const authorized = { amount: '10000', resource: f.resource.request.url, challenge: f.challenge };
+      if (binding === 'resource') authorized.resource += '?different=1';
+      if (binding === 'challenge') authorized.challenge = { ...f.challenge, resource: { url: `${f.resource.request.url}/different` } };
+      const approvalId = binding === 'approval' ? randomUUID() : f.record.approvalId;
+      await expect(prepareSolanaPayment(f.config, f.signer, f.challenge.accepts[0], () => {}, authorized, () => {},
+        purchaseSigningAuthorization(f.ledger, approvalId, f.config, f.resource.request.url))).rejects.toThrow();
+      expect(f.fetcher).not.toHaveBeenCalled(); expect(sdk.constructor).not.toHaveBeenCalled(); expect(f.signTransactions).not.toHaveBeenCalled();
+    } finally { f.ledger.close(); }
+  });
+
+it('rechecks the purchase resource policy after simulation through the supplied capability', async () => {
+  const f = fixture();
+  try {
+    f.state.beforeSimulationResponse = () => { f.resource.recipient = f.config.buyer; };
+    await expect(f.sign()).rejects.toThrow('MAINNET_RESOURCE_BINDING_MISMATCH');
+    expect(f.signTransactions).not.toHaveBeenCalled();
   } finally { f.ledger.close(); }
 });
 

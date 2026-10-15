@@ -1,10 +1,10 @@
 import { assertGrantPostScope } from '../resources/post-request-authorization';
-import { assertPaymentConfigExecutionEnabled, type PaymentConfig } from './payment-config';
-import { resourcePaymentBinding, validateResourceChallenge } from './resource-challenge';
+import { assertPaymentConfigExecutionEnabled, type PaymentConfig } from '../payment/payment-config';
+import { resourcePaymentBinding, validateResourceChallenge } from '../payment/resource-challenge';
 import { X402ResourceSchema, assertAuthorizedRequestInstance } from '../resources/http-resource';
 import { hash } from '../authority/authority-policy';
-import { monetaryScopeId } from '../purchases/monetary-scope';
-import type { PurchaseLedger, PurchaseRecord } from '../purchases/purchase-ledger';
+import { monetaryScopeId } from './monetary-scope';
+import type { PurchaseLedger, PurchaseRecord } from './purchase-ledger';
 import { PAID_RESOURCE_PURCHASE_OPERATION } from '../authority/spend-grant';
 import { assertSupportedMainnetResourceRequest } from '../resources/supported-resource-request';
 

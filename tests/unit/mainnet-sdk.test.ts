@@ -9,6 +9,7 @@ import { prepareSolanaPayment } from '../../src/modules/payment/solana-payment';
 import { assertUnsignedPaymentBindings, createSignedPaymentIdentity } from '../../src/modules/payment/original-payment-evidence';
 import { createX402SpendIntent } from '../../src/modules/resources/market-spend-adapter';
 import { PurchaseLedger } from '../../src/modules/purchases/purchase-ledger';
+import { purchaseSigningAuthorization } from '../../src/modules/purchases/purchase-signing-authorization';
 import { PAID_RESOURCE_PURCHASE_OPERATION } from '../../src/modules/authority/spend-grant';
 import type { X402Challenge, X402Resource } from '../../src/modules/resources/http-resource';
 
@@ -62,7 +63,7 @@ it('the real locked official x402 SDK constructs and signs Mainnet USDC using fi
     const signTransactions = vi.fn(signer.signTransactions);
     const observedSigner = { ...signer, signTransactions };
     const payload = await prepareSolanaPayment(config, observedSigner, record.quote, () => ledger.assertCanSign(record.approvalId),
-      { amount: record.intent.amount, resource: resource.request.url, challenge }, () => {}, { ledger, approvalId: record.approvalId, endpoint: resource.request.url });
+      { amount: record.intent.amount, resource: resource.request.url, challenge }, () => {}, purchaseSigningAuthorization(ledger, record.approvalId, config, resource.request.url));
     expect(signTransactions).toHaveBeenCalledOnce();
     const identity = createSignedPaymentIdentity(payload, config);
     expect(identity).toMatchObject({ network: config.network, mint: config.mint, amount: '10000', payer: signer.address, recipient: recipient.address,

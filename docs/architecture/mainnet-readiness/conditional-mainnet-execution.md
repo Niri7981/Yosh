@@ -7,7 +7,7 @@
 ## 1. 本轮文件
 
 - 配置：`.env.example`、`src/modules/app/yosh-configuration.ts`、`src/modules/payment/payment-environment.ts`、`src/modules/payment/payment-config.ts`。
-- 门禁和签名：`src/modules/payment/production-execution-gate.ts`、`payment-preflight.ts`、`wallet.ts`、`solana-payment.ts`、`resource-challenge.ts`、`original-payment-evidence.ts`、`read-payment-json.ts`（后六个也在 `src/modules/payment/`）。
+- 门禁和签名：购买侧 `src/modules/purchases/production-execution-gate.ts`、`purchase-signing-authorization.ts`；付款侧 `src/modules/payment/payment-preflight.ts`、`wallet.ts`、`solana-payment.ts`、`resource-challenge.ts`、`original-payment-evidence.ts`、`read-payment-json.ts`（后五个也在 `src/modules/payment/`）。购买侧提供同步签名授权能力，付款适配器不再依赖具体 PurchaseLedger。
 - 授权、执行和恢复：`src/modules/purchases/purchase-ledger.ts`、`monetary-scope.ts`、`mainnet-authority-migration.ts`、`approved-payment.ts`、`delivery-recovery.ts`、`request-registered-resource-purchase.ts`（全部在同目录）。
 - 新测试：`tests/unit/mainnet-execution.test.ts`、`mainnet-signing.test.ts`、`mainnet-sdk.test.ts`。
 - 更新前序断言：同目录的 `app-management.test.ts`、`durable-delivery.test.ts`、`monetary-ledger.test.ts`、`payment-environment.test.ts`、`production-x402.test.ts`、`purchase-mode-isolation.test.ts`、`spend-grant.test.ts`。

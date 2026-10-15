@@ -17,7 +17,8 @@ import { paymentSignatureHeaders, readPaymentRequiredHeader, readSettlementTrans
 import { resourcePaymentBinding, validateResourceChallenge } from '../payment/resource-challenge';
 import { HttpResourceRequestSchema } from '../resources/http-resource';
 import { prepareSafeResourceFetch } from '../resources/safe-resource-fetch';
-import { assertProductionPaymentGate } from '../payment/production-execution-gate';
+import { assertProductionPaymentGate } from './production-execution-gate';
+import { purchaseSigningAuthorization } from './purchase-signing-authorization';
 import { observeDeliveryReceipt, receiveOriginalDelivery, recoverPaidDelivery } from './delivery-recovery';
 import type { ReconciliationCode } from './payment-reconciliation';
 
@@ -156,7 +157,7 @@ export async function executeApprovedPayment(ledger: PurchaseLedger, approvalId:
     const payload = await prepareSolanaPayment(signerConfig, signer, record.quote, beforeSign,
       record.intent.httpRequest ? { amount: record.quote.amount, resource: record.intent.httpRequest.url, challenge: record.intent.x402Challenge }
         : record.intent.offerId || record.intent.resourcePath ? { amount: record.quote.amount, resource: new URL(endpoint).pathname + new URL(endpoint).search } : undefined,
-      value => { lifetime = value; }, ...(config.mode === 'live_mainnet' ? [{ ledger, approvalId, endpoint }] : []));
+      value => { lifetime = value; }, ...(config.mode === 'live_mainnet' ? [purchaseSigningAuthorization(ledger, approvalId, signerConfig, endpoint)] : []));
     ledger.savePayload(approvalId, payload, validate, originalEvidence(record, payload, signerConfig, lifetime));
     trace('SIGNED');
     // Encode before committing the send marker. The guarded write and fetch call

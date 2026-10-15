@@ -8,14 +8,18 @@ import { readPaymentRequiredHeader } from "./x402-client";
 import { validX402Memo } from './resource-challenge';
 import { PositiveAtomicAmountSchema } from '../authority/atomic-money';
 import { SolanaPublicKeySchema, X402ChallengeSchema, type X402Challenge } from '../resources/http-resource';
-import { assertProductionPaymentGate } from './production-execution-gate';
 import { runPaymentPreflight } from './payment-preflight';
-import type { PurchaseLedger } from '../purchases/purchase-ledger';
-import { hash } from '../authority/authority-policy';
 import { assertUnsignedPaymentBindings } from './original-payment-evidence';
 import { readPaymentJson } from './read-payment-json';
 
 export const MARKET_RESOURCE = "/api/paid/market-snapshot?asset=SOL";
+
+export type AuthorizedPayment = { amount: string; resource: string; challenge?: X402Challenge };
+
+/** Supplied by the purchase service; checks must complete before signing can begin. */
+export type PaymentSigningAuthorization = {
+  assertCanSign(requirement: PaymentRequirements, authorized: AuthorizedPayment): undefined;
+};
 
 export function selectPaymentQuote(encoded: string, config: PaymentConfig, feePayer: string) {
   if (encoded.length > 16_384) throw new Error("Payment quote is too large");
@@ -51,21 +55,15 @@ export async function solanaRpc<T>(config: Pick<PaymentConfig, "rpcUrl">, method
 export async function prepareSolanaPayment(
   config: PaymentConfig, signer: TransactionSigner, requirement: PaymentRequirements,
   onSimulation: () => void = () => {},
-  authorized: { amount: string; resource: string; challenge?: X402Challenge } = { amount: PAYMENT_AMOUNT, resource: MARKET_RESOURCE },
+  authorized: AuthorizedPayment = { amount: PAYMENT_AMOUNT, resource: MARKET_RESOURCE },
   onLifetime: (lifetime: { recentBlockhash: string; lastValidBlockHeight: string }) => void = () => {},
-  production?: { ledger: PurchaseLedger; approvalId: string; endpoint: string },
+  production?: PaymentSigningAuthorization,
 ): Promise<PaymentPayload> {
   assertPaymentConfigExecutionEnabled(config);
   const productionGuard = () => {
     if (config.mode !== 'live_mainnet') return;
     if (!production) throw new Error('MAINNET_RESERVED_APPROVAL_REQUIRED');
-    if (production.ledger.savedPayload(production.approvalId)) throw new Error('MAINNET_PAYMENT_ALREADY_SIGNED');
-    production.ledger.assertCanSign(production.approvalId, undefined,
-      record => {
-        assertProductionPaymentGate(production.ledger, record, config, production.endpoint);
-        if (hash(record.quote) !== hash(requirement) || hash(record.intent.x402Challenge) !== hash(authorized.challenge)
-          || record.intent.amount !== authorized.amount || record.intent.httpRequest?.url !== authorized.resource) throw new Error('MAINNET_PAYMENT_BINDING_MISMATCH');
-      });
+    production.assertCanSign(requirement, authorized);
   };
   productionGuard();
   if (requirement.scheme !== "exact" || requirement.network !== config.network || requirement.asset !== config.mint ||
