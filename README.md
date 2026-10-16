@@ -6,6 +6,8 @@
 
 Yosh is a native macOS app and an economic authority layer between agents and payment infrastructure. Agents request purchases; users set permissions and budgets; a local backend authorizes and signs supported x402 payments.
 
+**[Download Yosh for macOS](https://2049-web.vercel.app/)** · Apple Silicon · macOS 15+ · Beta
+
 ## The problem
 
 Agents increasingly need to buy API access, data, and services to complete their work. Unrestricted wallet access gives them too much authority. Manually approving every individual payment makes useful automation difficult.
@@ -34,6 +36,72 @@ JSON POST discovery requires separate native user confirmation of the exact outb
 - **Durable tracking:** idempotent purchases, separate payment/delivery records, and recovery of the original purchase.
 - **Native visibility:** API review, permission management, and purchase outcomes.
 
+## Download / Installation
+
+**[Download Yosh](https://2049-web.vercel.app/)** from the official website. The current **v0.1.0 Beta** is for **Apple Silicon Macs (M1 or later), macOS 15 or later**; Intel Macs are not supported by this download. You do not need Node.js, Homebrew, Xcode, or the source code to run it.
+
+1. Visit the website and download the macOS DMG, `Yosh-0.1.0-beta-arm64.dmg`.
+2. Open the DMG and drag **Yosh.app** onto the **Applications** shortcut. Wait for copying to finish, then eject the disk image.
+3. Open **Applications → Yosh** in Finder, or find Yosh with Spotlight. Run the installed copy rather than the copy inside the DMG.
+4. If macOS says the developer cannot be verified or Apple cannot check the app, only proceed if you trust the download's source. After attempting to open Yosh, go to **System Settings → Privacy & Security**, find the Yosh message, choose **Open Anyway**, then confirm **Open** and authenticate if asked. See [Apple's per-app opening instructions](https://support.apple.com/en-us/102445). Managed Macs may require help from an administrator.
+
+**This Beta is ad hoc signed; it has no Developer ID signature and is not Apple-notarized.** Do not disable Gatekeeper or remove quarantine attributes. If macOS reports malware or a damaged app, stop and obtain a verified download instead of overriding that warning. Keychain access dialogs are separate: review and complete legitimate Yosh prompts in the macOS system dialog, never in an Agent chat.
+
+DMG integrity and local runtime checks have passed; installation on a clean Mac and first launch after an internet download remain unverified. See the [release and verification notes](docs/releases/v0.1.0-beta-verification.md) for the test boundaries.
+
+## Getting started
+
+### 1. Open Yosh and check the Mainnet wallet
+
+On first launch, follow **Create your Yosh PIN** and **Confirm your Yosh PIN** if prompted. This PIN unlocks the app; it is separate from your macOS password and wallet keys.
+
+Open **Settings → WALLETS**. If a **Mainnet** wallet is available, click its row to copy the full public address. To fund it, send **native USDC on Solana Mainnet** from an external wallet to that address, checking the network and asset before confirming the transfer. Devnet test tokens do not fund Mainnet purchases.
+
+**Fresh-install limitation:** the current app can only display existing Yosh wallets. It has no **Create New Wallet** or **Import Wallet** screen, and launching it does not create a Mainnet wallet. If Mainnet shows **No wallet**, payment setup requires developer-assisted provisioning; you cannot complete it entirely in the app yet. If it shows **Keychain unavailable**, resolve the system access prompt or seek support before continuing with payments. Never give an Agent your private key or recovery phrase.
+
+In **Authority → Execution**, select **Mainnet**. Leave **Mainnet execution** off until the limits and Grant below are ready. Fresh configuration starts with real execution disabled. This page also identifies the network and USDC mint; **Authority → the large available amount** opens **Daily Authority**, where you can check the wallet balance.
+
+### 2. Connect Codex
+
+1. Install and open Codex on the same Mac; it is the currently verified Agent host.
+2. In Yosh, select **Codex** in the top Agent selector, open **Connection**, and click **Connect**. Yosh configures its bundled MCP bridge for Codex.
+3. Open or continue a Codex chat to load the tools. If needed, start a new chat or restart Codex. **Waiting for Codex** means configuration is ready; wait for Yosh to show **Connected** before purchasing.
+
+You can ask Codex to check Yosh's spending status first. Connecting alone grants no spending permission and does not create a wallet.
+
+### 3. Set Daily Authority
+
+In **Authority**, click the **large available amount** to open **Daily Authority**. Enter a small **Limit** in USDC and click **Save**. This daily limit is shared across all Agents and Resources, includes paid and reserved amounts, and is separate from your wallet balance. There is no automatic spending allowance; an unset or zero limit blocks new purchases.
+
+### 4. Register and review a Resource
+
+A **Resource** is the specific API and permitted request inputs you want the Agent to use. For a first purchase, choose a small GET request from a provider you trust. Give Codex the API endpoint and ask:
+
+> Inspect this API with Yosh and, if compatible, register it. Tell me its Resource ID, price quote, and required inputs. Do not purchase yet.
+
+Codex uses Yosh's discovery and registration tools; this does not pay or grant spending permission. In Yosh, open **Settings → Registered APIs**, select the API, and review its endpoint, method, network, asset, input constraints, samples, and any **Unconfirmed** details. For JSON POST discovery, use **Add API** to review the exact outbound request and explicitly confirm **Send POST** before it is sent.
+
+### 5. Create a Spend Grant
+
+With **Codex** selected, return to **Authority** and click the **SPEND GRANT / PER TRANSACTION** row. Under **Create Spend Grant**:
+
+1. Choose the Resource in **Registered API**. Use **View API Details** to check its scope; supply valid sample inputs if requested.
+2. Set **Total authorized**, **Per transaction**, and **Expires**. Use small limits that cover the quoted purchase and match what you are willing to spend.
+3. Click **Create Spend Grant** and check that it is active. Yosh checks a fresh unpaid quote; a POST Resource also requires native request approval before the Grant is created.
+
+The Grant applies only to that Agent and Resource. Its total covers the Grant's lifetime and does not reset each day; the shared Daily Authority also applies. Registering an API or enabling payments does not replace this Grant.
+
+### 6. Make the first controlled purchase and check the result
+
+When the wallet is funded, Codex is connected, and the limit and Grant are ready:
+
+1. Open **Authority → Execution**, turn on **Mainnet execution**, and confirm **Enable Mainnet execution**. This enables real-money payments within your permissions.
+2. Return to **Authority** and set **Payments** to **On**. To pause new purchases later, turn it off.
+3. Ask Codex to buy once, filling in the Resource ID, inputs, purpose, and maximum price: “Use Yosh to purchase Resource [ID] once with [inputs] for [purpose], spending at most [amount] USDC within my Spend Grant and daily limit. Report the purchase ID, payment status, and delivered result. If the outcome is uncertain, check the same purchase rather than creating another.”
+4. In Yosh, open **Authority → Activity**, then select the purchase. Check **Payment** and **Delivery** separately, and use **View transaction on Solana Explorer** when available. **Allowed** is a policy decision; **Paid** confirms payment; **Delivered** means Yosh recorded successful delivery. Codex can retrieve the stored result with `get_purchase_delivery`.
+
+If a prerequisite or price check fails, resolve the reported blocker before trying again. If payment is pending or unknown, keep the original purchase ID and check its status; do not create a second purchase to recover the result. Keep Yosh running while Codex uses it: closing the window leaves the service running, while quitting Yosh stops it safely.
+
 ## Architecture
 
 The native app provides user-controlled permissions and transaction visibility. The bundled backend keeps wallet custody, policy, and signing independent of the Agent. App and MCP requests share the same business logic.
@@ -52,15 +120,7 @@ The native app provides user-controlled permissions and transaction visibility. 
 
 Policies and records persist locally across restarts. The installed bundle runs without the source checkout, a separately installed Node runtime, or a developer `.env.local`.
 
-## Getting started
-
-### Download / Installation
-
-**Public DMG distribution has not yet been verified.** A download link will be added here after release packaging, signing, notarization, and installation are verified.
-
-For now, developers can build a local installation from source.
-
-### Build from source
+## Build from Source (developers)
 
 Requirements: **macOS 15 or later**, **Node.js 24.5 or later**, npm, and Xcode with macOS build tools.
 
@@ -73,15 +133,7 @@ npm ci
 
 The script installs `~/Applications/Yosh.app` with its backend, Node runtime, and MCP bridge. Launch it from Finder or Spotlight. Before rebuilding, quit Yosh normally and wait for its backend to stop.
 
-Local builds use ad hoc signing by default. macOS may request Keychain access confirmation; complete it through the system prompt.
-
-### Connect an Agent
-
-The verified host is **Codex**. Configure MCP through Yosh's Connection control, then start or reconnect a Codex session to load the tools.
-
-Purchases require an available Mainnet wallet, enabled execution, an active Agent connection, Daily Authority, and a matching Spend Grant. Fresh configuration starts with execution disabled. Startup does **not** create a Mainnet wallet; provisioning remains a developer setup requirement.
-
-Have the Agent discover and register a Resource, review it, then create its Grant. See the [runtime guide](docs/architecture/product-startup-runtime.md), [payment configuration](docs/architecture/payment-product-configuration.md), and [MCP registration guide](docs/architecture/resources/agent-mcp-registration.md) for integration details.
+Local builds use ad hoc signing by default. macOS may request Keychain access confirmation; complete it through the system prompt. Building from source does not add wallet onboarding. See the [runtime guide](docs/architecture/product-startup-runtime.md), [payment configuration](docs/architecture/payment-product-configuration.md), [MCP registration guide](docs/architecture/resources/agent-mcp-registration.md), and [macOS release guide](docs/releasing-macos.md) for development and packaging details.
 
 ## Supported capabilities and limitations
 
@@ -93,7 +145,7 @@ Have the Agent discover and register a Resource, review it, then create its Gran
 | Agent compatibility | Actual Codex MCP host verified; other hosts await validation. |
 | Recovery | Original-payment recovery and bounded delivery retries implemented and tested. Replay requires explicit merchant support; live recovery has not been verified. |
 
-Discovery inspects candidate endpoints, rather than searching the web or operating an API marketplace. Refunds are unsupported. Wallet onboarding and public distribution are not yet a complete consumer installation flow.
+Discovery inspects candidate endpoints, rather than searching the web or operating an API marketplace. Refunds are unsupported. Wallet creation/import is not available in the app; the Beta is unnotarized and clean-Mac installation remains unverified.
 
 ## Security model
 
