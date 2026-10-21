@@ -90,7 +90,8 @@ it.skipIf(process.env.YOSH_LIVE_MAINNET_PREFLIGHT !== '1')('real Mainnet Pay MCP
       resourceId: resource.resourceId, providerId: resource.providerId, operation: PAID_RESOURCE_PURCHASE_OPERATION,
       network: quote.network, assetId: quote.asset, assetDecimals: 6, payTo: quote.payTo, paymentScheme: 'exact' }, Date.now(), 'live_mainnet');
     const operation = `unsigned-public-${randomUUID()}`;
-    recordPayMainnetAcceptance(directory, { version: 1, callerId: principal.cardMemberId, operationId: operation, wallet: buyer,
+    recordPayMainnetAcceptance(directory, { version: 2, callerId: principal.cardMemberId, operationId: operation, wallet: buyer,
+      resourceId: resource.resourceId, providerId: resource.providerId, resourceUrl: MAINNET_REFERENCE_API,
       network: quote.network, asset: quote.asset, recipient: quote.payTo, amountAtomic: quote.amount,
       requestHash: hash({ method: 'GET', url: MAINNET_REFERENCE_API, headers: [['accept', 'application/json']], body: null }),
       quoteHash: hash(quote), challengeHash: hash(raw), expiresAt: Date.now() + 120_000 });

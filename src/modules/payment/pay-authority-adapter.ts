@@ -129,7 +129,9 @@ export function createPayAuthorityAdapter(options: { directory: string; runtime:
           return { allow: epoch === generation };
         }
         if (!resourceId) throw new Error('PAY_RESOURCE_NOT_REGISTERED');
-        if (options.mainnet) assertPayMainnetAcceptance(options.directory, config, facts);
+        if (options.mainnet) assertPayMainnetAcceptance(options.directory, config, facts, {
+          resourceId, providerId: config.registeredResources!.find(resource => resource.resourceId === resourceId)!.providerId,
+          resourceUrl: facts.request.url });
         const result = await requestPaidResourcePurchase({ requestId: id, resourceId, reason: 'Pay MCP API purchase',
           ...(options.mainnet ? { request: requestInput } : {}) }, {
           config, ledger, origin: options.origin, principal, execute: true, deferExecution: true,
@@ -185,7 +187,8 @@ export function createPayAuthorityAdapter(options: { directory: string; runtime:
       if (options.mainnet) {
         const attempt = [...attempts.values()].find(value => value.approvalId === context.record.approvalId);
         if (!attempt) throw new Error('PAY_ATTEMPT_BINDING_MISMATCH');
-        assertPayMainnetAcceptance(options.directory, context.config, attempt.facts);
+        assertPayMainnetAcceptance(options.directory, context.config, attempt.facts, {
+          resourceId: context.record.intent.resourceId, providerId: context.record.intent.providerId, resourceUrl: attempt.facts.request.url });
       }
       const value = unsigned.get(context.record.approvalId);
       if (!value) throw new Error('PAY_UNSIGNED_PREPARATION_REQUIRED');

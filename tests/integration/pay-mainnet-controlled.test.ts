@@ -93,7 +93,8 @@ async function fixture() {
   const facts = { caller_id: memberId, operation_id: 'first-mainnet', attempt_id: randomUUID(), execution_network: 'mainnet',
     request: { method: 'GET', url: 'https://merchant.integration.invalid/data?coins=SOL&currency=usd', headers: [['accept', 'application/json']], body: null },
     amount_atomic: quote.amount, asset: quote.asset, network: quote.network, recipient: quote.payTo, accepted: quote, payment_required: challenge };
-  const accept = (value = facts) => writeFileSync(join(directory, 'pay-mainnet-acceptance.json'), JSON.stringify({ version: 1,
+  const accept = (value = facts) => writeFileSync(join(directory, 'pay-mainnet-acceptance.json'), JSON.stringify({ version: 2,
+    resourceId: resource.resourceId, providerId: resource.providerId, resourceUrl: value.request.url,
     callerId: memberId, operationId: value.operation_id, wallet: signer.address, network: quote.network, asset: quote.asset,
     recipient: quote.payTo, amountAtomic: quote.amount, requestHash: hash(value.request), quoteHash: hash(value.accepted),
     challengeHash: hash(value.payment_required), expiresAt: Date.now() + 60_000 }), { mode: 0o600 });

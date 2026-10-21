@@ -41,7 +41,8 @@ export function createMainnetPayExecution(options: {
     assertPayMainnetAcceptance(directory, context.config, { caller_id: String(row.caller_id), operation_id: String(row.operation_id),
       request: { method: request.method, url: request.url, headers: Object.entries(request.headers).sort(), body: request.body ?? null },
       accepted: context.record.quote, payment_required: context.record.intent.x402Challenge, network: context.record.quote.network,
-      asset: context.record.quote.asset, recipient: context.record.quote.payTo, amount_atomic: context.record.quote.amount });
+      asset: context.record.quote.asset, recipient: context.record.quote.payTo, amount_atomic: context.record.quote.amount }, {
+      resourceId: context.record.intent.resourceId, providerId: context.record.intent.providerId, resourceUrl: request.url });
   };
   const eligibility = (config: PaymentConfig, target: PurchaseLedger) => {
     assertPaymentConfigExecutionEnabled(config);

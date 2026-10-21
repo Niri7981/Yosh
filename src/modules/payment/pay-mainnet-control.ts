@@ -7,6 +7,8 @@ import { acquireDataDirectoryOwnership } from '../app/data-directory-owner';
 import { hash } from '../purchases/spending-policy';
 import type { PaymentConfig } from './payment-config';
 import { admitMainnetDevelopment, isMainnetDevelopment } from '../pay-dev/environment';
+import { MAINNET_NETWORK, MAINNET_USDC_MINT } from './payment-environment';
+import { SolanaPublicKeySchema } from '../resources/http-resource';
 
 export function privatePayJson(directory: string, name: string): unknown {
   const folder = lstatSync(directory);
@@ -88,8 +90,10 @@ export function admitPayMainnetRuntime(directory: string) {
     writeControl(directory, 'pay-mainnet-cutover.json', { ...receipt, state: 'admitted' });
   }
 }
-const Acceptance = z.object({ version: z.literal(1), callerId: z.string().uuid(), operationId: z.string().min(1).max(128),
-  wallet: z.string(), network: z.string(), asset: z.string(), recipient: z.string(), amountAtomic: z.string().regex(/^[1-9]\d*$/),
+const Acceptance = z.object({ version: z.literal(2), callerId: z.string().uuid(), operationId: z.string().regex(/^[a-zA-Z0-9_.:-]{1,128}$/),
+  resourceId: z.string().min(1).max(200), providerId: z.string().min(1).max(200), resourceUrl: z.url().refine(value => new URL(value).protocol === 'https:'),
+  wallet: SolanaPublicKeySchema, network: z.literal(MAINNET_NETWORK), asset: z.literal(MAINNET_USDC_MINT), recipient: SolanaPublicKeySchema,
+  amountAtomic: z.string().regex(/^[1-9]\d*$/).max(20),
   requestHash: z.string().regex(/^[a-f0-9]{64}$/), quoteHash: z.string().regex(/^[a-f0-9]{64}$/),
   challengeHash: z.string().regex(/^[a-f0-9]{64}$/), expiresAt: z.number().int().safe() }).strict();
 export function recordPayMainnetAcceptance(directory: string, raw: unknown) {
@@ -104,11 +108,13 @@ export function recordPayMainnetAcceptance(directory: string, raw: unknown) {
 export function assertPayMainnetAcceptance(directory: string, config: PaymentConfig, facts: {
   caller_id: string; operation_id: string; request: unknown; accepted: unknown; payment_required: unknown;
   network: string; asset: string; recipient: string; amount_atomic: string;
-}) {
+}, resource: { resourceId: string; providerId: string; resourceUrl: string }) {
   const receipt = Acceptance.parse(privatePayJson(directory, 'pay-mainnet-acceptance.json'));
   if (receipt.expiresAt <= Date.now() || receipt.wallet !== config.buyer || receipt.callerId !== facts.caller_id
     || receipt.operationId !== facts.operation_id || receipt.network !== facts.network || receipt.asset !== facts.asset
     || receipt.network !== config.network || receipt.asset !== config.mint || receipt.recipient !== facts.recipient
     || receipt.amountAtomic !== facts.amount_atomic || receipt.requestHash !== hash(facts.request)
-    || receipt.quoteHash !== hash(facts.accepted) || receipt.challengeHash !== hash(facts.payment_required)) throw new Error('PAY_MAINNET_ACCEPTANCE_REQUIRED');
+    || receipt.quoteHash !== hash(facts.accepted) || receipt.challengeHash !== hash(facts.payment_required)
+    || receipt.resourceId !== resource.resourceId || receipt.providerId !== resource.providerId || receipt.resourceUrl !== resource.resourceUrl)
+    throw new Error('PAY_MAINNET_ACCEPTANCE_REQUIRED');
 }
