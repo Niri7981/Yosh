@@ -1,0 +1,118 @@
+{
+  "schemaVersion": 1,
+  "scope": "source archive; not payment or deployment authorization",
+  "acceptance": {
+    "date": "2026-10-21",
+    "merchant": "Agent402",
+    "resource": "https://agent402.tools/api/crypto-price?coins=BTC%2CETH%2CSOL&currency=usd",
+    "amountAtomic": "1000",
+    "assetDecimals": 6,
+    "asset": "native USDC on Solana Mainnet",
+    "transactionSignature": "3CzUbBAVcuANmXVL2ozcCQQ2DN2MDX5kGqaM8zfAAfNdSaHuesLsGF1F5PCEkaEhUxy29RJTi6ZjB1i1WZ2PBSt",
+    "chainStatus": "finalized",
+    "ledgerStatus": [
+      "PAID",
+      "CONFIRMED",
+      "COMPLETE"
+    ],
+    "apiDataDelivered": true,
+    "sourceOfResult": "previous explicitly authorized acceptance; not repeated during archive"
+  },
+  "fundedSource": {
+    "yosh": {
+      "repository": "https://github.com/Niri7981/Yosh",
+      "commit": "cfb4b1add680bbfdf0487ce86d487c9a64bdf118",
+      "bundles": [
+        {
+          "entry": "scripts/pay-dev-backend.ts",
+          "sha256": "95dfe9fa227c06a544a368f9a3c9b7336b9dac37326f9391a4b0e782f8bd96e0",
+          "matchesInstalled": true,
+          "gitLoadedProductFiles": 107
+        },
+        {
+          "entry": "scripts/pay-dev-mcp.ts",
+          "sha256": "57ce71e9576a297f3fde2d23e1a575328b99ad2a68f097cb8cdff665f3348a79",
+          "matchesInstalled": true,
+          "gitLoadedProductFiles": 27
+        }
+      ],
+      "method": "All bundled src/ and scripts/ TypeScript bodies are loaded using git show COMMIT:path; installed dependencies remain pinned by the local lockfile. No working-tree product TS content is loaded."
+    },
+    "pay": {
+      "repository": "https://github.com/Niri7981/pay",
+      "commit": "df1f0eecb0353af7f78dc6b3d77c957ee361e167",
+      "installedBinarySha256": "900ac44b00bd7b67845bad3893a1fd17fe493d370083a335e9cbded3ab331c2b",
+      "functionalSourceSha256": {
+        "rust/crates/mcp/src/bin/yosh-controlled-mcp.rs": "bd8c19ac94af2cfd970f7c8043bf3de400aa8c5855794d8fc2af147b223ac6b6",
+        "rust/crates/mcp/src/controlled.rs": "ab752b3b07f2156fb53af6ca8ee5d36ad5bc402444a90718ab87dbc891437bb1",
+        "rust/crates/mcp/tests/fixtures/agent402-mainnet-quote.json": "9a808618ac5f72dd0c3c313657cc0580ae19ac0bd462b4fd9ec8776223758569",
+        "rust/crates/core/src/client/fetch.rs": "52625e45659b6ec53d7365cf92418711c03abfd211621aa1de73fa41ec013c12",
+        "rust/crates/core/src/client/x402.rs": "cd0efdc3defeed5994b19f6afca684201c17ab6a3d9581bd8b401ebaf351a137",
+        "rust/crates/mcp/Cargo.toml": "f254bd627ebfe1d9017c334b6705372e937311d7a83f9564e3c0682aa2fa38b9",
+        "rust/crates/mcp/src/authority.rs": "c756bdcb7f79b338e1f0125f867bc2d532b45f3d6d9b8bd801d9438c1fc21e30",
+        "rust/crates/mcp/src/lib.rs": "6f4217447b3d35324f34473f5edb2594ab743c82cb888aa510d723822843d481",
+        "rust/crates/mcp/src/tools/curl.rs": "ea085ec39776caafa63188cd5ff7fcc0ea95649b52345ec6c6ada87d69237827",
+        "rust/crates/mcp/tests/external_authority.rs": "2d43da739b56022a06230d3bae808e3e39df9c45b4d6c197c53d8e8741cb8082"
+      },
+      "localBuildMappingsExcluded": [
+        "rust/.cargo/config.toml",
+        "rust/Cargo.lock",
+        "rust/Cargo.toml"
+      ],
+      "evidenceBoundary": "functional source fingerprints match; no claim of byte-identical Rust rebuild"
+    },
+    "payKit": {
+      "upstream": "https://github.com/solana-foundation/pay-kit",
+      "upstreamBase": "bd3ad25baeb65c1c293239e1b4990f14d26a22ad",
+      "archiveRuntimeCommit": "c27d6b59f5ff31c0ba7575505e4a35eac5702685",
+      "archiveTestedCommit": "837e6deebaeaef2999d57c50cfba6338a4b7a8a6",
+      "productionSourcePath": "rust/crates/kit/src/x402/client/exact/payment.rs",
+      "productionSourceSha256": "b1a425e02949d3b730a27bfef7dc61700917d1655dbd6e21fe26f439d137ac85",
+      "originalLinkedSnapshot": "../pay-kit-current; packaged crate, not a Git checkout"
+    }
+  },
+  "postAcceptanceSource": {
+    "yosh": "538345da3578c4d7a8165a1784d4a40e1032009b",
+    "yoshChanges": "read-only SDK preflight and resource-bound version-2 consent; not installed by this archive",
+    "pay": "6e0a21b62e66844a9a093a047f60ea8451876721",
+    "payChanges": "read-only SDK preflight; subsequent merge preserves already published credential-URL fix",
+    "payKitChanges": "tests and custody documentation only after exact runtime source commit"
+  },
+  "verification": {
+    "networkAndRealKeychainDeniedForTests": true,
+    "yosh": {
+      "testsPassed": 1169,
+      "optInLiveTestsSkipped": 1,
+      "separateProtocolTestsPassed": 15,
+      "installerConfigurationTestsPassed": 3,
+      "typecheck": true,
+      "lint": true,
+      "productionBuild": true,
+      "nativeLaunchConfiguration": true,
+      "nativeReleaseBuild": true
+    },
+    "pay": {
+      "mcpTestsPassed": 145,
+      "externalAuthorityTestsPassedAfterPublishedFixMerge": 18,
+      "httpTestsPassed": 11,
+      "existingWorkerSkipped": 1,
+      "coreQuoteTestPassed": 1,
+      "clippyWarningsDenied": true,
+      "rustfmt": true
+    },
+    "payKit": {
+      "exactTestsPassed": 34,
+      "transactionTestsPassed": 22,
+      "signingTestsPassed": 2
+    }
+  },
+  "deliberatelyExcluded": [
+    "private confirmations and runtime credentials",
+    "wallet identity/configuration snapshots and Keychain data",
+    "real Ledger/databases and SQLite sidecars",
+    "raw RPC, quote, economic and delivery captures",
+    "machine-local Cargo vendor overlay and original local dependency path",
+    "obsolete cross-repository patch exports, baseline dumps and generation prompts",
+    "build outputs, caches and installed application bundles"
+  ]
+}
