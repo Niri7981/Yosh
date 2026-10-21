@@ -25,6 +25,24 @@ original source was the isolated `pay-mcp-first-integration` workspace, with
 adjacent `pay` and the packaged `pay-kit-current` crate. The older PoC kit and
 original Pay research checkout are not the funded implementation.
 
+## Published archive branches
+
+| Repository | New archive branch | Reviewed reference |
+| --- | --- | --- |
+| [Niri7981/Yosh](https://github.com/Niri7981/Yosh) | `codex/pay-mcp-first-mainnet-20261021` | Functional source through `538345d`; later commits document the archive. |
+| [Niri7981/pay](https://github.com/Niri7981/pay) | `codex/yosh-mainnet-mcp-first-20261021` | `3eda4e5f1df70114719baa9d1eb1909fcf3e5177` |
+| [Niri7981/pay-kit](https://github.com/Niri7981/pay-kit) | `codex/yosh-unsigned-mainnet-20261021` | `837e6deebaeaef2999d57c50cfba6338a4b7a8a6` |
+
+The user explicitly authorized creation of the personal SDK fork. No upstream
+repository, main branch or existing PR branch was overwritten. Published Pay
+history, including the credential-URL safety fix, is retained by a merge.
+
+Pay now uses the personal SDK Git URL at the full immutable revision above,
+with a corresponding Cargo.lock source identity. Package versions, features
+and transitive versions are unchanged. A fresh locked build and focused MCP,
+External Authority and HTTP regressions passed using that exact Git checkout.
+The SDK runtime matches the funded seam; later SDK additions are tests/docs.
+
 ## Later source retained separately
 
 The following work existed after the funded package was built and is archived
@@ -78,12 +96,26 @@ records. It is not a clean-checkout bootstrap command by itself.
 `source-baselines.json` and the strict build helper intentionally retain the
 original pre-archive HEAD/fingerprint guard. Do not remove that guard to make a
 new archive checkout pass. For another reviewed source layout, supply an explicit
-fresh `--baseline` manifest to `scripts/build-pay-mcp-first.py`, or build the
-reviewed Cargo workspace with its locked dependency mapping and an isolated
-`CARGO_TARGET_DIR`. The absolute local vendor overlay and `../../pay-kit-current`
-path used during acceptance are not portable source dependencies. The Pay and
-kit archive branches must be obtained together with their reviewed SDK pin.
-Building this source is separate from authorizing installation or Mainnet use.
+fresh `--baseline` manifest to `scripts/build-pay-mcp-first.py`. That historical
+helper also resets CARGO_HOME and assumes prepared offline vendor aliases; a
+new fingerprint manifest alone is not a dependency bootstrap.
+
+For the published Pay branch, the ordinary Rust entry point is:
+
+```sh
+cd ../pay/rust
+cargo build --locked -p pay-mcp --bin yosh-controlled-mcp
+```
+
+Prepare its locked public Git/registry dependencies first and use an isolated
+`CARGO_TARGET_DIR` for validation. Cargo also resolves the SDK's pinned
+TypeScript/x402 submodules, even for this Rust target. The archive validation
+prepared their existing public Git objects in an isolated cache, verified the
+SDK checkout's full revision, then built/tested with external network and real
+Keychain denied. No source URL, revision or product security policy was relaxed.
+The absolute local vendor overlay and `../../pay-kit-current` path used during
+acceptance are not portable source dependencies. Building this source is
+separate from authorizing installation or Mainnet use.
 
 ## Local material deliberately excluded
 

@@ -68,7 +68,8 @@
       "archiveTestedCommit": "837e6deebaeaef2999d57c50cfba6338a4b7a8a6",
       "productionSourcePath": "rust/crates/kit/src/x402/client/exact/payment.rs",
       "productionSourceSha256": "b1a425e02949d3b730a27bfef7dc61700917d1655dbd6e21fe26f439d137ac85",
-      "originalLinkedSnapshot": "../pay-kit-current; packaged crate, not a Git checkout"
+      "originalLinkedSnapshot": "../pay-kit-current; packaged crate, not a Git checkout",
+      "personalFork": "https://github.com/Niri7981/pay-kit"
     }
   },
   "postAcceptanceSource": {
@@ -98,7 +99,8 @@
       "existingWorkerSkipped": 1,
       "coreQuoteTestPassed": 1,
       "clippyWarningsDenied": true,
-      "rustfmt": true
+      "rustfmt": true,
+      "portableForkLockedBuild": true
     },
     "payKit": {
       "exactTestsPassed": 34,
@@ -114,5 +116,31 @@
     "machine-local Cargo vendor overlay and original local dependency path",
     "obsolete cross-repository patch exports, baseline dumps and generation prompts",
     "build outputs, caches and installed application bundles"
-  ]
+  ],
+  "publishedArchiveBranches": {
+    "yosh": {
+      "repository": "https://github.com/Niri7981/Yosh",
+      "branch": "codex/pay-mcp-first-mainnet-20261021",
+      "latestProductSourceCommit": "538345da3578c4d7a8165a1784d4a40e1032009b"
+    },
+    "pay": {
+      "repository": "https://github.com/Niri7981/pay",
+      "branch": "codex/yosh-mainnet-mcp-first-20261021",
+      "commit": "3eda4e5f1df70114719baa9d1eb1909fcf3e5177"
+    },
+    "payKit": {
+      "repository": "https://github.com/Niri7981/pay-kit",
+      "branch": "codex/yosh-unsigned-mainnet-20261021",
+      "commit": "837e6deebaeaef2999d57c50cfba6338a4b7a8a6"
+    }
+  },
+  "portableSdkDependency": {
+    "git": "https://github.com/Niri7981/pay-kit.git",
+    "revision": "837e6deebaeaef2999d57c50cfba6338a4b7a8a6",
+    "cargoLockSourceOnlyChanged": true,
+    "transitiveVersionChanges": false,
+    "lockedBuildPassed": true,
+    "cargoCheckoutRevisionVerified": true,
+    "testsExternalNetworkAndRealKeychainDenied": true
+  }
 }
