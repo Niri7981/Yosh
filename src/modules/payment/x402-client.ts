@@ -16,11 +16,16 @@ function boundedHeader(value: string | null, name: string) {
 }
 
 /** Decode wire headers through the official x402 HTTP adapter, then validate the result. */
-export function readPaymentRequiredHeader(encoded: string): PaymentRequired {
+export function readPaymentRequiredHeader(encoded: string, preserveOfferMetadata = false): PaymentRequired {
   const value = boundedHeader(encoded, 'PAYMENT-REQUIRED');
   const decoded = protocol.getPaymentRequiredResponse(name => name === 'PAYMENT-REQUIRED' ? value : null);
   const parsed = PaymentRequiredV2Schema.parse(decoded);
-  return X402ChallengeSchema.parse({ ...parsed, accepts: parsed.accepts.map(requirement => ({ ...requirement, extra: requirement.extra ?? {} })),
+  const source = z.object({ accepts: z.array(z.object({ outputSchema: z.json().optional() }).passthrough()) }).passthrough().parse(decoded);
+  // The pinned JS SDK projects V2 requirements and drops legacy informational
+  // outputSchema; Pay's SDK preserves its original accepted object. Opt in for
+  // Pay, while retaining the exact historical JS evidence-reading contract.
+  return X402ChallengeSchema.parse({ ...parsed, accepts: parsed.accepts.map((requirement, index) => ({ ...requirement, extra: requirement.extra ?? {},
+    ...(preserveOfferMetadata && Object.hasOwn(source.accepts[index], 'outputSchema') ? { outputSchema: source.accepts[index].outputSchema } : {}) })),
     ...(parsed.extensions === null ? { extensions: undefined } : {}) });
 }
 

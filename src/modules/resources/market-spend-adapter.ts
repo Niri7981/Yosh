@@ -20,7 +20,8 @@ export function createX402SpendIntent(input: {
 }): SpendIntent {
   const resource = X402ResourceSchema.parse(input.resource);
   const { challenge, quote } = validateResourceChallenge(input.challenge, resource, input.environment);
-  if (input.paymentRequiredHeader && hash(readPaymentRequiredHeader(input.paymentRequiredHeader)) !== hash(challenge))
+  if (input.paymentRequiredHeader && hash(readPaymentRequiredHeader(input.paymentRequiredHeader,
+    challenge.accepts.some(quote => Object.hasOwn(quote, 'outputSchema')))) !== hash(challenge))
     throw new Error('MERCHANT_QUOTE_EVIDENCE_MISMATCH');
   const now = input.now ?? Date.now();
   return SpendIntentSchema.parse({ id: randomUUID(), idempotencyKey: input.idempotencyKey,

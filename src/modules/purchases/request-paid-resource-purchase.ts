@@ -1,3 +1,4 @@
+import type { ExternalExecutionFacts } from './execution-safety';
 import { requestRegisteredResourcePurchase } from './request-registered-resource-purchase';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
@@ -60,6 +61,11 @@ function result(record: SpendReservation, reused: boolean, executionMode: Purcha
 export async function requestPaidResourcePurchase(raw: unknown, options: {
   config: PaymentConfig; ledger: PurchaseLedger; origin: string; principal: SpendPrincipal;
   fetcher?: typeof fetch; now?: () => number; execute?: boolean;
+  /** Backend-only two-stage authority/execution seam; monetary mode stays live. */
+  deferExecution?: boolean;
+  externalExecution?: ExternalExecutionFacts;
+  externalQuote?: unknown;
+  externalRequest?: import('../resources/http-resource').HttpResourceRequest;
   pay?: typeof executeApprovedPayment; recover?: typeof recoverApprovedPayment;
 }): Promise<PurchaseRequestResult> {
   if (options.config.mode === 'live_mainnet') {
@@ -79,7 +85,7 @@ export async function requestPaidResourcePurchase(raw: unknown, options: {
   const requestHash = hash({ resourceId: input.resourceId, reason: input.reason });
   async function complete(record: SpendReservation, reused: boolean) {
     options.ledger.assertReplayAllowed(record, executionMode, options.ledger.paymentScope(options.config, executionMode));
-    if (record.decision.decision !== 'APPROVED' || executionMode === 'simulated') return result(record, reused, executionMode);
+    if (record.decision.decision !== 'APPROVED' || executionMode === 'simulated' || options.deferExecution) return result(record, reused, executionMode);
     const endpoint = paymentEndpointForIntent(options.origin, record.intent);
     if (record.status === 'APPROVED') {
       try { await (options.pay ?? executeApprovedPayment)(options.ledger, record.approvalId, options.config, endpoint); }
@@ -95,7 +101,11 @@ export async function requestPaidResourcePurchase(raw: unknown, options: {
     if (existing.intent.requestHash !== requestHash || existing.intent.resourceId !== input.resourceId || !existing.intent.resourcePath) throw new Error('REQUEST_ID_CONFLICT');
     return complete(existing, true);
   }
-  const { quote, challenge, request } = await fetchPaidResourceQuote(input.resourceId, options.origin, options.config, options.fetcher);
+  const { quote, challenge, request: quotedRequest } = await fetchPaidResourceQuote(input.resourceId, options.origin, options.config, options.fetcher);
+  // The isolated Pay GET profile authorizes Accept: application/json. Persist
+  // it in the same immutable request used for binding, signing and final HTTP.
+  // ExecutionSafety checks this exact request against the external requestHash.
+  const request = options.externalExecution ? { ...quotedRequest, headers: { accept: 'application/json' } } : quotedRequest;
   const descriptor = paidResource(input.resourceId);
   const now = clock();
   const authority = options.ledger.spendAuthorityForDecision(principal, PAID_RESOURCE_PURCHASE_OPERATION, now, executionMode);
@@ -113,7 +123,7 @@ export async function requestPaidResourcePurchase(raw: unknown, options: {
     if (winner.intent.requestHash !== requestHash || winner.intent.resourceId !== input.resourceId || !winner.intent.resourcePath) throw new Error('REQUEST_ID_CONFLICT');
     return complete(winner, true);
   }
-  const reserved = options.ledger.reserve(intent, quote, now, executionMode, principal.cardMemberId, options.ledger.paymentScope(options.config, executionMode));
+  const reserved = options.ledger.reserve(intent, quote, now, executionMode, principal.cardMemberId, options.ledger.paymentScope(options.config, executionMode), options.externalExecution);
   const binding = reserved.intent.authority;
   if (reserved.ownerCardMemberId !== principal.cardMemberId || (binding && binding.cardMemberId !== principal.cardMemberId)) throw new Error('PURCHASE_REQUEST_OWNER_MISMATCH');
   return complete(reserved, reserved.intent.id !== intent.id);
