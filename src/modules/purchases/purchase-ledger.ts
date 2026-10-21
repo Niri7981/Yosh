@@ -1,3 +1,4 @@
+import { ExecutionSafety, type ExternalExecutionFacts, type ExternalExecutionPermit } from './execution-safety';
 import type { SpendReservation, PurchaseRecord } from './purchase-contract';
 export type { SpendReservation, PurchaseRecord } from './purchase-contract';
 import { TransactionSignatureSchema, validateSignedPaymentIdentity } from '../payment/original-payment-evidence';
@@ -82,6 +83,7 @@ function isLiveMode(mode: StoredPurchaseExecutionMode | undefined) {
 /** SQLite owns approval, budget reservation and the unique task purchase. No model writes. */
 export class PurchaseLedger {
   private db: DatabaseSync;
+  readonly executionSafety: ExecutionSafety;
   private readonly delivery: PurchaseDeliveryStore;
   readonly resources: RuntimeResourceRegistry;
   readonly reconciliation: PaymentReconciliation;
@@ -108,6 +110,8 @@ export class PurchaseLedger {
     this.defaultCardMemberId = options.defaultCardMemberId;
     if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     this.db = new DatabaseSync(path);
+    try { this.executionSafety = new ExecutionSafety(this.db, path); }
+    catch (error) { this.db.close(); throw error; }
     if (path !== ':memory:') chmodSync(path, 0o600);
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON;
       CREATE TABLE IF NOT EXISTS purchases (id TEXT PRIMARY KEY, task_id TEXT NOT NULL UNIQUE, approval_id TEXT NOT NULL UNIQUE,
@@ -146,7 +150,7 @@ export class PurchaseLedger {
         .run(spendingDay(now, zone), zone, nextSpendingDayBoundary(now, zone), now);
     }
     try { migrateMonetaryLedger(this.db, this.managed, this.walletIdentity, this.now()); migrateOriginalPaymentEvidence(this.db, this.now()); migrateHttpPurchaseBindings(this.db, this.now()); migrateDeliveryRecovery(this.db, this.now()); migrateMainnetAuthority(this.db, this.managed, this.now()); this.migrateResourceScopedGrants(); this.migratePostGrantConsent(); this.resources = new RuntimeResourceRegistry(this.db, this.now); this.reconciliation = new PaymentReconciliation(this.db, this.now); this.delivery = new PurchaseDeliveryStore(this.db, this.now); this.walletLibrary = new WalletLibrary(this.db); this.walletAccounts = new WalletAccounts(this.db, this.now, approvalId => this.walletHistoricalPayer(approvalId)); }
-    catch (error) { this.db.close(); throw error; }
+    catch (error) { this.db.close(); this.executionSafety.close(); throw error; }
   }
   scope(mode: StoredPurchaseExecutionMode = this.defaultMode, network?: string, asset?: string, decimals = 6,
     walletIdentity = mode === 'live_mainnet' ? PRODUCT_MAINNET_WALLET_ID : this.walletIdentity) {
@@ -495,16 +499,18 @@ export class PurchaseLedger {
     assertExplicitAuthority(mode, scope.network, scope.assetId);
     if (typeof paused !== 'boolean') throw new Error('Paused must be a boolean');
     this.atomic(() => {
+      if (paused) this.executionSafety.invalidate();
       const id = storeMonetaryScope(this.db, scope);
       this.db.prepare('INSERT INTO monetary_controls VALUES (?,NULL,?) ON CONFLICT(scope_id) DO UPDATE SET paused=excluded.paused').run(id, paused ? 1 : 0);
     });
     return this.controls(mode, scope);
   }
-  stopPayments() { this.stopping = true; }
+  stopPayments() { this.stopping = true; this.atomic(() => this.executionSafety.invalidate()); }
   /** Called synchronously immediately before the signer and before submission. */
-  assertCanSign(approvalId: string, now = this.now(), validate?: (record: PurchaseRecord) => void) {
+  assertCanSign(approvalId: string, now = this.now(), validate?: (record: PurchaseRecord) => void, permit?: ExternalExecutionPermit) {
     if (this.stopping) throw new Error('Service is stopping');
     const record = this.recordForApproval(approvalId);
+    this.executionSafety.assert(record, permit);
     if (!isLiveMode(record?.executionMode)) throw new Error('PURCHASE_EXECUTION_MODE_MISMATCH');
     if (record?.status !== 'PAYING' || record.intent.expiresAt <= now) throw new Error('Approval inactive or expired');
     if (record.executionMode === 'live_mainnet' && (!this.managed || !this.requireSpendGrant)) throw new Error('MAINNET_AUTHORITY_REQUIRED');
@@ -668,7 +674,7 @@ export class PurchaseLedger {
     }
     return false;
   }
-  reserve(intent: SpendIntent, quote: PaymentRequirements, now = Date.now(), mode: StoredPurchaseExecutionMode = this.defaultMode, ownerCardMemberId?: string, monetary?: MonetaryScope): SpendReservation {
+  reserve(intent: SpendIntent, quote: PaymentRequirements, now = Date.now(), mode: StoredPurchaseExecutionMode = this.defaultMode, ownerCardMemberId?: string, monetary?: MonetaryScope, external?: ExternalExecutionFacts): SpendReservation {
     if (mode === 'live_mainnet' && (!this.managed || !this.requireSpendGrant)) throw new Error('MAINNET_AUTHORITY_REQUIRED');
     assertExplicitAuthority(mode, intent.network, intent.assetId);
     assertExplicitAuthority(mode, quote.network, quote.asset);
@@ -706,6 +712,7 @@ export class PurchaseLedger {
           ownerCardMemberId ?? intent.authority?.cardMemberId ?? null, mode === 'UNKNOWN' ? null : mode, storeMonetaryScope(this.db, monetary));
       this.delivery.initialize({ id: intent.id, purchase: JSON.stringify(intent), owner: ownerCardMemberId ?? intent.authority?.cardMemberId,
         status: decision.decision, delivered: false, receiptConfirmed: false });
+      this.executionSafety.reserve((memberId ? this.getOwned(intent.idempotencyKey, memberId) : this.getLegacy(intent.idempotencyKey))!, external);
       this.event(intent.id, `authority.${decision.decision}`);
       return (memberId ? this.getOwned(intent.idempotencyKey, memberId) : this.getLegacy(intent.idempotencyKey))!;
     });
@@ -725,10 +732,11 @@ export class PurchaseLedger {
       if (result.changes) this.event(record.intent.id, 'task.ANSWERED');
     });
   }
-  claim(approvalId: string, now = this.now(), validate?: (record: PurchaseRecord) => void, expectedMode?: PurchaseExecutionMode): SpendReservation {
+  claim(approvalId: string, now = this.now(), validate?: (record: PurchaseRecord) => void, expectedMode?: PurchaseExecutionMode, permit?: ExternalExecutionPermit): SpendReservation {
     return this.atomic(() => {
       if (this.stopping) throw new Error('Service is stopping');
       const record = this.recordForApproval(approvalId);
+      this.executionSafety.assert(record, permit);
       if (expectedMode && record.executionMode !== expectedMode) throw new Error('PURCHASE_EXECUTION_MODE_MISMATCH');
       if (record.status !== 'APPROVED' || record.decision.decision !== 'APPROVED' || record.intent.expiresAt <= now) throw new Error('Approval inactive or expired');
       if (record.executionMode === 'live_mainnet' && (!this.managed || !this.requireSpendGrant)) throw new Error('MAINNET_AUTHORITY_REQUIRED');
@@ -745,15 +753,17 @@ export class PurchaseLedger {
       }
       if (this.hasBlockingPayment(record.intent, record.monetaryScope)) throw new Error('Another payment requires reconciliation');
       this.db.prepare("UPDATE purchases SET status=? WHERE approval_id=? AND status='APPROVED'").run(purchaseStatusAfter(record.status, 'START_PAYMENT'), approvalId);
+      this.executionSafety.phase(record, 'CLAIMED');
       this.event(record.intent.id, 'payment.PAYING');
       return this.recordForApproval(approvalId);
     });
   }
-  savePayload(approvalId: string, payload: unknown, validate?: (record: PurchaseRecord) => void, original?: OriginalPaymentRecord) {
+  savePayload(approvalId: string, payload: unknown, validate?: (record: PurchaseRecord) => void, original?: OriginalPaymentRecord, permit?: ExternalExecutionPermit) {
     this.atomic(() => {
-      this.assertCanSign(approvalId, undefined, validate);
+      this.assertCanSign(approvalId, undefined, validate, permit);
       if (this.db.prepare("UPDATE purchases SET payload=? WHERE approval_id=? AND status='PAYING' AND payload IS NULL").run(JSON.stringify(payload), approvalId).changes !== 1) throw new Error('Payment already signed or inactive');
       if (original) this.storeOriginalPayment(approvalId, original, false);
+      this.executionSafety.phase(this.recordForApproval(approvalId), 'SIGNED');
     });
   }
   private recordForApproval(approvalId: string) {
@@ -799,13 +809,14 @@ export class PurchaseLedger {
       ...(row.transaction_id ? { transaction: String(row.transaction_id) } : {}) };
   }
   /** Only the initial owner can commit this once, immediately before its first HTTP send. */
-  markSubmissionAttempt(approvalId: string, validate?: (record: PurchaseRecord) => void, now = this.now()) {
+  markSubmissionAttempt(approvalId: string, validate?: (record: PurchaseRecord) => void, now = this.now(), permit?: ExternalExecutionPermit) {
     this.atomic(() => {
-      this.assertCanSign(approvalId, undefined, validate);
+      this.assertCanSign(approvalId, undefined, validate, permit);
       const record = this.recordForApproval(approvalId);
       const original = this.savedOriginalPayment(approvalId);
       if (!original || original.state !== 'SIGNED_NOT_SUBMITTED') throw new Error('Original payment submission already started');
       if (this.db.prepare("UPDATE original_payments SET state='SUBMISSION_ATTEMPTED',submission_attempted_at=? WHERE purchase_id=? AND state='SIGNED_NOT_SUBMITTED' AND submission_attempted_at IS NULL").run(now, record.intent.id).changes !== 1) throw new Error('Original payment submission already started');
+      this.executionSafety.phase(record, 'SUBMISSION_ATTEMPTED');
       this.event(record.intent.id, 'payment.SUBMISSION_ATTEMPTED');
     });
   }
@@ -1067,5 +1078,5 @@ export class PurchaseLedger {
     return intent.resourceScopeId === PAID_RESOURCE_SCOPE_ID && grant.resourceId === PAID_RESOURCE_SCOPE_ID &&
       id.success && intent.resourcePath === paidResource(id.data).path;
   }
-  close() { this.db.close(); }
+  close() { this.db.close(); this.executionSafety.close(); }
 }
