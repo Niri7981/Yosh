@@ -257,6 +257,7 @@ struct OverviewClient {
             throw CancellationError()
         } catch let error as ServiceRuntimeError {
             switch error {
+            case .environmentBusy: throw OverviewLoadError.executionBusy
             case .configuration: throw OverviewLoadError.configuration
             case .portConflict: throw OverviewLoadError.portConflict
             case .authenticatedShutdownFailed: throw OverviewLoadError.authenticatedShutdownFailed

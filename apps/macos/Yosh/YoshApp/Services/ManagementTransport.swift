@@ -8,6 +8,7 @@ enum ServiceEndpoint {
     case overview
     case wallets
     case addWallet(AddWalletRequest)
+    case createDevelopmentPaymentWallet
     case balance
     case execution
     case setExecution(AppOverview.Service.PurchaseMode)
@@ -26,6 +27,7 @@ enum ServiceEndpoint {
     case createMemberGrant(UUID, totalLimit: String, singleLimit: String, expiresAt: Int64, resourceId: String? = nil, sample: ResourceRequestSample? = nil, postApprovalHash: String? = nil)
     case revokeMemberGrant(UUID, resourceId: String? = nil)
     case prepareQuit
+    case prepareEnvironmentSwitch
     case shutdown
     case resources
     case resource(String)
@@ -42,7 +44,7 @@ enum ServiceEndpoint {
         case .prepareResource: "/api/app/resources/prepare"
         case .health: "/api/app/health"
         case .overview: "/api/app/overview"
-        case .wallets, .addWallet: "/api/app/wallets"
+        case .wallets, .addWallet, .createDevelopmentPaymentWallet: "/api/app/wallets"
         case .balance: "/api/app/balance"
         case .execution, .setExecution, .setProductionExecutionEnabled: "/api/app/execution"
         case .setPaused, .setDailyLimit: "/api/app/settings"
@@ -52,14 +54,14 @@ enum ServiceEndpoint {
         case .member(let id), .renameMember(let id, _), .revokeMember(let id): "/api/app/members/\(id.uuidString.lowercased())"
         case .setMemberConnection(let id, _): "/api/app/members/\(id.uuidString.lowercased())/connection"
         case .createMemberGrant(let id, _, _, _, _, _, _), .revokeMemberGrant(let id, _): "/api/app/members/\(id.uuidString.lowercased())/grant"
-        case .prepareQuit, .shutdown: "/api/app/lifecycle"
+        case .prepareQuit, .shutdown, .prepareEnvironmentSwitch: "/api/app/lifecycle"
         }
     }
 
     var isMutation: Bool {
         switch self {
         case .health, .overview, .wallets, .balance, .execution, .members, .member, .resources, .resource: false
-        case .addWallet, .setExecution, .setProductionExecutionEnabled, .setPaused, .setDailyLimit, .createGrant, .revokeGrant, .setConnection, .createMember,
+        case .addWallet, .createDevelopmentPaymentWallet, .prepareEnvironmentSwitch, .setExecution, .setProductionExecutionEnabled, .setPaused, .setDailyLimit, .createGrant, .revokeGrant, .setConnection, .createMember,
              .renameMember, .revokeMember, .setMemberConnection, .createMemberGrant, .revokeMemberGrant, .prepareQuit, .shutdown, .registerResource, .resourceState, .discoverResource, .prepareResource: true
         }
     }
@@ -68,7 +70,7 @@ enum ServiceEndpoint {
         switch self {
         case .setExecution, .setProductionExecutionEnabled, .setPaused, .setDailyLimit, .createGrant, .revokeGrant, .setConnection,
              .renameMember, .setMemberConnection, .createMemberGrant, .revokeMemberGrant, .resourceState: "PUT"
-        case .addWallet, .createMember, .registerResource, .discoverResource, .prepareResource: "POST"
+        case .addWallet, .createDevelopmentPaymentWallet, .prepareEnvironmentSwitch, .createMember, .registerResource, .discoverResource, .prepareResource: "POST"
         case .revokeMember: "DELETE"
         case .prepareQuit, .shutdown: "POST"
         case .health, .overview, .wallets, .balance, .execution, .members, .member, .resources, .resource: "GET"
@@ -77,6 +79,10 @@ enum ServiceEndpoint {
 
     func body() throws -> Data? {
         switch self {
+        case .createDevelopmentPaymentWallet:
+            Data(#"{"action":"create_payment_wallet"}"#.utf8)
+        case .prepareEnvironmentSwitch:
+            Data(#"{"action":"prepareEnvironmentSwitch"}"#.utf8)
         case .addWallet(let input):
             try JSONEncoder().encode(input)
         case .registerResource(let resource):
@@ -269,7 +275,7 @@ struct ServiceConfiguration: Sendable {
     func request(_ endpoint: ServiceEndpoint, timeout: TimeInterval? = nil) async throws -> (Data, HTTPURLResponse) {
         let defaultTimeout: TimeInterval = switch endpoint {
         case .health: 2
-        case .prepareQuit, .shutdown: 15
+        case .prepareQuit, .shutdown, .prepareEnvironmentSwitch: 15
         case .setMemberConnection: 15
         default: 12
         }
@@ -299,7 +305,7 @@ struct ServiceConfiguration: Sendable {
         }
         let maximumBytes: Int
         switch endpoint {
-        case .health, .prepareQuit, .shutdown: maximumBytes = 4096
+        case .health, .prepareQuit, .shutdown, .prepareEnvironmentSwitch: maximumBytes = 4096
         default: maximumBytes = 65_536
         }
         let (data, response) = try await ManagementHTTPExchange(maximumBytes: maximumBytes).receive(request, timeout: timeout)

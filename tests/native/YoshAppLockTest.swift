@@ -9,6 +9,12 @@ struct YoshAppLockTest {
 
     static func main() async throws {
         let original = try validateVerifierAndEncoding()
+        let offlineStore = FakeCredentialStore()
+        await offlineStore.setLoadFailure(true)
+        let offlineSession = YoshAppLock(store: offlineStore, developmentSession: true)
+        await offlineSession.load()
+        expect(offlineSession.isUnlocked && !offlineSession.enabled && offlineSession.loadSucceeded,
+            "Explicit offline session must not access the supplied credential store")
         await validateFirstSetup()
         await validateSetupSaveFailure()
         await validateUnlockAndSettings(original)

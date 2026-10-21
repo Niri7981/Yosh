@@ -182,6 +182,15 @@ struct AppOverview: Decodable {
         let assetDecimals: Int?
         let grantId: String?
         var providerId: String? = nil
+        var offline: Bool? = nil
+        var executionTrace: ExecutionTrace? = nil
+
+        struct ExecutionTrace: Decodable {
+            let source: String
+            let traceId: String
+            let operationId: String
+            let complete: Bool
+        }
 
         enum ExecutionMode: String, Decodable {
             case simulated, liveDevnet = "live_devnet", liveMainnet = "live_mainnet", unknown = "UNKNOWN"

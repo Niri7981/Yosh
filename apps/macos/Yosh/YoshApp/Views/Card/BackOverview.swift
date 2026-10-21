@@ -176,7 +176,8 @@ struct BackOverview: View {
                 case .grant:
                     SpendGrantDetail(
                         overview: overview,
-                        isSaving: writeState.isSaving || isRefreshing,
+                        isSaving: writeState.isSaving,
+                        isRefreshing: isRefreshing,
                         writeMessage: writeState.message,
                         writeFailed: writeState.isFailure,
                         onBack: { selectDetail(nil) },

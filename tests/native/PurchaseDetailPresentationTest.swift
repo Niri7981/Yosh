@@ -102,6 +102,15 @@ struct PurchaseDetailPresentationTest {
         precondition(newReason.authorityReason == "The request was evaluated against the current spending rules.")
         let asset = try detail(["assetId": "fixture-asset-id"])
         precondition(asset.receipts.last?.label == "Asset ID" && asset.receipts.last?.copyValue == "fixture-asset-id")
-        print("Purchase detail: truthful lifecycle, historical policy, missing metadata, simulation, unknown payment, and full receipt IDs passed")
+        let offline = try detail(["offline": true, "monetaryEnvironment": "live_devnet",
+            "transaction": String(repeating: "1", count: 88),
+            "executionTrace": ["source": "pay_mcp", "traceId": "observed-attempt", "operationId": "observed-operation", "complete": true]])
+        precondition(offline.explorerURL == nil, "Offline confirmations must never link to a real-chain explorer")
+        precondition(offline.facts.contains { $0.value == "Offline · No real funds" })
+        precondition(offline.facts.contains { $0.value == "Pay MCP · Traced" })
+        precondition(offline.receipts.contains { $0.label == "Trace ID" && $0.copyValue == "observed-attempt" })
+        let incomplete = try detail(["executionTrace": ["source": "pay_mcp", "traceId": "old-attempt", "operationId": "old-operation", "complete": false]])
+        precondition(incomplete.facts.contains { $0.value == "Pay MCP · Trace incomplete" })
+        print("Purchase detail: truthful lifecycle, Offline trace attribution, no simulated explorer, historical policy and full receipt IDs passed")
     }
 }

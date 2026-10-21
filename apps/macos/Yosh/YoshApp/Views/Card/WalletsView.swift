@@ -15,6 +15,7 @@ struct WalletsView: View {
     @State private var name = ""
     @State private var privateKey = ""
     @State private var publicAddress = ""
+    @State private var confirmPaymentWallet = false
     @AppStorage("yosh.walletSetup.requestID") private var requestID = ""
     @AppStorage("yosh.walletSetup.kind") private var draftKind = ""
     @AppStorage("yosh.walletSetup.name") private var draftName = ""
@@ -37,6 +38,12 @@ struct WalletsView: View {
                             }.padding(.bottom, 10)
                             Divider()
                         }
+                        if YoshPayDevelopment.isEnabled(), snapshot.executionMode == "live_mainnet",
+                           snapshot.wallets.contains(where: { $0.id == "mainnet" && $0.status == .missing }) {
+                            Button("Create Wallet", systemImage: "plus") { confirmPaymentWallet = true }
+                                .disabled(saving).accessibilityIdentifier("wallets.create-payment-wallet")
+                            note("Create your Dev Mainnet payment wallet in its own macOS Keychain slot. It starts empty; payments remain disabled.")
+                        }
                     }
                     if !snapshot.library.isEmpty {
                         SettingsSection(title: "SAVED WALLETS", symbol: "tray") {
@@ -56,6 +63,8 @@ struct WalletsView: View {
                 } else if error == nil {
                     ProgressView("Loading wallets…").controlSize(.small)
                 }
+                if !(YoshPayDevelopment.isEnabled() && snapshot?.executionMode == "live_mainnet"
+                     && snapshot?.wallets.contains(where: { $0.id == "mainnet" && $0.status == .missing }) == true) {
                 SettingsSection(title: "ADD WALLET", symbol: "plus") {
                     SettingsRow(title: "Create new wallet", symbol: "plus", showsChevron: true,
                         action: { start("create") }).accessibilityIdentifier("wallets.create")
@@ -67,6 +76,7 @@ struct WalletsView: View {
                         action: { start("watch") }).accessibilityIdentifier("wallets.watch")
                 }
                 note("Adding a wallet does not change the payment wallet or its spending permissions.")
+                }
                 Button("Refresh") { Task { await reload() } }.buttonStyle(.plain)
                     .foregroundStyle(YoshShellPalette.activeInk)
             }
@@ -94,6 +104,12 @@ struct WalletsView: View {
             }
         }
         .task(id: isActive) { if isActive { await reload() } }
+        .alert("Create Dev Mainnet wallet?", isPresented: $confirmPaymentWallet) {
+            Button("Cancel", role: .cancel) {}
+            Button("Create Wallet") { Task { await createPaymentWallet() } }
+        } message: {
+            Text("Creates an empty wallet for this Dev environment only. Your formal Yosh wallet is untouched. No transfer, signing or purchase will occur.")
+        }
         .onDisappear { privateKey = "" }
     }
 
@@ -181,6 +197,20 @@ struct WalletsView: View {
             requestID = ""; draftKind = ""; draftName = ""
             await reload(); onChanged(); navigation.show(nil)
         } catch { self.error = "Wallet setup could not finish. Retry to check the same request." }
+    }
+    @MainActor private func createPaymentWallet() async {
+        guard !saving else { return }
+        saving = true; error = nil
+        defer { saving = false }
+        do {
+            let configuration = try await client.runtime.ready()
+            let (data, response) = try await configuration.request(.createDevelopmentPaymentWallet, timeout: 70)
+            guard response.statusCode == 201 else {
+                error = (try? JSONDecoder().decode(WalletFailure.self, from: data))?.error ?? "Wallet setup was not completed. Retry to check the same wallet."
+                return
+            }
+            await reload(); onChanged()
+        } catch { self.error = "Wallet setup was not completed. Allow Dev Keychain access and retry." }
     }
     private struct WalletFailure: Decodable { let error: String }
 }

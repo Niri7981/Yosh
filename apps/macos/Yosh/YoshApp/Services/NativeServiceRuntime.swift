@@ -17,6 +17,7 @@ enum ServiceRuntimeError: Error, Equatable {
     case dataDirectoryInUse
     case restartLimitReached
     case unavailable
+    case environmentBusy
 }
 
 enum ServiceStartupPhase: String, Sendable {
@@ -45,6 +46,7 @@ extension Notification.Name {
 actor NativeServiceRuntime {
     private let launch: BackendLaunchConfiguration
     private let allowsLaunch: Bool
+    private let sandboxProfileOverride: URL?
     private let managementTokenOverride: String?
     private let managementTokenLoader: (@Sendable () throws -> String)?
     private let logger = Logger(subsystem: "com.yosh.macos", category: "backend-lifecycle")
@@ -64,6 +66,7 @@ actor NativeServiceRuntime {
     private var startup: Task<ServiceConfiguration, Error>?
     private var lastFailure: ServiceRuntimeError?
     private var isShuttingDown = false
+    private var switchingEnvironment = false
 
     init(
         allowsLaunch: Bool = true,
@@ -71,13 +74,21 @@ actor NativeServiceRuntime {
         bundleURL: URL = Bundle.main.bundleURL,
         managementTokenOverride: String? = nil,
         managementTokenLoader: (@Sendable () throws -> String)? = nil,
-        diagnosticsDirectory: URL? = nil
+        diagnosticsDirectory: URL? = nil,
+        developmentHome: URL? = nil,
+        sandboxProfileOverride: URL? = nil
     ) {
         self.allowsLaunch = allowsLaunch
-        self.launch = BackendLaunchConfiguration(environment: environment, bundleURL: bundleURL)
+        self.sandboxProfileOverride = sandboxProfileOverride
+        var launch = BackendLaunchConfiguration(environment: environment, bundleURL: bundleURL)
+        if let developmentHome { launch.developmentHome = developmentHome }
+        self.launch = launch
         self.managementTokenOverride = managementTokenOverride
         self.managementTokenLoader = managementTokenLoader
-        do { self.diagnostics = try BackendDiagnostics(directory: diagnosticsDirectory) }
+        do {
+            let directory = try diagnosticsDirectory ?? (launch.isPayDevelopment ? launch.dataDirectory().appending(path: "Logs") : nil)
+            self.diagnostics = try BackendDiagnostics(directory: directory)
+        }
         catch {
             self.diagnostics = nil
             Logger(subsystem: "com.yosh.macos", category: "backend-lifecycle")
@@ -88,6 +99,33 @@ actor NativeServiceRuntime {
     func status() -> NativeServiceStatus {
         NativeServiceStatus(phase: phase, wallet: walletPhase, recovery: recoveryPhase,
             pid: process?.isRunning == true ? process?.processIdentifier : nil, failure: lastFailure)
+    }
+
+    func developmentEnvironment() throws -> PayDevelopmentSelection? {
+        guard launch.isPayDevelopment else { return nil }
+        return try YoshPayDevelopment.selection(directory: launch.developmentRoot())
+    }
+
+    func switchDevelopmentEnvironment(_ selection: PayDevelopmentSelection) async throws {
+        guard launch.isPayDevelopment, !switchingEnvironment else { throw ServiceRuntimeError.configuration }
+        switchingEnvironment = true
+        defer { switchingEnvironment = false }
+        try selection.validate()
+        let directory = try launch.developmentRoot()
+        if try YoshPayDevelopment.selection(directory: directory) == selection { return }
+        let configuration = try await ready()
+        let (_, response) = try await configuration.request(.prepareEnvironmentSwitch)
+        guard response.statusCode == 200 else { throw ServiceRuntimeError.environmentBusy }
+        guard await shutdown() else { throw ServiceRuntimeError.authenticatedShutdownFailed }
+        // The old process has drained and exited before selecting a new store.
+        // Tokens, liveness and loaded financial UI must never cross environments.
+        readyConfiguration = nil; ownedConfiguration = nil; loadedManagementToken = nil
+        credentialRetryAfter = nil; lastFailure = nil; restartHistory = []
+        defer { isShuttingDown = false }
+        do { try YoshPayDevelopment.saveSelection(selection, directory: directory) }
+        catch { isShuttingDown = false; _ = try? await ready(); throw error }
+        isShuttingDown = false
+        _ = try await ready()
     }
 
     func ready(retry: Bool = false) async throws -> ServiceConfiguration {
@@ -175,7 +213,7 @@ actor NativeServiceRuntime {
         if let existing = process, existing.isRunning { child = existing }
         else {
             child = BackendChildProcess(node: node, server: server, root: root,
-                environment: try launch.childEnvironment(token: token), diagnostics: try diagnostics ?? BackendDiagnostics()) { [weak self] pid, status in
+                environment: try launch.childEnvironment(token: token), diagnostics: try diagnostics ?? BackendDiagnostics(), sandboxProfile: try sandboxProfileOverride ?? launch.sandboxProfile()) { [weak self] pid, status in
                 Task { await self?.ownedProcessExited(pid: pid, status: status) }
             }
             try child.run()

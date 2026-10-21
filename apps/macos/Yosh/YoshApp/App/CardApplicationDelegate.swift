@@ -8,9 +8,11 @@ final class CardApplicationDelegate: NSObject, NSApplicationDelegate, NSWindowDe
     private var terminationRequested = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        let lockURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appending(path: "2049/native-app.lock") // Shared with legacy installations; do not split the singleton lock.
+        let isDevelopment = YoshPayDevelopment.isEnabled()
         do {
+            let lockURL = try isDevelopment ? YoshPayDevelopment.dataDirectory().appending(path: "native-app.lock")
+                : FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+                    .appending(path: "2049/native-app.lock") // Production retains the legacy singleton lock.
             guard let lock = try AppInstanceLock.acquire(at: lockURL) else {
                 if let pid = AppInstanceLock.ownerPID(at: lockURL),
                    let owner = NSRunningApplication(processIdentifier: pid),
@@ -35,11 +37,11 @@ final class CardApplicationDelegate: NSObject, NSApplicationDelegate, NSWindowDe
             backing: .buffered,
             defer: false
         )
-        window.title = "Yosh"
+        window.title = isDevelopment ? "Yosh Pay Dev" : "Yosh"
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
         window.titlebarSeparatorStyle = .none
-        window.contentView = NSHostingView(rootView: CardWindow(overviewClient: OverviewClient(runtime: serviceRuntime)))
+        window.contentView = NSHostingView(rootView: CardWindow(overviewClient: OverviewClient(runtime: serviceRuntime), appLock: YoshAppLock(developmentSession: isDevelopment)))
         window.setFrame(windowRect, display: false)
         for button in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
             window.standardWindowButton(button)?.isHidden = true

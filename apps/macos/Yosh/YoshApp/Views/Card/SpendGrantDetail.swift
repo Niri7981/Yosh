@@ -3,6 +3,7 @@ import SwiftUI
 struct SpendGrantDetail: View {
     let overview: AppOverview
     let isSaving: Bool
+    let isRefreshing: Bool
     let writeMessage: String?
     let writeFailed: Bool
     let onBack: () -> Void
@@ -35,12 +36,13 @@ struct SpendGrantDetail: View {
     private let secondaryInk = YoshShellPalette.secondaryInk
     private let rule = YoshShellPalette.rule
 
-    init(overview: AppOverview, isSaving: Bool, writeMessage: String?, writeFailed: Bool,
+    init(overview: AppOverview, isSaving: Bool, isRefreshing: Bool = false, writeMessage: String?, writeFailed: Bool,
         onBack: @escaping () -> Void, onConnection: @escaping () -> Void,
         onCreate: @escaping (String, String, Int64, String?, ResourceRequestSample?, String?) async -> Void, onRevoke: @escaping (String?) async -> Void,
         onPreparePost: @escaping (String, ResourceRequestSample?) async throws -> PostRequestReview = { _, _ in throw URLError(.badURL) }) {
         self.overview = overview
         self.isSaving = isSaving
+        self.isRefreshing = isRefreshing
         self.writeMessage = writeMessage
         self.writeFailed = writeFailed
         self.onBack = onBack
@@ -252,7 +254,9 @@ struct SpendGrantDetail: View {
                     .overlay { Capsule().strokeBorder(secondaryInk.opacity(0.45), lineWidth: 1) }
             }
             .buttonStyle(.plain)
-            .disabled(isSaving || !overview.connection.enabled || currency == nil || (isMainnet && selectedResourceID.isEmpty))
+            // Reads must not disable native text/wheel controls and reset their
+            // focus/scroll state. Only submission waits for the in-flight read.
+            .disabled(isSaving || isRefreshing || !overview.connection.enabled || currency == nil || (isMainnet && selectedResourceID.isEmpty))
             .accessibilityIdentifier("grant-create")
             .padding(.top, 12)
 
@@ -267,7 +271,7 @@ struct SpendGrantDetail: View {
                     .buttonStyle(.plain)
                     .font(.system(size: 11))
                     .foregroundStyle(YoshShellPalette.negative)
-                    .disabled(isSaving)
+                    .disabled(isSaving || isRefreshing)
                     .padding(.top, 14)
             }
             if let message = inputError ?? writeMessage {
@@ -422,7 +426,7 @@ struct SpendGrantDetail: View {
     }
 
     private func saveGrant() {
-        guard !isSaving, overview.connection.enabled, currency != nil, !isMainnet || !selectedResourceID.isEmpty else { return }
+        guard !isSaving, !isRefreshing, overview.connection.enabled, currency != nil, !isMainnet || !selectedResourceID.isEmpty else { return }
         guard let total = SpendGrantDraft.minorUnits(draft.total), total != "0",
               let single = SpendGrantDraft.minorUnits(draft.perTransaction), single != "0" else {
             inputError = "Enter positive amounts with up to 6 decimal places."
