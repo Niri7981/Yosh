@@ -16,9 +16,9 @@ struct AgentConnectionDetail: View {
     @State private var requestActive = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    private let signal = Color(red: 0.24, green: 0.49, blue: 0.81)
+    private let signal = YoshShellPalette.activeInk
     private let secondaryInk = YoshShellPalette.secondaryInk
-    private let rule = Color(red: 0.73, green: 0.79, blue: 0.87).opacity(0.5)
+    private let rule = YoshShellPalette.rule
 
     init(presentation: ConnectionPresentation, isSaving: Bool, writeMessage: String?, writeFailed: Bool,
          onBack: (() -> Void)?, onSetEnabled: @escaping (Bool) async -> Void,

@@ -43,10 +43,16 @@ struct CardSettingsView: View {
         CardSettingsBody(information: information, appVersion: appVersion, isLoading: isLoading, error: error,
             onCopyWallet: copyWallet, onOpenDataFolder: openDataFolder, onOpenRepository: openRepository,
             onReload: { Task { await reload(retry: true) } }, appLock: appLock,
+            onOpenWallets: { navigation.show("wallets") },
             onOpenResources: { navigation.show("resources") })
-        } destination: { _ in
+        } destination: { route in
+            if route == "wallets" {
+                WalletsView(client: overviewClient, isActive: isActive && navigation.selection != nil,
+                    onBack: { navigation.show(nil) }, onChanged: { Task { await reload() } })
+            } else {
             RegisteredAPIsView(client: overviewClient, isActive: isActive && navigation.selection != nil,
                 onBack: { navigation.show(nil) })
+            }
         }
             .task(id: isActive) { if isActive { await reload() } }
             .onReceive(NotificationCenter.default.publisher(for: .nativeServiceExited)) { _ in

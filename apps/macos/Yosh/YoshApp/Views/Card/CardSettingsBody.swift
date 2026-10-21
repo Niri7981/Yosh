@@ -10,18 +10,20 @@ struct CardSettingsBody: View {
     let onOpenRepository: () -> Void
     let onReload: () -> Void
     var appLock: YoshAppLock? = nil
+    @AppStorage("yosh.appearance") private var appearance = "system"
+    var onOpenWallets: () -> Void = {}
     var onOpenResources: () -> Void = {}
 
     private var unavailableValue: String { isLoading ? "Checking…" : "Unavailable" }
-    private let rule = Color(red: 0.73, green: 0.79, blue: 0.87).opacity(0.5)
+    private let rule = YoshShellPalette.rule
 
     var body: some View {
         VStack(alignment: .leading, spacing: CardPageHeader.Layout.firstSectionSpacing) {
             CardPageHeader(title: "Settings", style: .collection(subtitle: "Manage Yosh on this Mac."))
-                .foregroundStyle(Color(red: 0.07, green: 0.10, blue: 0.15))
+                .foregroundStyle(YoshShellPalette.ink)
             ScrollView(.vertical) {
                 VStack(alignment: .leading, spacing: 28) {
-                    SettingsSection(title: "WALLETS", symbol: "wallet.bifold") {
+                    SettingsSection(title: "WALLETS", symbol: "wallet.bifold", action: onOpenWallets) {
                         if let information {
                             ForEach(information.wallets) { wallet in
                                 existingWalletRow(wallet)
@@ -33,7 +35,7 @@ struct CardSettingsBody: View {
                             separator
                             SettingsRow(title: "Devnet · Test", value: unavailableValue)
                         }
-                        Text("Existing wallets on this Mac. Viewing does not create a wallet.")
+                        Text("Manage wallets on this Mac.")
                             .font(.system(size: 11))
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -51,8 +53,14 @@ struct CardSettingsBody: View {
                         unavailableToggle("Notifications")
                     }
                     SettingsSection(title: "APPEARANCE", symbol: "sun.max") {
-                        SettingsRow(title: "Appearance", value: "Light")
-                            .help("Yosh currently uses a light appearance.")
+                        Picker("Appearance", selection: $appearance) {
+                            Text("System").tag("system")
+                            Text("Light").tag("light")
+                            Text("Dark").tag("dark")
+                        }
+                        .pickerStyle(.segmented)
+                        .accessibilityIdentifier("settings.appearance")
+                        .padding(.vertical, 10)
                         separator
                         SettingsRow(title: "Reduce motion", value: "Follow System")
                             .help("Yosh follows the macOS Reduce Motion accessibility setting.")
@@ -82,7 +90,7 @@ struct CardSettingsBody: View {
                         if let error {
                             Text(error)
                                 .font(.system(size: 11))
-                                .foregroundStyle(Color(red: 0.58, green: 0.28, blue: 0.31))
+                                .foregroundStyle(YoshShellPalette.negative)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
                         Button(error == nil ? "Refresh status" : "Retry", action: onReload)
@@ -108,7 +116,7 @@ struct CardSettingsBody: View {
 
     private func unavailableToggle(_ title: String) -> some View {
         HStack(spacing: 12) {
-            Text(title).foregroundStyle(Color(red: 0.07, green: 0.10, blue: 0.15))
+            Text(title).foregroundStyle(YoshShellPalette.ink)
             Spacer(minLength: 4)
             Text("Not available yet")
                 .font(.system(size: 11))

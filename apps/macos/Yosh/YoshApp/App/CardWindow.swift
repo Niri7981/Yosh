@@ -6,6 +6,8 @@ struct CardWindow: View {
     @State private var appLock: YoshAppLock
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @AppStorage("yosh.appearance") private var appearance = "system"
+    @Environment(\.colorScheme) private var systemScheme
     @State private var showingBack = false
     @State private var isFlipping = false
     @State private var flipGeneration = 0
@@ -59,7 +61,10 @@ struct CardWindow: View {
         }
         .padding(CardMetrics.windowInset)
         .frame(width: CardMetrics.windowSize.width, height: CardMetrics.windowSize.height)
-        .environment(\.colorScheme, .light)
+        .preferredColorScheme(appearance == "dark" ? .dark : appearance == "light" ? .light : nil)
+        .environment(\.colorScheme, appearance == "dark" ? .dark : appearance == "light" ? .light : systemScheme)
+        .foregroundStyle(YoshShellPalette.ink)
+        .tint(YoshShellPalette.activeInk)
         .environment(appLock)
         .task { await appLock.load() }
         .task(id: appLock.isUnlocked) {

@@ -7,9 +7,9 @@ struct MembersRosterRow: View {
     let onSelect: (UUID) -> Void
     let onConnect: (UUID) -> Void
 
-    private let ink = Color(red: 0.07, green: 0.10, blue: 0.15)
+    private let ink = YoshShellPalette.ink
     private let secondaryInk = YoshShellPalette.secondaryInk
-    private let signal = Color(red: 0.24, green: 0.49, blue: 0.81)
+    private let signal = YoshShellPalette.activeInk
 
     var body: some View {
         HStack(spacing: 14) {

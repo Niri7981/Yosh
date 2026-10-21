@@ -35,7 +35,7 @@ struct SpendGrantWheelColumn: View {
                         Text(text(value))
                             .font(.system(size: 17, weight: .regular, design: .serif))
                             .monospacedDigit()
-                            .foregroundStyle(Color(red: 0.12, green: 0.16, blue: 0.23)
+                            .foregroundStyle(YoshShellPalette.ink
                                 .opacity(value == selection ? 1 : 0.45))
                             .frame(maxWidth: .infinity)
                             .frame(height: Self.rowHeight)
@@ -56,7 +56,7 @@ struct SpendGrantWheelColumn: View {
         .frame(height: Self.viewportHeight)
         .background(alignment: .center) {
             RoundedRectangle(cornerRadius: 9)
-                .fill(Color(red: 0.76, green: 0.83, blue: 0.94).opacity(0.32))
+                .fill(YoshShellPalette.selection)
                 .frame(height: Self.rowHeight)
         }
         .overlay {

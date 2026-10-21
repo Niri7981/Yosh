@@ -31,9 +31,9 @@ struct SpendGrantDetail: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private enum AmountField { case total, perTransaction }
-    private let ink = Color(red: 0.07, green: 0.10, blue: 0.15)
+    private let ink = YoshShellPalette.ink
     private let secondaryInk = YoshShellPalette.secondaryInk
-    private let rule = Color(red: 0.73, green: 0.79, blue: 0.87).opacity(0.5)
+    private let rule = YoshShellPalette.rule
 
     init(overview: AppOverview, isSaving: Bool, writeMessage: String?, writeFailed: Bool,
         onBack: @escaping () -> Void, onConnection: @escaping () -> Void,
@@ -115,7 +115,7 @@ struct SpendGrantDetail: View {
             VStack(alignment: .trailing, spacing: 5) {
                 Text(status)
                     .foregroundStyle(overview.scopedGrant?.status == .expired
-                        ? Color(red: 0.56, green: 0.32, blue: 0.36) : secondaryInk)
+                        ? YoshShellPalette.negative : secondaryInk)
                 Text("\(overview.service.purchaseMode.title) · \(currency ?? "Asset unavailable")")
                     .foregroundStyle(secondaryInk)
             }
@@ -266,7 +266,7 @@ struct SpendGrantDetail: View {
                 Button("Revoke Spend Grant", role: .destructive) { showingRevokeConfirmation = true }
                     .buttonStyle(.plain)
                     .font(.system(size: 11))
-                    .foregroundStyle(Color(red: 0.56, green: 0.32, blue: 0.36))
+                    .foregroundStyle(YoshShellPalette.negative)
                     .disabled(isSaving)
                     .padding(.top, 14)
             }
@@ -274,7 +274,7 @@ struct SpendGrantDetail: View {
                 Text(message)
                     .font(.system(size: 12))
                     .foregroundStyle(inputError != nil || writeFailed
-                        ? Color(red: 0.58, green: 0.28, blue: 0.31) : secondaryInk)
+                        ? YoshShellPalette.negative : secondaryInk)
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityAddTraits(.updatesFrequently)
                     .padding(.top, 12)

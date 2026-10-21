@@ -10,18 +10,18 @@ struct ActivityLedgerRow: View {
 
     private var statusInk: Color {
         switch row.tone {
-        case .positive: Color(red: 0.18, green: 0.38, blue: 0.38)
-        case .pending: Color(red: 0.47, green: 0.39, blue: 0.23)
-        case .negative: Color(red: 0.58, green: 0.28, blue: 0.31)
+        case .positive: YoshShellPalette.positive
+        case .pending: YoshShellPalette.pending
+        case .negative: YoshShellPalette.negative
         case .neutral: secondaryInk
         }
     }
 
     private var statusTint: Color {
         switch row.tone {
-        case .positive: Color(red: 0.67, green: 0.87, blue: 0.85).opacity(0.4)
-        case .pending: Color(red: 0.85, green: 0.8, blue: 0.62).opacity(0.24)
-        case .negative: Color(red: 0.85, green: 0.71, blue: 0.73).opacity(0.24)
+        case .positive: YoshShellPalette.positiveWash.opacity(0.4)
+        case .pending: YoshShellPalette.pendingWash.opacity(0.24)
+        case .negative: YoshShellPalette.negativeWash.opacity(0.24)
         case .neutral: secondaryInk.opacity(0.1)
         }
     }
@@ -106,7 +106,7 @@ struct ActivityLedgerRow: View {
                     .font(.system(size: 7, weight: .semibold))
                     .foregroundStyle(secondaryInk)
                     .frame(width: 11, height: 11)
-                    .background(Color(red: 0.95, green: 0.97, blue: 0.985), in: Circle())
+                    .background(YoshShellPalette.surface, in: Circle())
                     .overlay(Circle().stroke(secondaryInk.opacity(0.55), lineWidth: 0.6))
                     .offset(x: 4, y: 4)
             }

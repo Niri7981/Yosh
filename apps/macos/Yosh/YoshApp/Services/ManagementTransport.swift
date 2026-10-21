@@ -7,6 +7,7 @@ enum ServiceEndpoint {
     case health
     case overview
     case wallets
+    case addWallet(AddWalletRequest)
     case balance
     case execution
     case setExecution(AppOverview.Service.PurchaseMode)
@@ -41,7 +42,7 @@ enum ServiceEndpoint {
         case .prepareResource: "/api/app/resources/prepare"
         case .health: "/api/app/health"
         case .overview: "/api/app/overview"
-        case .wallets: "/api/app/wallets"
+        case .wallets, .addWallet: "/api/app/wallets"
         case .balance: "/api/app/balance"
         case .execution, .setExecution, .setProductionExecutionEnabled: "/api/app/execution"
         case .setPaused, .setDailyLimit: "/api/app/settings"
@@ -58,7 +59,7 @@ enum ServiceEndpoint {
     var isMutation: Bool {
         switch self {
         case .health, .overview, .wallets, .balance, .execution, .members, .member, .resources, .resource: false
-        case .setExecution, .setProductionExecutionEnabled, .setPaused, .setDailyLimit, .createGrant, .revokeGrant, .setConnection, .createMember,
+        case .addWallet, .setExecution, .setProductionExecutionEnabled, .setPaused, .setDailyLimit, .createGrant, .revokeGrant, .setConnection, .createMember,
              .renameMember, .revokeMember, .setMemberConnection, .createMemberGrant, .revokeMemberGrant, .prepareQuit, .shutdown, .registerResource, .resourceState, .discoverResource, .prepareResource: true
         }
     }
@@ -67,7 +68,7 @@ enum ServiceEndpoint {
         switch self {
         case .setExecution, .setProductionExecutionEnabled, .setPaused, .setDailyLimit, .createGrant, .revokeGrant, .setConnection,
              .renameMember, .setMemberConnection, .createMemberGrant, .revokeMemberGrant, .resourceState: "PUT"
-        case .createMember, .registerResource, .discoverResource, .prepareResource: "POST"
+        case .addWallet, .createMember, .registerResource, .discoverResource, .prepareResource: "POST"
         case .revokeMember: "DELETE"
         case .prepareQuit, .shutdown: "POST"
         case .health, .overview, .wallets, .balance, .execution, .members, .member, .resources, .resource: "GET"
@@ -76,6 +77,8 @@ enum ServiceEndpoint {
 
     func body() throws -> Data? {
         switch self {
+        case .addWallet(let input):
+            try JSONEncoder().encode(input)
         case .registerResource(let resource):
             try JSONEncoder().encode(resource)
         case .resourceState(_, let state):

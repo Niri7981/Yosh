@@ -14,7 +14,7 @@ struct AgentCardFront: View {
             .allowsHitTesting(false)
             .background {
                 RoundedRectangle(cornerRadius: 30, style: .continuous)
-                    .fill(Color(white: 0.925).opacity(0.9))
+                    .fill(YoshShellPalette.frontSurface)
                     .padding(1)
                     .allowsHitTesting(false)
             }

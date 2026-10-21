@@ -21,7 +21,7 @@ struct YoshAppLockSettings: View {
         VStack(spacing: 0) {
             HStack(spacing: 12) {
                 Text("App Lock")
-                    .foregroundStyle(Color(red: 0.07, green: 0.10, blue: 0.15))
+                    .foregroundStyle(YoshShellPalette.ink)
                 Spacer(minLength: 4)
                 Text(appLock.enabled ? "On" : "Off")
                     .font(.system(size: 11))
@@ -38,7 +38,7 @@ struct YoshAppLockSettings: View {
             .frame(minHeight: 38)
 
             Rectangle()
-                .fill(Color(red: 0.73, green: 0.79, blue: 0.87).opacity(0.5))
+                .fill(YoshShellPalette.rule)
                 .frame(height: 1)
                 .accessibilityHidden(true)
 
@@ -53,14 +53,14 @@ struct YoshAppLockSettings: View {
                 Button { showsPINChange.toggle() } label: {
                     Text("Change PIN")
                         .font(.system(size: 13))
-                        .foregroundStyle(Color(red: 0.07, green: 0.10, blue: 0.15))
+                        .foregroundStyle(YoshShellPalette.ink)
                         .frame(maxWidth: .infinity, minHeight: 38, alignment: .leading)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
             }
             .disabled(!canManageLock)
-            .tint(Color(red: 0.29, green: 0.45, blue: 0.66))
+            .tint(YoshShellPalette.activeInk)
             .accessibilityIdentifier("yosh.lock.change")
             .onChange(of: showsPINChange) { _, expanded in
                 if expanded { appLock.clearError() }
@@ -69,7 +69,7 @@ struct YoshAppLockSettings: View {
             if let error = appLock.error, !showsPINChange {
                 Text(error)
                     .font(.system(size: 11))
-                    .foregroundStyle(Color(red: 0.58, green: 0.28, blue: 0.31))
+                    .foregroundStyle(YoshShellPalette.negative)
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.top, 4)
