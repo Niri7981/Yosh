@@ -1,3 +1,5 @@
+import type { SpendReservation, PurchaseRecord } from './purchase-contract';
+export type { SpendReservation, PurchaseRecord } from './purchase-contract';
 import { TransactionSignatureSchema, validateSignedPaymentIdentity } from '../payment/original-payment-evidence';
 import { OriginalPaymentRecordSchema, OriginalPaymentStateSchema, type OriginalPaymentRecord, type StoredOriginalPayment } from './original-payment-record';
 import { migrateOriginalPaymentEvidence } from './original-payment-migration';
@@ -5,9 +7,9 @@ import { PaymentReconciliation } from './payment-reconciliation';
 import { migrateHttpPurchaseBindings } from './http-binding-migration';
 import { migrateDeliveryRecovery } from './delivery-migration';
 import { PurchaseDeliveryStore } from './purchase-delivery-store';
-import { parseStoredPurchaseStatus, purchaseStatusAfter, type PurchaseStatus, type PurchaseTransition } from './purchase-state';
+import { parseStoredPurchaseStatus, purchaseStatusAfter, type PurchaseTransition } from './purchase-state';
 import { migrateMainnetAuthority } from './mainnet-authority-migration';
-import { ReceiptStatusSchema, type DeliveryStatus, type DeliveryRecoveryState, type ReceiptStatus } from './delivery-state';
+import { ReceiptStatusSchema, type ReceiptStatus } from './delivery-state';
 import { type DeliveryRecoveryCapability } from '../resources/delivery-capability';
 import { atomicAmount, addAtomic, remainingAtomic } from '../authority/atomic-money';
 import { MonetaryScopeSchema, monetaryScope, monetaryScopeId, PRODUCT_MAINNET_WALLET_ID, PRODUCT_TEST_WALLET_ID, LEGACY_TEST_WALLET_ID, type MonetaryScope } from './monetary-scope';
@@ -28,6 +30,8 @@ import { PAID_RESOURCE_SCOPE_ID, PaidResourceIdSchema, paidResource } from '../r
 import { PREMIUM_SOL_MARKET_SNAPSHOT_ID } from '../resources/static-resource-registry';
 import { hash, nextSpendingDayBoundary, spendingDay } from './spending-policy';
 import { MAINNET_NETWORK, MAINNET_USDC_MINT, PurchaseExecutionModeSchema, type PurchaseExecutionMode } from '../payment/payment-environment';
+import { WalletLibrary } from '../app-wallet/wallet-library';
+import { WalletAccounts } from '../app-wallet/wallet-accounts';
 
 export type { DeliveryStatus } from './delivery-state';
 export { PurchaseExecutionModeSchema, type PurchaseExecutionMode } from '../payment/payment-environment';
@@ -49,14 +53,6 @@ export const PaymentEvidenceSchema = z.discriminatedUnion('version', [
 ]);
 export type PaymentEvidence = z.infer<typeof PaymentEvidenceSchema>;
 export type PaymentVerification = { payer: string; messageHash: string; confirmationStatus: 'confirmed' | 'finalized'; settlementConfirmed: true };
-export type SpendReservation = {
-  monetaryScope: MonetaryScope; intent: SpendIntent; quote: PaymentRequirements; approvalId: string; decision: AuthorityDecision; status: PurchaseStatus; deliveryStatus: DeliveryStatus;
-  executionMode: StoredPurchaseExecutionMode; paymentPayloadPresent: boolean; paymentPayloadHash?: string; paymentEvidence?: PaymentEvidence;
-  receiptStatus: ReceiptStatus; deliveryRecovery: DeliveryRecoveryState;
-  ownerCardMemberId?: string; transaction?: string; data?: unknown; answer?: string;
-};
-/** Compatibility name for callers that still expose the market purchase use case. */
-export type PurchaseRecord = SpendReservation;
 export type PurchaseLedgerOptions = { mode?: StoredPurchaseExecutionMode; walletIdentity?: string; managed?: boolean; requireRegisteredResource?: boolean; requireSpendGrant?: boolean; timeZone?: () => string; now?: () => number; defaultCardMemberId?: string };
 export type SpendGrantSummary = {
   id: string; version: number; status: SpendGrant['status']; resourceId: string; providerId: string; operation: string;
@@ -89,6 +85,8 @@ export class PurchaseLedger {
   private readonly delivery: PurchaseDeliveryStore;
   readonly resources: RuntimeResourceRegistry;
   readonly reconciliation: PaymentReconciliation;
+  readonly walletLibrary: WalletLibrary;
+  readonly walletAccounts: WalletAccounts;
   private managed: boolean;
   private requireSpendGrant: boolean;
   private requireRegisteredResource: boolean;
@@ -147,7 +145,7 @@ export class PurchaseLedger {
       this.db.prepare('INSERT OR IGNORE INTO app_budget_clock (id,spending_day,time_zone,next_boundary,last_seen) VALUES (1,?,?,?,?)')
         .run(spendingDay(now, zone), zone, nextSpendingDayBoundary(now, zone), now);
     }
-    try { migrateMonetaryLedger(this.db, this.managed, this.walletIdentity, this.now()); migrateOriginalPaymentEvidence(this.db, this.now()); migrateHttpPurchaseBindings(this.db, this.now()); migrateDeliveryRecovery(this.db, this.now()); migrateMainnetAuthority(this.db, this.managed, this.now()); this.migrateResourceScopedGrants(); this.migratePostGrantConsent(); this.resources = new RuntimeResourceRegistry(this.db, this.now); this.reconciliation = new PaymentReconciliation(this.db, this.now); this.delivery = new PurchaseDeliveryStore(this.db, this.now); }
+    try { migrateMonetaryLedger(this.db, this.managed, this.walletIdentity, this.now()); migrateOriginalPaymentEvidence(this.db, this.now()); migrateHttpPurchaseBindings(this.db, this.now()); migrateDeliveryRecovery(this.db, this.now()); migrateMainnetAuthority(this.db, this.managed, this.now()); this.migrateResourceScopedGrants(); this.migratePostGrantConsent(); this.resources = new RuntimeResourceRegistry(this.db, this.now); this.reconciliation = new PaymentReconciliation(this.db, this.now); this.delivery = new PurchaseDeliveryStore(this.db, this.now); this.walletLibrary = new WalletLibrary(this.db); this.walletAccounts = new WalletAccounts(this.db, this.now, approvalId => this.walletHistoricalPayer(approvalId)); }
     catch (error) { this.db.close(); throw error; }
   }
   scope(mode: StoredPurchaseExecutionMode = this.defaultMode, network?: string, asset?: string, decimals = 6,
@@ -156,6 +154,20 @@ export class PurchaseLedger {
   }
   paymentScope(config: { network: string; mint: string; buyer: string }, mode: StoredPurchaseExecutionMode) {
     return this.scope(mode, config.network, config.mint, 6, mode === 'live_mainnet' ? PRODUCT_MAINNET_WALLET_ID : this.managed ? this.walletIdentity : config.buyer);
+  }
+  private walletHistoricalPayer(approvalId: string) {
+    const original = this.savedOriginalPayment(approvalId);
+    if (original) return original.evidence.identity.payer;
+    const row = this.db.prepare('SELECT payment_evidence FROM purchases WHERE approval_id=?').get(approvalId);
+    if (row?.payment_evidence !== null && row?.payment_evidence !== undefined && !storedPaymentEvidence(row.payment_evidence)) {
+      throw new Error('WALLET_HISTORY_EVIDENCE_INVALID');
+    }
+    const record = this.recordForApproval(approvalId);
+    if (record.paymentEvidence && record.paymentEvidence.version !== 1) {
+      if (!this.hasVerifiedLivePayment(record)) throw new Error('WALLET_HISTORY_EVIDENCE_INVALID');
+      return record.paymentEvidence.payer;
+    }
+    return undefined;
   }
   private scopeFilter(scope: MonetaryScope) { return ` AND monetary_scope_id='${monetaryScopeId(scope)}'`; }
   private recordScope(scopeId: string): MonetaryScope {

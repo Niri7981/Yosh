@@ -20,7 +20,10 @@ function fixture() {
   vi.stubEnv('YOSH_MANAGEMENT_TOKEN', secret);
   vi.stubEnv('DEMO_MERCHANT_PUBLIC_KEY', '4aU7aegXejAjF84J9eu2B6boC1Exa3i6cxP3diDULJbs');
   const dir = mkdtempSync(join(tmpdir(), 'yosh-execution-')); dirs.push(dir);
-  const initializeWallet = vi.fn(async () => ({ address, reused: true }));
+  const initializeWallet = vi.fn(async () => {
+    if (resolvePaymentEnvironment().mode === 'live_mainnet') throw new Error('WALLET_UNAVAILABLE');
+    return { address, reused: true };
+  });
   const readWallets = vi.fn(async () => [
     { id: 'mainnet', label: 'Mainnet', address: null, status: 'missing' as const },
     { id: 'devnet', label: 'Devnet · Test', address, status: 'available' as const },

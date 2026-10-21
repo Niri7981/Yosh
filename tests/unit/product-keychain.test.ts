@@ -50,3 +50,11 @@ it('writes Mainnet only through stdin without replacement or broad access flags'
   expect(spawn).toHaveBeenLastCalledWith('/usr/bin/security', ['-i'], { stdio: ['pipe', 'pipe', 'pipe'] });
   expect(child.stdin.end).toHaveBeenCalledWith(`add-generic-password -s ${MAINNET_WALLET_KEYCHAIN.service} -a ${MAINNET_WALLET_KEYCHAIN.account} -w ${fixture}\n`);
 });
+
+it('distinguishes corrupt item encoding from denied access without returning the item contents', async () => {
+  const secret = 'invalid-sensitive-fixture';
+  securityResult(0, secret);
+  const error: unknown = await readMainnetWalletKeychain().catch(value => value);
+  expect(error).toMatchObject({ code: 'WALLET_KEYCHAIN_CORRUPT' });
+  expect(String(error)).not.toContain(secret);
+});

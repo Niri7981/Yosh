@@ -6,6 +6,13 @@ class KeychainCommandError extends Error {
   constructor(readonly exitCode: number | null) { super('Keychain command failed'); }
 }
 
+export class WalletKeychainError extends Error {
+  constructor(readonly code: 'WALLET_KEYCHAIN_UNAVAILABLE' | 'WALLET_KEYCHAIN_CORRUPT') {
+    super(code === 'WALLET_KEYCHAIN_CORRUPT' ? 'The Yosh wallet Keychain item is invalid'
+      : 'The Yosh wallet Keychain item could not be accessed');
+  }
+}
+
 function validateItem(service: string, account: string) {
   if (!/^com\.2049\.day4\.[a-f0-9]{16}$/.test(service)) throw new Error("Invalid Demo keychain service");
   address(account);
@@ -40,19 +47,20 @@ export function productWalletKeychain(environment: PaymentEnvironment) {
 }
 
 /** The product wallet uses one fixed Keychain item so a crash cannot orphan a newly-created signer. */
-async function readWalletKeychain(item: typeof APP_WALLET_KEYCHAIN | typeof MAINNET_WALLET_KEYCHAIN): Promise<string | undefined> {
+async function readWalletKeychain(item: Readonly<{ service: string; account: string }>): Promise<string | undefined> {
   if (process.platform !== 'darwin') throw new Error('The Yosh wallet requires macOS Keychain');
   try {
     const secret = await security(['find-generic-password', '-s', item.service, '-a', item.account, '-w']);
-    if (!/^[1-9A-HJ-NP-Za-km-z]{64,100}$/.test(secret)) throw new Error();
+    if (!/^[1-9A-HJ-NP-Za-km-z]{64,100}$/.test(secret)) throw new WalletKeychainError('WALLET_KEYCHAIN_CORRUPT');
     return secret;
   } catch (error) {
     if (error instanceof KeychainCommandError && error.exitCode === 44) return undefined;
-    throw new Error('The Yosh wallet Keychain item could not be accessed');
+    if (error instanceof WalletKeychainError) throw error;
+    throw new WalletKeychainError('WALLET_KEYCHAIN_UNAVAILABLE');
   }
 }
 
-async function createWalletKeychain(item: typeof APP_WALLET_KEYCHAIN | typeof MAINNET_WALLET_KEYCHAIN, secret: string): Promise<void> {
+async function createWalletKeychain(item: Readonly<{ service: string; account: string }>, secret: string): Promise<void> {
   if (process.platform !== 'darwin') throw new Error('The Yosh wallet requires macOS Keychain');
   if (!/^[1-9A-HJ-NP-Za-km-z]{64,100}$/.test(secret)) throw new Error('Invalid Yosh wallet signer encoding');
   await security(['-i'], `add-generic-password -s ${item.service} -a ${item.account} -w ${secret}\n`);
@@ -78,3 +86,11 @@ export async function createDemoKeychain(service: string, account: string, secre
   await security(["-i"], `add-generic-password -s ${service} -a ${account} -w ${secret}\n`);
   if (await readDemoKeychain(service, account) !== secret) throw new Error("Demo signer was not saved; configuration was not changed");
 }
+
+// Library credentials use separate create-only items; never overwrite either payment slot.
+function libraryWalletItem(id: string) {
+  if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(id)) throw new Error('Invalid wallet ID');
+  return { service: 'com.yosh.wallet.library.v1', account: id.toLowerCase() };
+}
+export const readLibraryWalletKeychain = (id: string) => readWalletKeychain(libraryWalletItem(id));
+export const createLibraryWalletKeychain = (id: string, secret: string) => createWalletKeychain(libraryWalletItem(id), secret);

@@ -16,7 +16,8 @@ import { signedManagementRequest } from '../helpers/management-request';
 const context = vi.hoisted(() => ({ app: undefined as AppRuntime | undefined }));
 vi.mock('@/modules/app/app-runtime', async original => ({ ...await original<typeof import('../../src/modules/app/app-runtime')>(), appRuntime: () => context.app }));
 const secrets = vi.hoisted(() => ({ test: undefined as string | undefined, mainnet: undefined as string | undefined, testReads: 0, mainnetReads: 0 }));
-vi.mock('../../src/modules/payment/keychain', () => ({
+vi.mock('../../src/modules/payment/keychain', async original => ({
+  ...await original<typeof import('../../src/modules/payment/keychain')>(),
   readAppWalletKeychain: async () => { secrets.testReads++; return secrets.test; },
   readMainnetWalletKeychain: async () => { secrets.mainnetReads++; return secrets.mainnet; },
   createAppWalletKeychain: () => { throw new Error('must not create'); }, createMainnetWalletKeychain: () => { throw new Error('must not create'); },

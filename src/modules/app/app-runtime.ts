@@ -1,7 +1,8 @@
 import { join } from 'node:path';
 import { authoritySurface, type AuthorityWalletState } from './authority-surface';
 import { homedir } from 'node:os';
-import { initializeProductWallet, readExistingProductWallets } from '../app-wallet/product-wallet';
+import { readExistingProductWallets } from '../app-wallet/product-wallet';
+import type { WalletAccountObservation, WalletInventoryEntry } from '../app-wallet/wallet-accounts';
 import { atomicAmount } from '../authority/atomic-money';
 import { DEVNET_USDC_MINT, inspectFacilitatorConfiguration, loadPaymentConfig, PaymentConfigurationError } from '../payment/payment-config';
 import { PurchaseLedger } from '../purchases/purchase-ledger';
@@ -38,7 +39,6 @@ import { writeProductionExecutionSetting } from './product-configuration';
 import { PaymentEnvironmentError, resolvePaymentEnvironment, PurchaseExecutionModeSchema, type PaymentEnvironment, type PurchaseExecutionMode } from '../payment/payment-environment';
 
 type RuntimeState = { runtime?: AppRuntime };
-type WalletInventoryEntry = { id: string; label: string; address: string | null; status: 'missing' | 'available' | 'unavailable' };
 export type TestPurchaseResult = { purchaseId: string; status: string; deliveryStatus: string; policy: { decision: string; reason: string }; transaction: string | null; simulated: boolean; warning?: string };
 const globals = globalThis as typeof globalThis & { __yosh?: RuntimeState };
 
@@ -66,7 +66,7 @@ export class AppRuntime {
   private readonly reconciliationAbort = new AbortController();
   private recoveryStatus: 'idle' | 'running' | 'complete' | 'pending' = 'idle';
   private wallet?: Promise<{ address: string; reused: boolean }>;
-  private walletInventory?: Promise<WalletInventoryEntry[]>;
+  private walletInventory?: Promise<WalletAccountObservation[]>;
   private walletInventoryExpiresAt = 0;
   private walletAddress?: string;
   private mainnetIdentity?: string;
@@ -236,7 +236,11 @@ export class AppRuntime {
     this.purchaseExecutionMode();
     if (this.environment.mode === 'live_mainnet' && !this.wallet && Date.now() < this.walletRetryAfter) throw new Error('WALLET_RETRY_PENDING');
     this.wallet ??= this.track((this.dependencies.initializeWallet ?? (async () => {
-      if (this.environment.mode !== 'live_mainnet') return initializeProductWallet();
+      if (this.environment.mode !== 'live_mainnet') {
+        const existing = (await this.readWalletInventory()).find(wallet => wallet.id === 'devnet');
+        if (existing?.status !== 'available' || !existing.address) throw new Error('WALLET_UNAVAILABLE');
+        return { address: existing.address, reused: true };
+      }
       // Status retains public identities only. The payment signer independently
       // loads protected material and checks its identity immediately before use.
       const inventory = await this.readWalletInventory();
@@ -247,6 +251,8 @@ export class AppRuntime {
       return { address: mainnet.address, reused: true };
     }))().then(wallet => {
       this.purchaseExecutionMode();
+      this.ledger.walletAccounts.assertIdentity(this.environment.mode === 'live_mainnet' ? 'mainnet' : 'devnet',
+        wallet.address, this.environment.mode === 'live_mainnet' ? process.env.YOSH_MAINNET_WALLET_PUBLIC_KEY : undefined);
       this.walletAddress = wallet.address;
       if (this.environment.mode === 'live_mainnet') {
         if (process.env.YOSH_MAINNET_WALLET_PUBLIC_KEY !== undefined && wallet.address !== process.env.YOSH_MAINNET_WALLET_PUBLIC_KEY) throw new Error('Mainnet wallet mismatch');
@@ -395,14 +401,11 @@ export class AppRuntime {
   private async performAuthorityBalanceRead() {
     this.purchaseExecutionMode();
     const environment = this.environment;
-    const mainnet = environment.mode === 'live_mainnet';
     const unavailable = (display: string) => ({ amount: null, display, available: false as const,
       network: environment.network, assetId: environment.asset.mint, assetDecimals: environment.asset.decimals });
     let address: string;
-    if (mainnet) {
-      try { address = (await this.initializeWallet()).address; }
-      catch { return unavailable('Mainnet wallet unavailable'); }
-    } else address = (await this.initializeWallet()).address;
+    try { address = (await this.initializeWallet()).address; }
+    catch { return unavailable(environment.mode === 'live_mainnet' ? 'Mainnet wallet unavailable' : 'Wallet unavailable'); }
     const balance = await this.balance(address);
     this.authorityWalletBalance = balance.amount;
     return { ...balance, network: environment.network, assetId: environment.asset.mint, assetDecimals: environment.asset.decimals };
@@ -533,14 +536,26 @@ export class AppRuntime {
     if (this.purchaseExecutionMode() !== 'live_mainnet') return;
     try { await this.initializeWallet(); } catch { /* Identity failure is recorded in the shared snapshot. */ }
   }
+  walletLibrary() { return this.ledger.walletLibrary.list(); }
+  addLibraryWallet(raw: unknown) {
+    if (!this.accepting) throw new ManagementApiError('SERVICE_STOPPING', 503, 'Yosh is stopping.');
+    return this.track((async () => {
+      const existing = await this.readWalletInventory();
+      // Denied Keychain access cannot prove that an imported identity is distinct.
+      if (existing.some(wallet => wallet.status === 'unavailable'))
+        throw new ManagementApiError('WALLET_INVENTORY_UNAVAILABLE', 503, 'Unlock the existing wallets before adding another wallet.');
+      return this.ledger.walletLibrary.add(raw, existing.flatMap(wallet => wallet.address ? [wallet.address] : []));
+    })());
+  }
   existingWallets() { return this.track(this.readWallets()); }
   private readWalletInventory() {
     if (!this.walletInventory || (this.walletInventoryExpiresAt > 0 && Date.now() >= this.walletInventoryExpiresAt)) {
       this.walletInventoryExpiresAt = 0;
       const readWallets: () => Promise<WalletInventoryEntry[]> = this.dependencies.readWallets ?? (() => readExistingProductWallets());
       this.walletInventory = readWallets().then(wallets => {
-        if (wallets.some(wallet => wallet.status !== 'available')) this.walletInventoryExpiresAt = Date.now() + 30_000;
-        return wallets;
+        const observed = this.ledger.walletAccounts.observe(wallets, { mainnetAssertion: process.env.YOSH_MAINNET_WALLET_PUBLIC_KEY });
+        if (observed.some(wallet => wallet.status !== 'available')) this.walletInventoryExpiresAt = Date.now() + 30_000;
+        return observed;
       });
     }
     return this.walletInventory!;
@@ -549,8 +564,9 @@ export class AppRuntime {
     const wallets = await this.readWalletInventory();
     if (this.purchaseExecutionMode() !== 'live_mainnet') return wallets;
     await this.refreshMainnetWallet();
-    return wallets.map(wallet => wallet.id === 'mainnet' ? { ...wallet, address: this.walletAddress ?? null,
-      status: this.authorityWalletStatus === 'available' ? 'available' as const : 'unavailable' as const } : wallet);
+    return wallets.map(wallet => wallet.id === 'mainnet' && wallet.status === 'available'
+      && this.authorityWalletStatus !== 'available' ? { ...wallet, address: null, status: 'unavailable' as const,
+        provisioningState: 'identity_conflict' as const } : wallet);
   }
   private async readOverview() {
     const mode = this.purchaseExecutionMode();

@@ -19,13 +19,16 @@ export async function readExistingProductWallets(
     { id: 'devnet', label: 'Devnet · Test', store: stores.test },
   ];
   return Promise.all(identities.map(async ({ id, label, store }) => {
-    try {
-      const secret = await store.read();
-      if (secret === undefined) return { id, label, address: null, status: 'missing' as const };
-      return { id, label, address: (await signerFromSecret(secret)).address, status: 'available' as const };
-    } catch {
-      return { id, label, address: null, status: 'unavailable' as const };
+    let secret: string | undefined;
+    try { secret = await store.read(); }
+    catch (error) {
+      const failure = error instanceof Error && 'code' in error && error.code === 'WALLET_KEYCHAIN_CORRUPT'
+        ? 'corrupt' as const : 'access_denied_or_locked' as const;
+      return { id, label, address: null, status: 'unavailable' as const, failure };
     }
+    if (secret === undefined) return { id, label, address: null, status: 'missing' as const };
+    try { return { id, label, address: (await signerFromSecret(secret)).address, status: 'available' as const }; }
+    catch { return { id, label, address: null, status: 'unavailable' as const, failure: 'corrupt' as const }; }
   }));
 }
 
