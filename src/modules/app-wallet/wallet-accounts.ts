@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import { address } from '@solana/kit';
 import { z } from 'zod';
-import { APP_WALLET_KEYCHAIN, MAINNET_WALLET_KEYCHAIN } from '../payment/keychain';
+import { APP_WALLET_KEYCHAIN, MAINNET_WALLET_KEYCHAIN, productWalletSlotKeychain } from '../payment/keychain';
 import { DEVNET_NETWORK, MAINNET_NETWORK } from '../payment/payment-environment';
 import { PRODUCT_MAINNET_WALLET_ID, PRODUCT_TEST_WALLET_ID } from '../purchases/monetary-scope';
 
@@ -19,8 +19,10 @@ export type WalletAccount = Readonly<{ accountId: string; slot: WalletSlot; publ
 export type WalletObservationOptions = { mainnetAssertion?: string };
 
 function slotIdentity(slot: WalletSlot) {
-  return slot === 'mainnet' ? { item: MAINNET_WALLET_KEYCHAIN, walletIdentity: PRODUCT_MAINNET_WALLET_ID, network: MAINNET_NETWORK }
-    : { item: APP_WALLET_KEYCHAIN, walletIdentity: PRODUCT_TEST_WALLET_ID, network: DEVNET_NETWORK };
+  const item = process.env.YOSH_PAY_DEV === '1' && process.env.YOSH_PAY_DEV_ENV === 'mainnet'
+    ? productWalletSlotKeychain(slot) : slot === 'mainnet' ? MAINNET_WALLET_KEYCHAIN : APP_WALLET_KEYCHAIN;
+  return slot === 'mainnet' ? { item, walletIdentity: PRODUCT_MAINNET_WALLET_ID, network: MAINNET_NETWORK }
+    : { item, walletIdentity: PRODUCT_TEST_WALLET_ID, network: DEVNET_NETWORK };
 }
 
 /** Metadata only: this class cannot read, create, replace or delete Keychain material.

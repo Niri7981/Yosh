@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { createKeyPairSignerFromBytes, createKeyPairSignerFromPrivateKeyBytes, getBase58Decoder, getBase58Encoder } from '@solana/kit';
-import { createAppWalletKeychain, readAppWalletKeychain, createMainnetWalletKeychain, readMainnetWalletKeychain } from '../payment/keychain';
+import { createAppWalletKeychain, readAppWalletKeychain, createMainnetWalletKeychain, readMainnetWalletKeychain, WalletKeychainError } from '../payment/keychain';
 import { resolvePaymentEnvironment, validatePaymentEnvironment, type PaymentEnvironment } from '../payment/payment-environment';
 
 export type WalletSecretStore = { read(): Promise<string | undefined>; create(secret: string): Promise<void> };
@@ -61,11 +61,11 @@ async function initializeStoredWallet(store: WalletSecretStore) {
         // Another instance may have won the fixed-item create race. Reuse only a
         // signer that can actually be read back; never silently substitute one.
         const raced = await store.read();
-        if (!raced) throw new Error('The Yosh wallet could not be saved to Keychain');
+        if (!raced) throw new WalletKeychainError('WALLET_KEYCHAIN_UNAVAILABLE');
         return { address: (await signerFromSecret(raced)).address, reused: true };
       }
       const verified = await store.read();
-      if (!verified) throw new Error('The Yosh wallet could not be verified in Keychain');
+      if (!verified) throw new WalletKeychainError('WALLET_KEYCHAIN_UNAVAILABLE');
       const storedSigner = await signerFromSecret(verified);
       if (storedSigner.address !== signer.address) throw new Error('The saved Yosh wallet does not match the generated signer');
       return { address: signer.address, reused: false };

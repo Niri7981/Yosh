@@ -19,7 +19,7 @@ export async function GET(request: Request) {
         spendingAuthorized: member.authority.readiness.transactionExecution.eligible,
         readiness: member.authority.readiness,
         registeredResources: overview.service.registeredResources, execution: overview.service.execution,
-        paymentEnabled: overview.service.paymentEnabled }, { headers: { 'cache-control': 'no-store' } });
+        paymentEnabled: overview.service.paymentEnabled, recentPurchases: member.purchases.slice(0, 10) }, { headers: { 'cache-control': 'no-store' } });
     }
     if (operation !== 'quote') return Response.json({ code: 'UNKNOWN_OPERATION' }, { status: 400 });
     return Response.json(await app.quotePaidResources(new URL(request.url).origin, principal.cardMemberId), { headers: { 'cache-control': 'no-store' } });

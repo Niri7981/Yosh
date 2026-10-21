@@ -4,6 +4,7 @@ import { randomBytes } from 'node:crypto';
 import { z } from 'zod';
 
 const ProductConfiguration = z.object({
+  YOSH_PAY_MCP_MAINNET: z.enum(['0', '1']).optional(),
   YOSH_ENABLE_MAINNET_EXECUTION: z.enum(['0', '1']).optional(),
   YOSH_MAINNET_RESOURCES: z.string().optional(),
   YOSH_MAINNET_WALLET_PUBLIC_KEY: z.string().optional(),

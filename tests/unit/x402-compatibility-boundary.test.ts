@@ -17,6 +17,17 @@ const resource: X402Resource = { resourceId: 'agent402-crypto-price', providerId
   maximumAmount: '5000', request: { url: 'https://agent402.tools/api/crypto-price?coins=BTC%2CETH%2CSOL&currency=usd',
     method: 'GET', access: 'https', headers: { accept: 'application/json' } } };
 
+it('preserves informational outputSchema in every raw v2 offer instead of dropping authorized evidence through SDK projection', () => {
+  const original = readPaymentRequiredHeader(agent402Header);
+  const outputSchema = { type: 'object', properties: { price: { type: 'number' } } };
+  const raw = { ...original, accepts: original.accepts.map(offer => ({ ...offer, outputSchema })) };
+  const header = Buffer.from(JSON.stringify(raw)).toString('base64');
+  expect(readPaymentRequiredHeader(header).accepts[0]).not.toHaveProperty('outputSchema');
+  const challenge = readPaymentRequiredHeader(header, true);
+  expect(challenge.accepts[0]).toMatchObject({ outputSchema });
+  expect(validateResourceChallenge(challenge, resource, environment).quote).toMatchObject({ outputSchema });
+});
+
 it('accepts the real 13-option Agent402 V2 challenge with Solana at position 11 and retains wire evidence', () => {
   const header = agent402Header;
   const challenge = readPaymentRequiredHeader(header);
