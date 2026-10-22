@@ -10,18 +10,56 @@ struct CardSettingsBody: View {
     let onOpenRepository: () -> Void
     let onReload: () -> Void
     var appLock: YoshAppLock? = nil
+    @AppStorage("yosh.appearance") private var appearance = "system"
+    var onOpenWallets: () -> Void = {}
     var onOpenResources: () -> Void = {}
+    var development: PayDevelopmentSelection? = nil
+    var isSwitchingEnvironment = false
+    var onSelectEnvironment: (PayDevelopmentMode) -> Void = { _ in }
+    var onSaveRPC: (String) -> Void = { _ in }
+    @State private var rpcDraft = ""
 
     private var unavailableValue: String { isLoading ? "Checking…" : "Unavailable" }
-    private let rule = Color(red: 0.73, green: 0.79, blue: 0.87).opacity(0.5)
+    private let rule = YoshShellPalette.rule
 
     var body: some View {
         VStack(alignment: .leading, spacing: CardPageHeader.Layout.firstSectionSpacing) {
-            CardPageHeader(title: "Settings", style: .collection(subtitle: "Manage Yosh on this Mac."))
-                .foregroundStyle(Color(red: 0.07, green: 0.10, blue: 0.15))
+            CardPageHeader(title: "Settings", style: .collection(subtitle: YoshPayDevelopment.isEnabled()
+                ? "Development · \(development?.environment == .mainnet ? "Mainnet · Real funds" : "Offline · No real funds")" : "Manage Yosh on this Mac."))
+                .foregroundStyle(YoshShellPalette.ink)
             ScrollView(.vertical) {
                 VStack(alignment: .leading, spacing: 28) {
-                    SettingsSection(title: "WALLETS", symbol: "wallet.bifold") {
+                    if YoshPayDevelopment.isEnabled() {
+                        SettingsSection(title: "ENVIRONMENT", symbol: "globe") {
+                            HStack {
+                                Text("Current environment")
+                                Spacer()
+                                Menu(development?.environment.title ?? "Checking…") {
+                                    Button("Offline") { onSelectEnvironment(.offline) }
+                                    Button("Solana Mainnet…") { onSelectEnvironment(.mainnet) }
+                                }
+                                .disabled(isSwitchingEnvironment || development == nil)
+                                .accessibilityIdentifier("settings.environment")
+                            }.font(.system(size: 13)).padding(.vertical, 10)
+                            Text(isSwitchingEnvironment ? "Safely restarting the backend…" : development?.environment == .mainnet
+                                ? "Real SOL and USDC. Payments require separate authorization."
+                                : "Local simulation. No real funds.")
+                                .font(.system(size: 11)).foregroundStyle(YoshShellPalette.secondaryInk)
+                            Text("Reconnect Pay MCP in Codex after changing environment.")
+                                .font(.system(size: 11)).foregroundStyle(YoshShellPalette.secondaryInk)
+                            if development?.environment == .mainnet {
+                                separator
+                                TextField("Mainnet RPC URL", text: $rpcDraft)
+                                    .textFieldStyle(.roundedBorder)
+                                    .accessibilityIdentifier("settings.mainnet-rpc")
+                                Button("Save RPC and reconnect") { onSaveRPC(rpcDraft) }
+                                    .disabled(isSwitchingEnvironment || rpcDraft == development?.rpcUrl)
+                                Text("Wallets, budgets and purchase records are separate from Offline.")
+                                    .font(.system(size: 11)).foregroundStyle(YoshShellPalette.secondaryInk)
+                            }
+                        }
+                    }
+                    SettingsSection(title: "WALLETS", symbol: "wallet.bifold", action: onOpenWallets) {
                         if let information {
                             ForEach(information.wallets) { wallet in
                                 existingWalletRow(wallet)
@@ -33,7 +71,7 @@ struct CardSettingsBody: View {
                             separator
                             SettingsRow(title: "Devnet · Test", value: unavailableValue)
                         }
-                        Text("Existing wallets on this Mac. Viewing does not create a wallet.")
+                        Text("Manage wallets on this Mac.")
                             .font(.system(size: 11))
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -51,18 +89,25 @@ struct CardSettingsBody: View {
                         unavailableToggle("Notifications")
                     }
                     SettingsSection(title: "APPEARANCE", symbol: "sun.max") {
-                        SettingsRow(title: "Appearance", value: "Light")
-                            .help("Yosh currently uses a light appearance.")
+                        Picker("Appearance", selection: $appearance) {
+                            Text("System").tag("system")
+                            Text("Light").tag("light")
+                            Text("Dark").tag("dark")
+                        }
+                        .pickerStyle(.segmented)
+                        .accessibilityIdentifier("settings.appearance")
+                        .padding(.vertical, 10)
                         separator
                         SettingsRow(title: "Reduce motion", value: "Follow System")
                             .help("Yosh follows the macOS Reduce Motion accessibility setting.")
                     }
                     SettingsSection(title: "SECURITY", symbol: "lock") {
-                        if let appLock {
+                        if let appLock, !YoshPayDevelopment.isEnabled() {
                             YoshAppLockSettings(appLock: appLock)
                             separator
                         }
-                        SettingsRow(title: "Key storage", value: "macOS Keychain")
+                        SettingsRow(title: "Key storage", value: YoshPayDevelopment.isEnabled()
+                            ? development?.environment == .mainnet ? "Dev macOS Keychain" : "Offline test key" : "macOS Keychain")
                         separator
                         SettingsRow(title: "Local management", value: information == nil ? unavailableValue : "Protected")
                     }
@@ -82,7 +127,7 @@ struct CardSettingsBody: View {
                         if let error {
                             Text(error)
                                 .font(.system(size: 11))
-                                .foregroundStyle(Color(red: 0.58, green: 0.28, blue: 0.31))
+                                .foregroundStyle(YoshShellPalette.negative)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
                         Button(error == nil ? "Refresh status" : "Retry", action: onReload)
@@ -100,6 +145,8 @@ struct CardSettingsBody: View {
         .padding(.top, CardPageHeader.Layout.topSpacing)
         .padding(.bottom, 12)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .onAppear { rpcDraft = development?.rpcUrl ?? PayDevelopmentSelection.offline.rpcUrl }
+        .onChange(of: development?.rpcUrl) { _, value in rpcDraft = value ?? PayDevelopmentSelection.offline.rpcUrl }
     }
 
     private var separator: some View {
@@ -108,7 +155,7 @@ struct CardSettingsBody: View {
 
     private func unavailableToggle(_ title: String) -> some View {
         HStack(spacing: 12) {
-            Text(title).foregroundStyle(Color(red: 0.07, green: 0.10, blue: 0.15))
+            Text(title).foregroundStyle(YoshShellPalette.ink)
             Spacer(minLength: 4)
             Text("Not available yet")
                 .font(.system(size: 11))

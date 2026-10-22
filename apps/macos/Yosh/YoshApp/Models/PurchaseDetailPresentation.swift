@@ -64,7 +64,8 @@ struct PurchaseDetailPresentation {
 
         let confirmedPayment = purchase.executionMode == .liveMainnet || purchase.executionMode == .liveDevnet
         let network = Self.nonempty(purchase.network)
-        let paymentContext = [item.amount, network.map(Self.shortNetwork)].compactMap { $0 }.joined(separator: " · ")
+        let paymentContext = purchase.offline == true ? "\(item.amount) · Offline · No real funds"
+            : [item.amount, network.map(Self.shortNetwork)].compactMap { $0 }.joined(separator: " · ")
         var observed: [Stage] = []
         if approved {
             observed.append(Stage(id: .approved, title: "Allowed",
@@ -132,18 +133,26 @@ struct PurchaseDetailPresentation {
         case .none: "Provider not provided"
         }
         resourceContext = Self.nonempty(purchase.reason)
-        facts = [
+        var contextFacts = [
             Receipt(label: "Agent", value: agentName, copyValue: nil),
             Receipt(label: "Resource", value: title, copyValue: nil),
             Receipt(label: "Amount", value: item.amount, copyValue: nil),
-            Receipt(label: "Environment", value: item.mode, copyValue: nil),
+            Receipt(label: "Environment", value: purchase.offline == true ? "Offline · No real funds" : item.mode, copyValue: nil),
             Receipt(label: "Network", value: network.map(Self.receiptNetwork) ?? "Unavailable", copyValue: nil),
             Receipt(label: "Payment", value: item.payment, copyValue: nil),
             Receipt(label: "Delivery", value: item.delivery, copyValue: nil),
         ]
-        explorerURL = Self.explorerURL(transaction: purchase.transaction, network: network,
+        if let trace = purchase.executionTrace, trace.source == "pay_mcp" {
+            contextFacts.append(Receipt(label: "Route", value: trace.complete ? "Pay MCP · Traced" : "Pay MCP · Trace incomplete", copyValue: nil))
+        }
+        facts = contextFacts
+        explorerURL = purchase.offline == true ? nil : Self.explorerURL(transaction: purchase.transaction, network: network,
             environment: purchase.monetaryEnvironment)
         var fields: [Receipt] = []
+        if let trace = purchase.executionTrace, trace.source == "pay_mcp" {
+            fields.append(Receipt(label: "Operation", value: trace.operationId, copyValue: trace.operationId))
+            fields.append(Receipt(label: "Trace ID", value: trace.traceId, copyValue: trace.traceId))
+        }
         // A simulated transaction string is not a chain receipt.
         if purchase.executionMode != .simulated, let transaction = Self.nonempty(purchase.transaction) {
             fields.append(Receipt(label: "Signature", value: transaction, copyValue: transaction))

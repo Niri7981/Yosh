@@ -12,9 +12,9 @@ struct PurchaseDetail: View {
     }
 
     @State private var copiedReceipt: String?
-    private let ink = Color(red: 0.07, green: 0.10, blue: 0.15)
+    private let ink = YoshShellPalette.ink
     private let secondaryInk = YoshShellPalette.secondaryInk
-    private let rule = Color(red: 0.73, green: 0.79, blue: 0.87).opacity(0.5)
+    private let rule = YoshShellPalette.rule
     private var item: PurchaseDetailPresentation { PurchaseDetailPresentation(purchase, agentName: agentName) }
 
     var body: some View {
@@ -27,7 +27,7 @@ struct PurchaseDetail: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .foregroundStyle(Color(red: 0.28, green: 0.37, blue: 0.49))
+                .foregroundStyle(YoshShellPalette.secondaryInk)
                 .accessibilityLabel("Back to \(backTitle)")
 
                 HStack(alignment: .center, spacing: 12) {
@@ -66,7 +66,7 @@ struct PurchaseDetail: View {
         Text(item.status)
             .font(.system(size: 9, weight: .semibold))
             .tracking(0.7)
-            .foregroundStyle(item.tone == .success ? Color(red: 0.14, green: 0.38, blue: 0.37) : signal(item.tone))
+            .foregroundStyle(item.tone == .success ? YoshShellPalette.positive : signal(item.tone))
             .multilineTextAlignment(.center)
             .fixedSize(horizontal: false, vertical: true)
             .padding(.horizontal, 9)
@@ -268,8 +268,8 @@ struct PurchaseDetail: View {
     private func signal(_ tone: PurchaseDetailPresentation.Tone) -> Color {
         switch tone {
         case .success: Color(red: 0.16, green: 0.64, blue: 0.52)
-        case .pending: Color(red: 0.47, green: 0.39, blue: 0.23)
-        case .negative: Color(red: 0.58, green: 0.28, blue: 0.31)
+        case .pending: YoshShellPalette.pending
+        case .negative: YoshShellPalette.negative
         case .neutral: secondaryInk
         }
     }

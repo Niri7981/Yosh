@@ -22,6 +22,10 @@
 *.db
 *.db-shm
 *.db-wal
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite-journal
 
 # logs
 *.log
@@ -38,3 +42,19 @@
 
 # Personal progress notes (not a publishing document)
 /docs/daily-summary.md
+
+# Local acceptance snapshots and superseded cross-repository patch exports.
+# Publish reviewed source manifests and sanitized archive metadata explicitly.
+/integration/**/*.patch
+/integration/**/*.json
+!/integration/pay-mcp-first/source-baselines.json
+!/integration/pay-persistence/compat-sources.json
+!/integration/mainnet-preflight-fix/agent402-public-policy.json
+!/integration/archive-20261021/*.json
+/integration/**/*.jsonl
+/integration/**/*.txt
+/integration/**/baseline/
+/integration/**/parity-baseline/
+/integration/product-dev/desktop-mcp-entry.proposed.toml
+/docs/architecture/*-image-*.txt
+/docs/architecture/*-official-style-*.txt

@@ -24,7 +24,7 @@ struct SettingsRow: View {
     private var content: some View {
         HStack(alignment: .center, spacing: 12) {
             Text(title)
-                .foregroundStyle(Color(red: 0.07, green: 0.10, blue: 0.15))
+                .foregroundStyle(YoshShellPalette.ink)
                 .fixedSize(horizontal: true, vertical: false)
             Spacer(minLength: 4)
             if let value {

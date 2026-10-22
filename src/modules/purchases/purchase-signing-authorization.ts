@@ -3,10 +3,11 @@ import type { PaymentConfig } from '../payment/payment-config';
 import type { PaymentSigningAuthorization } from '../payment/solana-payment';
 import type { PurchaseLedger } from './purchase-ledger';
 import { assertProductionPaymentGate } from './production-execution-gate';
+import type { ExternalExecutionPermit } from './execution-safety';
 
 /** Rechecks the original reserved purchase synchronously at each signing boundary. */
 export function purchaseSigningAuthorization(
-  ledger: PurchaseLedger, approvalId: string, config: PaymentConfig, endpoint: string,
+  ledger: PurchaseLedger, approvalId: string, config: PaymentConfig, endpoint: string, permit?: ExternalExecutionPermit,
 ): PaymentSigningAuthorization {
   return {
     assertCanSign(requirement, authorized) {
@@ -17,7 +18,7 @@ export function purchaseSigningAuthorization(
           || record.intent.amount !== authorized.amount || record.intent.httpRequest?.url !== authorized.resource) {
           throw new Error('MAINNET_PAYMENT_BINDING_MISMATCH');
         }
-      });
+      }, permit);
     },
   };
 }

@@ -25,10 +25,15 @@ final class YoshAppLock {
     var isUnlocked: Bool { state == .unlocked }
     var canEnterPIN: Bool { loadSucceeded && state == .locked && !isBusy }
 
-    init(store: any YoshAppLockStoring = YoshKeychainAppLockStore(), pinLength: Int = 4) {
+    init(store: any YoshAppLockStoring = YoshKeychainAppLockStore(), pinLength: Int = 4, developmentSession: Bool = false) {
         precondition(pinLength == 4 || pinLength == 6)
         self.store = store
         digitCount = pinLength
+        if developmentSession {
+            state = .unlocked
+            enabled = false
+            loadSucceeded = true
+        }
     }
 
     func load() async {

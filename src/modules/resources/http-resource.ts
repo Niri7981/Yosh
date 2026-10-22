@@ -228,7 +228,8 @@ export const X402ChallengeSchema = z.object({
   resource: z.object({ url: z.string().min(1).max(2048), description: z.string().optional(), mimeType: z.string().optional(),
     serviceName: z.string().optional(), tags: z.array(z.string()).optional(), iconUrl: z.string().optional() }).strict(),
   accepts: z.array(z.object({ scheme: z.string(), network: z.templateLiteral([z.string().min(1), ':', z.string().min(1)]),
-    amount: z.string(), asset: z.string(), payTo: z.string(), maxTimeoutSeconds: z.number(), extra: z.record(z.string(), z.json()) }).strict()).min(1).max(256),
+    amount: z.string(), asset: z.string(), payTo: z.string(), maxTimeoutSeconds: z.number(), extra: z.record(z.string(), z.json()),
+    outputSchema: z.json().optional() }).strict()).min(1).max(256),
   extensions: z.record(z.string(), z.json()).optional(),
 }).strict();
 export type X402Challenge = z.infer<typeof X402ChallengeSchema>;

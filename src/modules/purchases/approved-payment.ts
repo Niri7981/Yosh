@@ -1,3 +1,4 @@
+import type { ExternalExecutionPermit } from './execution-safety';
 import type { Trace } from '../demo/trace';
 import type { PaymentPayload, PaymentRequirements } from '@x402/core/types';
 import { assertPaymentConfigExecutionEnabled, type PaymentConfig } from '../payment/payment-config';
@@ -13,7 +14,8 @@ import { PurchaseLedger, type PurchaseRecord } from './purchase-ledger';
 import { hash } from './spending-policy';
 import { runPaymentPreflight } from '../payment/payment-preflight';
 import { MarketOfferIdSchema, marketOffer } from '../resources/market-offers';
-import { paymentSignatureHeaders, readPaymentRequiredHeader, readSettlementTransactionHint } from '../payment/x402-client';
+import { paymentSignatureHeaders, readPaymentRequiredHeader, readSettlementResponse, readSettlementTransactionHint } from '../payment/x402-client';
+import type { PaymentExecutionContext, PaymentExecutor, PaymentResponseObservation, PreparedPayment } from '../payment/payment-execution-contract';
 import { resourcePaymentBinding, validateResourceChallenge } from '../payment/resource-challenge';
 import { HttpResourceRequestSchema } from '../resources/http-resource';
 import { prepareSafeResourceFetch } from '../resources/safe-resource-fetch';
@@ -49,7 +51,8 @@ export function paymentBinding(config: PaymentConfig, endpoint: string, quote?: 
 export function checkPaymentBinding(record: PurchaseRecord, config: PaymentConfig, endpoint: string) {
   const intent = record.intent;
   if (intent.httpRequest && intent.x402Challenge) {
-    if (intent.paymentRequiredHeader && hash(readPaymentRequiredHeader(intent.paymentRequiredHeader)) !== hash(intent.x402Challenge))
+    if (intent.paymentRequiredHeader && hash(readPaymentRequiredHeader(intent.paymentRequiredHeader,
+      intent.x402Challenge.accepts.some(quote => Object.hasOwn(quote, 'outputSchema')))) !== hash(intent.x402Challenge))
       throw new Error('Approval quote evidence changed');
     const { quote } = validateResourceChallenge(intent.x402Challenge, { resourceId: intent.resourceId, providerId: intent.providerId,
       request: intent.httpRequest, network: config.network, mint: intent.assetId, decimals: 6,
@@ -132,33 +135,55 @@ export async function reconcileApprovedPayment(ledger: PurchaseLedger, taskId: s
   } finally { ledger.reconciliation.finish(claim, code); }
 }
 
-/** Internal approval ID is the only caller-supplied payment parameter. */
-export async function executeApprovedPayment(ledger: PurchaseLedger, approvalId: string, config: PaymentConfig, endpoint: string, trace: Trace = () => {}) {
+async function prepareJavaScriptPayment(context: PaymentExecutionContext): Promise<PreparedPayment> {
+  const { config, record, endpoint, beforeSign, production } = context;
+  const signer = await loadBuyerSigner(config.buyer, process.env, config);
+  beforeSign();
+  let lifetime: OriginalPaymentLifetime | undefined;
+  const payload = await prepareSolanaPayment(config, signer, record.quote, beforeSign,
+    record.intent.httpRequest ? { amount: record.quote.amount, resource: record.intent.httpRequest.url, challenge: record.intent.x402Challenge }
+      : record.intent.offerId || record.intent.resourcePath ? { amount: record.quote.amount, resource: new URL(endpoint).pathname + new URL(endpoint).search } : undefined,
+    value => { lifetime = value; }, ...(production ? [production] : []));
+  return { payload, ...(lifetime ? { lifetime } : {}) };
+}
+
+function paymentResponseObservation(response: Response, config: PaymentConfig, record: PurchaseRecord): PaymentResponseObservation {
+  try {
+    const receipt = readSettlementResponse(response, { network: config.network, payer: config.buyer, amount: record.intent.amount });
+    // An untrusted receipt can repeat the signed buyer bytes in any arbitrary
+    // string field. Share only bounded protocol facts that cannot carry them.
+    const safe = { success: receipt.success, network: receipt.network, ...(receipt.payer ? { payer: receipt.payer } : {}),
+      ...(receipt.amount === undefined ? {} : { amount: receipt.amount }) };
+    return { status: response.status, paymentResponse: Buffer.from(JSON.stringify(safe)).toString('base64') };
+  } catch { return { status: response.status }; }
+}
+
+/** Internal approval ID is the only caller-supplied payment parameter.
+ * Executors are internal dependencies; Agent/UI input never selects one. */
+export async function executeApprovedPayment(ledger: PurchaseLedger, approvalId: string, config: PaymentConfig, endpoint: string, trace: Trace = () => {}, executor?: PaymentExecutor, permit?: ExternalExecutionPermit) {
   assertPaymentConfigExecutionEnabled(config);
+  executor?.assertEligibility(config, ledger);
   const validate = (record: PurchaseRecord) => {
     checkPaymentBinding(record, config, endpoint);
     assertProductionPaymentGate(ledger, record, config, endpoint);
   };
-  const record = ledger.claim(approvalId, undefined, validate, config.mode);
+  const record = ledger.claim(approvalId, undefined, validate, config.mode, permit);
   // Recipient is approved data, never a product/Demo default for a generic resource.
   const signerConfig = record.intent.httpRequest ? { ...config, merchant: record.intent.payTo } : config;
-  const beforeSign = () => ledger.assertCanSign(approvalId, undefined, validate);
+  const beforeSign = () => ledger.assertCanSign(approvalId, undefined, validate, permit);
+  const context: PaymentExecutionContext = { config: signerConfig, record, endpoint, beforeSign,
+    ...(config.mode === 'live_mainnet' ? { production: purchaseSigningAuthorization(ledger, approvalId, signerConfig, endpoint, permit) } : {}) };
   let reconciliationStarted = false;
   try {
+    executor?.beginPreparation?.(context);
     checkPaymentBinding(record, config, endpoint);
     if (record.intent.offerId || record.intent.resourcePath) {
       const preflight = await runPaymentPreflight(config, { amount: record.quote.amount });
       if (preflight.facilitator.feePayer !== record.quote.extra?.feePayer) throw new Error('Quote fee payer changed');
     }
     beforeSign(); trace('SIGNING');
-    const signer = await loadBuyerSigner(config.buyer, process.env, config);
-    beforeSign();
-    let lifetime: OriginalPaymentLifetime | undefined;
-    const payload = await prepareSolanaPayment(signerConfig, signer, record.quote, beforeSign,
-      record.intent.httpRequest ? { amount: record.quote.amount, resource: record.intent.httpRequest.url, challenge: record.intent.x402Challenge }
-        : record.intent.offerId || record.intent.resourcePath ? { amount: record.quote.amount, resource: new URL(endpoint).pathname + new URL(endpoint).search } : undefined,
-      value => { lifetime = value; }, ...(config.mode === 'live_mainnet' ? [purchaseSigningAuthorization(ledger, approvalId, signerConfig, endpoint)] : []));
-    ledger.savePayload(approvalId, payload, validate, originalEvidence(record, payload, signerConfig, lifetime));
+    const { payload, lifetime } = await (executor ? executor.prepare(context) : prepareJavaScriptPayment(context));
+    ledger.savePayload(approvalId, payload, validate, originalEvidence(record, payload, signerConfig, lifetime), permit);
     trace('SIGNED');
     // Encode before committing the send marker. The guarded write and fetch call
     // are synchronous neighbors; pause/exit cannot start a new submission after acknowledgement.
@@ -167,7 +192,8 @@ export async function executeApprovedPayment(ledger: PurchaseLedger, approvalId:
     const init = { headers, ...(request ? { method: request.method, ...(request.body === undefined ? {} : { body: request.body }) } : {}),
       signal: AbortSignal.timeout(55_000), redirect: 'error' as const };
     const submit = request?.access === 'https' ? await prepareSafeResourceFetch(endpoint, init) : () => fetch(endpoint, init);
-    ledger.markSubmissionAttempt(approvalId, validate);
+    executor?.assertBeforeSubmission(context);
+    ledger.markSubmissionAttempt(approvalId, validate, undefined, permit);
     const pendingResponse = submit();
     trace('SUBMITTED');
     const response = await pendingResponse;
@@ -177,11 +203,21 @@ export async function executeApprovedPayment(ledger: PurchaseLedger, approvalId:
     } catch { /* A missing/unusable merchant receipt cannot erase buyer evidence. */ }
     const submitted = record.ownerCardMemberId ? ledger.getOwned(record.intent.idempotencyKey, record.ownerCardMemberId) : ledger.getLegacy(record.intent.idempotencyKey);
     observeDeliveryReceipt(ledger, submitted!, response, config);
-    reconciliationStarted = true;
-    await reconcileApprovedPayment(ledger, record.intent.idempotencyKey, config, trace, record.ownerCardMemberId);
-    const paid = (record.ownerCardMemberId ? ledger.getOwned(record.intent.idempotencyKey, record.ownerCardMemberId) : ledger.getLegacy(record.intent.idempotencyKey))!;
-    if (paid.status !== 'PAID') { await response.body?.cancel().catch(() => {}); throw new Error('Original transaction unresolved or failed'); }
-    return await receiveOriginalDelivery(ledger, paid, response, config, endpoint, trace);
+    try {
+      reconciliationStarted = true;
+      await reconcileApprovedPayment(ledger, record.intent.idempotencyKey, config, trace, record.ownerCardMemberId);
+      const paid = (record.ownerCardMemberId ? ledger.getOwned(record.intent.idempotencyKey, record.ownerCardMemberId) : ledger.getLegacy(record.intent.idempotencyKey))!;
+      if (paid.status !== 'PAID') { await response.body?.cancel().catch(() => {}); throw new Error('Original transaction unresolved or failed'); }
+      return await receiveOriginalDelivery(ledger, paid, response, config, endpoint, trace);
+    } finally {
+      // Persist the original delivery before this advisory subprocess can fail
+      // or delay it. Only independent original-transaction proof permits delivery.
+      if (executor?.interpretResponse) {
+        try { await executor.interpretResponse(paymentResponseObservation(response, config, record)); }
+        catch { process.emitWarning('Protocol response interpretation unavailable; original payment reconciliation continues',
+          { code: 'PAY_PROTOCOL_OBSERVATION_FAILED' }); }
+      }
+    }
   } catch {
     const original = ledger.savedOriginalPayment(approvalId);
     if (original?.state === 'SIGNED_NOT_SUBMITTED' || (!original && !ledger.savedPayload(approvalId))) ledger.failUnsubmitted(approvalId);

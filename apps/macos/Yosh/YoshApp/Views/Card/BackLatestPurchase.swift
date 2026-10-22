@@ -15,16 +15,16 @@ struct BackLatestPurchase: View {
 
     private var decisionColor: Color {
         switch latest?.decisionTone {
-        case .approved: Color(red: 0.18, green: 0.38, blue: 0.38)
-        case .denied: Color(red: 0.58, green: 0.28, blue: 0.31)
+        case .approved: YoshShellPalette.positive
+        case .denied: YoshShellPalette.negative
         case .neutral, nil: .secondary
         }
     }
 
     private var decisionTint: Color {
         switch latest?.decisionTone {
-        case .approved: Color(red: 0.67, green: 0.87, blue: 0.85).opacity(0.5)
-        case .denied: Color(red: 0.85, green: 0.71, blue: 0.73).opacity(0.25)
+        case .approved: YoshShellPalette.positiveWash.opacity(0.5)
+        case .denied: YoshShellPalette.negativeWash.opacity(0.25)
         case .neutral, nil: Color.secondary.opacity(0.1)
         }
     }
@@ -69,7 +69,7 @@ struct BackLatestPurchase: View {
                         if let latest {
                             HStack(alignment: .firstTextBaseline, spacing: 5) {
                                 Circle()
-                                    .fill(latest.paymentConfirmed ? Color(red: 0.48, green: 0.64, blue: 0.88) : Color.secondary)
+                                    .fill(latest.paymentConfirmed ? YoshShellPalette.activeInk : Color.secondary)
                                     .frame(width: 6, height: 6)
                                     .accessibilityHidden(true)
                                 Text("\(latest.payment) · \(latest.recency)")

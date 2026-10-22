@@ -1,6 +1,7 @@
 import { address, getAddressEncoder, getProgramDerivedAddress } from "@solana/kit";
 import { assertPaymentConfigExecutionEnabled, DEVNET_GENESIS, PAYMENT_AMOUNT, TOKEN_PROGRAM, type PaymentConfig } from "./payment-config";
 import { readPaymentJson } from './read-payment-json';
+import { safeResourceFetch } from '../resources/safe-resource-fetch';
 
 const ASSOCIATED_TOKEN_PROGRAM = address("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL");
 const REQUEST_TIMEOUT_MS = 10_000;
@@ -55,7 +56,8 @@ export async function runPaymentPreflight(
   assertPaymentConfigExecutionEnabled(config);
   const amount = dependencies.amount ?? PAYMENT_AMOUNT;
   if (!/^[1-9]\d*$/.test(amount)) throw new Error("Invalid payment amount");
-  const fetcher = dependencies.fetch || fetch;
+  const fetcher = dependencies.fetch || (config.mode === 'live_mainnet' && process.env.YOSH_PAY_MCP_MAINNET === '1'
+    ? (input: string | URL | Request, init?: RequestInit) => safeResourceFetch(new URL(input instanceof Request ? input.url : String(input)).href, init ?? {}) : fetch);
   async function json(url: string, label: string, init: RequestInit = {}): Promise<JsonObject> {
     try {
       const response = await fetcher(url, { ...init, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS), redirect: "error" });

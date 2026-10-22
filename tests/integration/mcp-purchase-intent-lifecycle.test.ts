@@ -60,6 +60,10 @@ it('separates authenticated MCP purchase intents from SpendGrant authority acros
   });
   let now = fixedNow;
   const app = new AppRuntime(directory, { initializeWallet: async () => ({ address: buyer, reused: true }), now: () => now,
+    readWallets: async () => [
+      { id: 'mainnet', label: 'Mainnet', address: null, status: 'missing' },
+      { id: 'devnet', label: 'Devnet · Test', address: buyer, status: 'available' },
+    ],
     timeZone: () => 'Asia/Shanghai', fetcher: quote });
   const claim = vi.spyOn(app.ledger, 'claim');
   const savePayload = vi.spyOn(app.ledger, 'savePayload');

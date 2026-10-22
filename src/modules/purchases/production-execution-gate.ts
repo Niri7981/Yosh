@@ -32,7 +32,10 @@ export function assertProductionPaymentGate(ledger: PurchaseLedger, record: Purc
     || intent.payTo === config.buyer || (declared.recipient !== undefined && declared.recipient !== intent.payTo) || intent.assetDecimals !== config.asset.decimals) {
     throw new Error('MAINNET_RESOURCE_BINDING_MISMATCH');
   }
-  assertAuthorizedRequestInstance(declared, intent.httpRequest);
+  const external = ledger.executionSafety.provenance(intent.id)?.origin === 'external_pay';
+  const requestPolicy = external && declared.request.method === 'GET' ? { ...declared,
+    request: { ...declared.request, headers: { ...declared.request.headers, accept: declared.request.headers.accept ?? 'application/json' } } } : declared;
+  assertAuthorizedRequestInstance(requestPolicy, intent.httpRequest);
   const grant = ledger.spendGrantById(intent.authority.grantId);
   assertGrantPostScope(declared, grant);
   if (declared.request.method === 'POST' && grant?.id !== intent.authority.grantId) throw new Error('SPEND_GRANT_INACTIVE');

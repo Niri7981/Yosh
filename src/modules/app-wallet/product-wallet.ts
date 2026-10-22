@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { createKeyPairSignerFromBytes, createKeyPairSignerFromPrivateKeyBytes, getBase58Decoder, getBase58Encoder } from '@solana/kit';
-import { createAppWalletKeychain, readAppWalletKeychain, createMainnetWalletKeychain, readMainnetWalletKeychain } from '../payment/keychain';
+import { createAppWalletKeychain, readAppWalletKeychain, createMainnetWalletKeychain, readMainnetWalletKeychain, WalletKeychainError } from '../payment/keychain';
 import { resolvePaymentEnvironment, validatePaymentEnvironment, type PaymentEnvironment } from '../payment/payment-environment';
 
 export type WalletSecretStore = { read(): Promise<string | undefined>; create(secret: string): Promise<void> };
@@ -19,13 +19,16 @@ export async function readExistingProductWallets(
     { id: 'devnet', label: 'Devnet · Test', store: stores.test },
   ];
   return Promise.all(identities.map(async ({ id, label, store }) => {
-    try {
-      const secret = await store.read();
-      if (secret === undefined) return { id, label, address: null, status: 'missing' as const };
-      return { id, label, address: (await signerFromSecret(secret)).address, status: 'available' as const };
-    } catch {
-      return { id, label, address: null, status: 'unavailable' as const };
+    let secret: string | undefined;
+    try { secret = await store.read(); }
+    catch (error) {
+      const failure = error instanceof Error && 'code' in error && error.code === 'WALLET_KEYCHAIN_CORRUPT'
+        ? 'corrupt' as const : 'access_denied_or_locked' as const;
+      return { id, label, address: null, status: 'unavailable' as const, failure };
     }
+    if (secret === undefined) return { id, label, address: null, status: 'missing' as const };
+    try { return { id, label, address: (await signerFromSecret(secret)).address, status: 'available' as const }; }
+    catch { return { id, label, address: null, status: 'unavailable' as const, failure: 'corrupt' as const }; }
   }));
 }
 
@@ -58,11 +61,11 @@ async function initializeStoredWallet(store: WalletSecretStore) {
         // Another instance may have won the fixed-item create race. Reuse only a
         // signer that can actually be read back; never silently substitute one.
         const raced = await store.read();
-        if (!raced) throw new Error('The Yosh wallet could not be saved to Keychain');
+        if (!raced) throw new WalletKeychainError('WALLET_KEYCHAIN_UNAVAILABLE');
         return { address: (await signerFromSecret(raced)).address, reused: true };
       }
       const verified = await store.read();
-      if (!verified) throw new Error('The Yosh wallet could not be verified in Keychain');
+      if (!verified) throw new WalletKeychainError('WALLET_KEYCHAIN_UNAVAILABLE');
       const storedSigner = await signerFromSecret(verified);
       if (storedSigner.address !== signer.address) throw new Error('The saved Yosh wallet does not match the generated signer');
       return { address: signer.address, reused: false };

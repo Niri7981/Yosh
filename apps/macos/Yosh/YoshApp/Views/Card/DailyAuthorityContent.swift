@@ -18,9 +18,9 @@ struct DailyAuthorityContent: View {
     var blockers: [String] = []
 
     @FocusState private var limitIsFocused: Bool
-    private let ink = Color(red: 0.07, green: 0.10, blue: 0.15)
+    private let ink = YoshShellPalette.ink
     private let secondaryInk = YoshShellPalette.secondaryInk
-    private let rule = Color(red: 0.73, green: 0.79, blue: 0.87).opacity(0.5)
+    private let rule = YoshShellPalette.rule
 
     var body: some View {
         ScrollView(.vertical) {
@@ -92,7 +92,7 @@ struct DailyAuthorityContent: View {
                         Text(isSaving ? "Saving…" : "Save")
                             .font(.system(size: 14))
                             .frame(width: 82, height: 34)
-                            .background(Color(red: 0.76, green: 0.82, blue: 0.92).opacity(0.55), in: .rect(cornerRadius: 8))
+                            .background(YoshShellPalette.selection, in: .rect(cornerRadius: 8))
                     }
                     .buttonStyle(.plain)
                     .disabled(isSaving || currency == nil)
@@ -101,7 +101,7 @@ struct DailyAuthorityContent: View {
                     if let message {
                         Text(message)
                             .font(.system(size: 12))
-                            .foregroundStyle(messageFailed ? Color(red: 0.58, green: 0.28, blue: 0.31) : secondaryInk)
+                            .foregroundStyle(messageFailed ? YoshShellPalette.negative : secondaryInk)
                             .fixedSize(horizontal: false, vertical: true)
                             .accessibilityAddTraits(.updatesFrequently)
                             .padding(.top, 10)

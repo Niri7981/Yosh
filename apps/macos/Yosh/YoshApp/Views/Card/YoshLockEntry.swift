@@ -67,7 +67,7 @@ private struct YoshLockEntryFooter: View {
             } else if let error = appLock.error {
                 HStack(spacing: 8) {
                     Text(error)
-                        .foregroundStyle(Color(red: 0.55, green: 0.25, blue: 0.27))
+                        .foregroundStyle(YoshShellPalette.negative)
                         .accessibilityIdentifier("yosh.lock.error")
                     if !appLock.pinConfigured && appLock.entryStep == .confirm {
                         Button("Start over") { appLock.restartSetup(pinLength: appLock.digitCount) }

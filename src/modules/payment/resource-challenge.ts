@@ -8,6 +8,27 @@ import { HttpResourceRequestSchema, type HttpResourceRequest } from '../resource
 import { safeResourceFetch } from '../resources/safe-resource-fetch';
 import { validateDeliveryCapability, type DeliveryRecoveryCapability } from '../resources/delivery-capability';
 import { assertSupportedMainnetResourceRequest } from '../resources/supported-resource-request';
+import { z } from 'zod';
+
+/** Match the pinned pay-kit PaymentExtensions/PaymentIdentifierInfo types, while
+ * retaining the original JSON for authorization and echo. Required identifiers
+ * need durable outbound-ID support; this controlled profile cannot invent one. */
+export function assertPayControlledExtensions(challenge: X402Challenge) {
+  const extensions = challenge.extensions;
+  if (extensions && Object.hasOwn(extensions, 'sign-in-with-x')) throw new Error('PAY_CONTROLLED_SIGN_IN_UNSUPPORTED');
+  const raw = extensions?.['payment-identifier'];
+  if (raw === undefined) return;
+  const identifier = z.object({ info: z.object({ required: z.boolean().nullish(), id: z.string().nullish() })
+    .passthrough().optional(), schema: z.json().optional() }).passthrough().safeParse(raw);
+  if (!identifier.success) throw new Error('PAY_CONTROLLED_EXTENSIONS_INVALID');
+  if (identifier.data.info?.required === true) throw new Error('PAY_CONTROLLED_REQUIRED_PAYMENT_IDENTIFIER_UNSUPPORTED');
+  // The controller echoes immutable JSON. Admit only a shape the SDK's typed
+  // echo would preserve, rather than silently normalize or discard fields.
+  const { required, id } = identifier.data.info ?? {};
+  const sdkEcho = { info: { ...(required == null ? {} : { required }), ...(id == null ? {} : { id }) },
+    ...(identifier.data.schema == null ? {} : { schema: identifier.data.schema }) };
+  if (hash(sdkEcho) !== hash(raw)) throw new Error('PAY_CONTROLLED_EXTENSIONS_INVALID');
+}
 
 export function resourcePaymentBinding(environment: PaymentEnvironment, buyer: string, request: HttpResourceRequest, challenge: X402Challenge, recovery?: DeliveryRecoveryCapability, header?: string) {
   // Execution permission belongs to the immutable ledger scope. Presentation or

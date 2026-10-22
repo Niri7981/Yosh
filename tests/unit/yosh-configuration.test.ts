@@ -104,9 +104,14 @@ it('reuses the member, grant, ledger, purchase replay and wallet when only confi
     create: async value => { creates += 1; secret = value; },
   };
   const initializeWallet = () => initializeProductWallet(store);
+  const readWallets = async () => [
+    { id: 'mainnet', label: 'Mainnet', address: null, status: 'missing' as const },
+    { id: 'devnet', label: 'Devnet', address: secret ? (await initializeWallet()).address : null,
+      status: secret ? 'available' as const : 'missing' as const },
+  ];
   const origin = 'http://127.0.0.1:3049';
   vi.stubEnv('APP2049_DATA_DIR', directory);
-  const first = new AppRuntime(undefined, { initializeWallet });
+  const first = new AppRuntime(undefined, { initializeWallet, readWallets });
   const member = first.ledger.defaultCardMember();
   let grant: Awaited<ReturnType<AppRuntime['createSpendGrant']>>;
   let purchase: Awaited<ReturnType<AppRuntime['createTestPurchase']>>;
@@ -123,7 +128,7 @@ it('reuses the member, grant, ledger, purchase replay and wallet when only confi
 
   vi.stubEnv('APP2049_DATA_DIR', undefined);
   vi.stubEnv('YOSH_DATA_DIR', directory);
-  const second = new AppRuntime(undefined, { initializeWallet });
+  const second = new AppRuntime(undefined, { initializeWallet, readWallets });
   try {
     expect(second.directory).toBe(directory);
     expect(second.ledger.defaultCardMember()).toEqual(member);

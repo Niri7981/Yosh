@@ -85,6 +85,8 @@
 		A0000000000000000000010B /* YoshPINChangeEditor.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0000000000000000000010A /* YoshPINChangeEditor.swift */; };
 		B84900000000000000000050 /* RegisteredAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = B84900000000000000000051 /* RegisteredAPI.swift */; };
 		B84900000000000000000052 /* RegisteredAPIsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B84900000000000000000053 /* RegisteredAPIsView.swift */; };
+		C84900000000000000000001 /* WalletLibraryPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = C84900000000000000000011 /* WalletLibraryPresentation.swift */; };
+		C84900000000000000000002 /* WalletsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C84900000000000000000012 /* WalletsView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -167,6 +169,8 @@
 		A0000000000000000000010A /* YoshPINChangeEditor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = YoshPINChangeEditor.swift; sourceTree = "<group>"; };
 		B84900000000000000000051 /* RegisteredAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RegisteredAPI.swift; sourceTree = "<group>"; };
 		B84900000000000000000053 /* RegisteredAPIsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RegisteredAPIsView.swift; sourceTree = "<group>"; };
+		C84900000000000000000011 /* WalletLibraryPresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WalletLibraryPresentation.swift; sourceTree = "<group>"; };
+		C84900000000000000000012 /* WalletsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WalletsView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -236,6 +240,7 @@
 				A00000000000000000000057 /* CardMemberSession.swift */,
 				A0000000000000000000005B /* CardMemberSelection.swift */,
 				A0000000000000000000005D /* CardSettingsPresentation.swift */,
+				C84900000000000000000011 /* WalletLibraryPresentation.swift */,
 				B84900000000000000000051 /* RegisteredAPI.swift */,
 				A00000000000000000000063 /* ConnectionPresentation.swift */,
 				B84900000000000000000041 /* ConnectionMotionFact.swift */,
@@ -310,6 +315,7 @@
 				B84900000000000000000025 /* YoshDetailPage.swift */,
 				B84900000000000000000011 /* YoshTabMotion.swift */,
 				A0000000000000000000005F /* CardSettingsView.swift */,
+				C84900000000000000000012 /* WalletsView.swift */,
 				B84900000000000000000053 /* RegisteredAPIsView.swift */,
 				B84900000000000000000054 /* PostRequestApprovalView.swift */,
 				A00000000000000000000071 /* CardSettingsBody.swift */,
@@ -446,7 +452,9 @@
 				A0000000000000000000006C /* MembersRosterPresentation.swift in Sources */,
 				A0000000000000000000005C /* CardMemberSelection.swift in Sources */,
 				A0000000000000000000005E /* CardSettingsPresentation.swift in Sources */,
+				C84900000000000000000001 /* WalletLibraryPresentation.swift in Sources */,
 				A00000000000000000000060 /* CardSettingsView.swift in Sources */,
+				C84900000000000000000002 /* WalletsView.swift in Sources */,
 				A00000000000000000000072 /* CardSettingsBody.swift in Sources */,
 				A00000000000000000000074 /* SettingsSection.swift in Sources */,
 				A00000000000000000000076 /* SettingsRow.swift in Sources */,

@@ -44,10 +44,10 @@ describe('existing wallets read-only inventory', () => {
   it('distinguishes denied access and invalid keys from absence, while retaining the other wallet', async () => {
     const test = await fixture(11);
     const testStore = { read: async () => test.secret };
-    for (const mainnet of [{ read: async () => { throw new Error('private diagnostic'); } },
-      { read: async () => 'invalid' }]) {
+    for (const [mainnet, failure] of [[{ read: async () => { throw new Error('private diagnostic'); } }, 'access_denied_or_locked'],
+      [{ read: async () => 'invalid' }, 'corrupt']] as const) {
       expect(await readExistingProductWallets({ test: testStore, mainnet })).toEqual([
-        { id: 'mainnet', label: 'Mainnet', address: null, status: 'unavailable' },
+        { id: 'mainnet', label: 'Mainnet', address: null, status: 'unavailable', failure },
         { id: 'devnet', label: 'Devnet · Test', address: test.address, status: 'available' },
       ]);
     }

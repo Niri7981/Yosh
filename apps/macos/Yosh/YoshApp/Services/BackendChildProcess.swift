@@ -47,6 +47,10 @@ final class BackendDiagnostics: @unchecked Sendable {
 
     func classify(_ data: Data, pid: Int32) {
         guard let output = String(data: data.prefix(8192), encoding: .utf8)?.lowercased() else { return }
+        if let range = output.range(of: "yosh_pay_dev_startup_failed:[a-z][a-z0-9_]{2,80}", options: .regularExpression),
+           let code = output[range].split(separator: ":").last {
+            record("startupRejected", pid: pid, code: code.uppercased())
+        }
         let codes: [(String, String)] = [
             ("eaddrinuse", "PORT_IN_USE"), ("data_directory_in_use", "DATA_DIRECTORY_IN_USE"),
             ("sqlit", "DATABASE_ERROR"), ("module_not_found", "MISSING_RUNTIME_MODULE"),
@@ -64,11 +68,16 @@ final class BackendDiagnostics: @unchecked Sendable {
 final class BackendChildProcess {
     private let process: Process
 
-    init(node: URL, server: URL, root: URL, environment: [String: String], diagnostics: BackendDiagnostics,
+    init(node: URL, server: URL, root: URL, environment: [String: String], diagnostics: BackendDiagnostics, sandboxProfile: URL? = nil,
          onExit: @escaping @Sendable (Int32, Int32) -> Void) {
         let child = Process()
-        child.executableURL = node
-        child.arguments = [server.path]
+        if let sandboxProfile {
+            child.executableURL = URL(fileURLWithPath: "/usr/bin/sandbox-exec")
+            child.arguments = ["-D", "REAL_HOME=\(FileManager.default.homeDirectoryForCurrentUser.path)", "-f", sandboxProfile.path, node.path, server.path]
+        } else {
+            child.executableURL = node
+            child.arguments = [server.path]
+        }
         child.currentDirectoryURL = root
         child.environment = environment
         let stdout = Pipe()

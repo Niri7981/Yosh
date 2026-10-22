@@ -12,6 +12,9 @@ struct CardSettingsView: View {
     @State private var state: LoadState = .loading
     @State private var actionError: String?
     @State private var loadRevision = 0
+    @State private var development: PayDevelopmentSelection?
+    @State private var switchingEnvironment = false
+    @State private var confirmMainnet = false
 
     private enum LoadState {
         case loading
@@ -43,13 +46,32 @@ struct CardSettingsView: View {
         CardSettingsBody(information: information, appVersion: appVersion, isLoading: isLoading, error: error,
             onCopyWallet: copyWallet, onOpenDataFolder: openDataFolder, onOpenRepository: openRepository,
             onReload: { Task { await reload(retry: true) } }, appLock: appLock,
-            onOpenResources: { navigation.show("resources") })
-        } destination: { _ in
+            onOpenWallets: { navigation.show("wallets") },
+            onOpenResources: { navigation.show("resources") }, development: development,
+            isSwitchingEnvironment: switchingEnvironment,
+            onSelectEnvironment: { mode in
+                guard mode != development?.environment else { return }
+                if mode == .mainnet { confirmMainnet = true }
+                else { Task { await switchEnvironment(.offline) } }
+            }, onSaveRPC: { rpc in Task { await switchEnvironment(.mainnet, rpc: rpc) } })
+        } destination: { route in
+            if route == "wallets" {
+                WalletsView(client: overviewClient, isActive: isActive && navigation.selection != nil,
+                    onBack: { navigation.show(nil) }, onChanged: { Task { await reload() } })
+            } else {
             RegisteredAPIsView(client: overviewClient, isActive: isActive && navigation.selection != nil,
                 onBack: { navigation.show(nil) })
+            }
         }
             .task(id: isActive) { if isActive { await reload() } }
+            .alert("Use Solana Mainnet?", isPresented: $confirmMainnet) {
+                Button("Cancel", role: .cancel) {}
+                Button("Use Mainnet") { Task { await switchEnvironment(.mainnet) } }
+            } message: {
+                Text("Mainnet uses real SOL and USDC. Payments are irreversible. Dev wallets and records stay separate from Offline and formal Yosh. Selecting Mainnet does not create a wallet or enable payments.")
+            }
             .onReceive(NotificationCenter.default.publisher(for: .nativeServiceExited)) { _ in
+                guard !switchingEnvironment else { return }
                 loadRevision += 1
                 state = .failed(OverviewLoadError.serviceExited.message)
             }
@@ -83,12 +105,31 @@ struct CardSettingsView: View {
     }
 
     @MainActor
+    private func switchEnvironment(_ mode: PayDevelopmentMode, rpc: String? = nil) async {
+        guard !switchingEnvironment, let previous = development else { return }
+        switchingEnvironment = true; state = .loading; actionError = nil
+        defer { switchingEnvironment = false }
+        let next = PayDevelopmentSelection(version: 1, environment: mode,
+            mainnetRiskAccepted: mode == .mainnet || previous.mainnetRiskAccepted, rpcUrl: rpc ?? previous.rpcUrl)
+        do {
+            try await overviewClient.runtime.switchDevelopmentEnvironment(next)
+            navigation.show(nil)
+            await reload()
+        } catch {
+            development = try? await overviewClient.runtime.developmentEnvironment()
+            state = .failed(error as? ServiceRuntimeError == .environmentBusy ? OverviewLoadError.executionBusy.message
+                : (error as? OverviewLoadError)?.message ?? "Environment change failed. Check the RPC URL and retry.")
+        }
+    }
+
+    @MainActor
     private func reload(retry: Bool = false) async {
         loadRevision += 1
         let revision = loadRevision
         state = .loading
         actionError = nil
         do {
+            development = try await overviewClient.runtime.developmentEnvironment()
             let wallets = try await overviewClient.loadWallets(retry: retry)
             // Reuse the secured management transport and the backend's resolved directory.
             // Health data stays local; only the storage URL reaches the Settings body.

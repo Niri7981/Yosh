@@ -1,0 +1,15 @@
+{
+  "resourceId": "agent402-crypto-price",
+  "providerId": "agent402.tools",
+  "request": {
+    "url": "https://agent402.tools/api/crypto-price?coins=BTC%2CETH%2CSOL&currency=usd",
+    "method": "GET",
+    "access": "https",
+    "headers": { "accept": "application/json" }
+  },
+  "network": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+  "mint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+  "decimals": 6,
+  "recipient": "J7aN3PLJnTCF5qpEnvJHJsnCjcGuqC2rYtEM8Gv3xwg",
+  "amount": "1000"
+}

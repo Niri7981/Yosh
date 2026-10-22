@@ -176,7 +176,8 @@ struct BackOverview: View {
                 case .grant:
                     SpendGrantDetail(
                         overview: overview,
-                        isSaving: writeState.isSaving || isRefreshing,
+                        isSaving: writeState.isSaving,
+                        isRefreshing: isRefreshing,
                         writeMessage: writeState.message,
                         writeFailed: writeState.isFailure,
                         onBack: { selectDetail(nil) },
@@ -355,16 +356,16 @@ struct BackOverview: View {
         GeometryReader { geometry in
             ZStack(alignment: .leading) {
                 Rectangle()
-                    .fill(Color(red: 0.73, green: 0.79, blue: 0.87).opacity(0.35))
+                    .fill(YoshShellPalette.rule.opacity(0.35))
                     .frame(height: 1.5)
 
                 if let presentation, overview?.budget.remaining != nil {
                     let endpoint = max(0, geometry.size.width - 6) * presentation.progress
                     Rectangle()
-                        .fill(Color(red: 0.48, green: 0.64, blue: 0.88).opacity(0.7))
+                        .fill(YoshShellPalette.activeInk.opacity(0.7))
                         .frame(width: endpoint + 3, height: 1.5)
                     Circle()
-                        .fill(Color(red: 0.48, green: 0.64, blue: 0.88))
+                        .fill(YoshShellPalette.activeInk)
                         .frame(width: 6, height: 6)
                         .offset(x: endpoint)
                 }
@@ -383,7 +384,7 @@ struct BackOverview: View {
                 limit(label: "SPEND GRANT", amount: presentation?.grantRemaining ?? "—", detail: presentation?.grantDetail ?? "unavailable")
 
                 Rectangle()
-                    .fill(Color(red: 0.73, green: 0.79, blue: 0.87).opacity(0.5))
+                    .fill(YoshShellPalette.rule)
                     .frame(width: 1, height: 60)
 
                 limit(label: "PER TRANSACTION", amount: presentation?.perTransaction ?? "—", detail: "max")

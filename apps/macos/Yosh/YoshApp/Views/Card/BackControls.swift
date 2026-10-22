@@ -38,7 +38,7 @@ struct BackControls: View {
                 Toggle("Payments", isOn: paymentsBinding)
                     .labelsHidden()
                     .toggleStyle(.switch)
-                    .tint(Color(red: 0.48, green: 0.64, blue: 0.88))
+                    .tint(YoshShellPalette.activeInk)
                     .disabled(paymentsEnabled == nil || paymentsUpdating)
                     .accessibilityLabel("Allow purchases within Authority")
                     .accessibilityValue(paymentsUpdating ? "Saving" : payments)
@@ -91,7 +91,7 @@ struct BackControls: View {
 
     private var hairline: some View {
         Rectangle()
-            .fill(Color(red: 0.73, green: 0.79, blue: 0.87).opacity(0.4))
+            .fill(YoshShellPalette.rule.opacity(0.4))
             .frame(height: 1)
             .accessibilityHidden(true)
     }

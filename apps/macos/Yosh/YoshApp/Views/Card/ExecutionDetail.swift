@@ -11,9 +11,9 @@ struct ExecutionDetail: View {
 
     @State private var showingEnableConfirmation = false
 
-    private let ink = Color(red: 0.07, green: 0.10, blue: 0.15)
+    private let ink = YoshShellPalette.ink
     private let secondaryInk = YoshShellPalette.secondaryInk
-    private let rule = Color(red: 0.73, green: 0.79, blue: 0.87).opacity(0.5)
+    private let rule = YoshShellPalette.rule
 
     var body: some View {
         ScrollView(.vertical) {

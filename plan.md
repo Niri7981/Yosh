@@ -204,6 +204,8 @@ Agent 发现候选 x402 API → MCP 注册已验证 Resource → Yosh 自动展�
 
 ### 钱包与首次使用
 
+2026-10-16 Wallet Onboarding：用户已接受首次 Mainnet Create / Import 与同身份恢复、24 词 BIP39 Create、限定格式/路径 Import、受控 Native 新钱包访问边界和备份验证后 READY；无 Replace / Delete / Switch。仅授权 Stage 0 / Stage 1；本轮不操作真实钱包/ACL/Ledger、不付款、不重装、不 Commit/Push。新增能力及当前验证边界见 [Stage 0 / Stage 1 记录](docs/architecture/wallet-onboarding-stage0-1.md)。本机无可用稳定签名身份，生产 helper / 新 adapter / 真实用户在场验收暂停；Stage 1 仅增加 legacy 公钥 pin / 账户元数据、显式状态和 existing-only 加载，不修改旧身份、资金记录或官方支付执行核心。Stage 2 仍待另行审阅授权。
+
 2026-10-06 用户澄清：以下为后续 WalletAccount 实施的强制约束，取代旧的首次启动自动创建规则；本次仅更新文档，尚未实现或验收迁移。
 
 - 当前 Mac 已有真实 Devnet/Test 与 Mainnet 两个 Yosh 钱包，均为现有用户钱包；Mainnet 即将用于真实付款验收与录屏，但此说明不构成付款授权。

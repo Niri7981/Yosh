@@ -11,7 +11,7 @@ struct SpendGrantExpiryPicker: View {
 
     private let calendar = Calendar.current
     private let secondaryInk = YoshShellPalette.secondaryInk
-    private let rule = Color(red: 0.73, green: 0.79, blue: 0.87).opacity(0.5)
+    private let rule = YoshShellPalette.rule
 
     var body: some View {
         VStack(spacing: 8) {
@@ -34,7 +34,7 @@ struct SpendGrantExpiryPicker: View {
                 .padding(.horizontal, 15)
                 .frame(height: 42)
                 .contentShape(Capsule())
-                .background(Color.white.opacity(0.25), in: .capsule)
+                .background(YoshShellPalette.selection, in: .capsule)
                 .overlay { Capsule().strokeBorder(rule, lineWidth: 1) }
             }
             .buttonStyle(.plain)

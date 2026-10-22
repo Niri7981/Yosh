@@ -9,9 +9,9 @@ export class DataDirectoryInUseError extends Error {
 /** A separate SQLite write lock protects the whole data directory before ledger recovery.
  * The OS releases it on process death; the lock database is never deleted or used for payments.
  */
-export function acquireDataDirectoryOwnership(directory: string) {
+export function acquireDataDirectoryOwnership(directory: string, lockName = 'backend-owner.sqlite') {
   mkdirSync(directory, { recursive: true, mode: 0o700 });
-  const path = join(realpathSync(directory), 'backend-owner.sqlite');
+  const path = join(realpathSync(directory), lockName);
   const db = new DatabaseSync(path);
   try {
     chmodSync(path, 0o600);

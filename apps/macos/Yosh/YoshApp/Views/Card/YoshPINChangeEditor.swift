@@ -53,7 +53,7 @@ struct YoshPINChangeEditor: View {
             if let error = appLock.error {
                 Text(error)
                     .font(.system(size: 11))
-                    .foregroundStyle(Color(red: 0.58, green: 0.28, blue: 0.31))
+                    .foregroundStyle(YoshShellPalette.negative)
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityIdentifier("yosh.lock.change.error")
             }

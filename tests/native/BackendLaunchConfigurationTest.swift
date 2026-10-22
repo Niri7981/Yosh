@@ -57,10 +57,13 @@ struct BackendLaunchConfigurationTest {
         try manager.setAttributes([.posixPermissions: 0o644], ofItemAtPath: configuration.path)
         try rejectsConfiguration { _ = try isolated.childEnvironment(token: token) }
         try manager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: configuration.path)
-        try Data(#"{"YOSH_ENABLE_MAINNET_EXECUTION":"1","X402_FACILITATOR_URL":"https://facilitator.example/x402"}"#.utf8)
+        try Data(#"{"YOSH_ENABLE_MAINNET_EXECUTION":"1","YOSH_PAY_MCP_MAINNET":"1","X402_FACILITATOR_URL":"https://facilitator.example/x402"}"#.utf8)
             .write(to: configuration)
         let configured = try isolated.childEnvironment(token: token)
         check(configured["YOSH_ENABLE_MAINNET_EXECUTION"] == "1")
+        check(configured["YOSH_PAY_MCP_MAINNET"] == "1")
+        try Data(#"{"YOSH_PAY_MCP_MAINNET":"true"}"#.utf8).write(to: configuration)
+        try rejectsConfiguration { _ = try isolated.childEnvironment(token: token) }
         check(configured["X402_FACILITATOR_URL"] == "https://facilitator.example/x402")
         for invalid in ["http://facilitator.example", "https://user:password@facilitator.example",
                         "https://facilitator.example?token=value", "https://facilitator.example/#fragment",
@@ -100,6 +103,70 @@ struct BackendLaunchConfigurationTest {
         check(old.matchesTakeover(directory: temporary.path) && !old.matchesNewChild(pid: 123, directory: temporary.path))
         check(!BackendHealth(ready: true, service: "Yosh", pid: 123, dataDirectory: temporary.path, coreReady: false)
             .matchesNewChild(pid: 123, directory: temporary.path))
+        // A separate application identity is required; ambient flags cannot opt
+        // the installed product into development or choose a production directory.
+        let developmentHome = temporary.resolvingSymlinksInPath().appending(path: "development-home")
+        let developmentDirectory = try YoshPayDevelopment.dataDirectory(home: developmentHome)
+        check(developmentDirectory.path.hasSuffix("/Library/Application Support/Yosh Pay Dev"))
+        let developmentToken = try YoshPayDevelopment.managementToken(directory: developmentDirectory)
+        check(developmentToken.count == 43)
+        check(try YoshPayDevelopment.managementToken(directory: developmentDirectory) == developmentToken, "restarts retain isolated management identity")
+        let tokenFile = developmentDirectory.appending(path: "management-token")
+        try manager.setAttributes([.posixPermissions: 0o644], ofItemAtPath: tokenFile.path)
+        try rejectsConfiguration { _ = try YoshPayDevelopment.managementToken(directory: developmentDirectory) }
+        try manager.removeItem(at: tokenFile)
+        try manager.createSymbolicLink(at: tokenFile, withDestinationURL: runtime.appending(path: "mcp.cjs"))
+        try rejectsConfiguration { _ = try YoshPayDevelopment.managementToken(directory: developmentDirectory) }
+        try manager.removeItem(at: tokenFile)
+        let unsafeHome = temporary.resolvingSymlinksInPath().appending(path: "unsafe-home")
+        let unsafeDirectory = unsafeHome.appending(path: "Library/Application Support/Yosh Pay Dev")
+        try manager.createDirectory(at: unsafeDirectory.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try manager.createSymbolicLink(at: unsafeDirectory, withDestinationURL: developmentDirectory)
+        try rejectsConfiguration { _ = try YoshPayDevelopment.dataDirectory(home: unsafeHome) }
+        let infoURL = app.appending(path: "Contents/Info.plist")
+        func writeDevelopmentIdentity(_ id: String, enabled: Bool) throws {
+            let data = try PropertyListSerialization.data(fromPropertyList: ["CFBundleIdentifier": id, "YoshPayDevelopment": enabled], format: .xml, options: 0)
+            try data.write(to: infoURL)
+        }
+        try writeDevelopmentIdentity("com.twentyfortynine.macos", enabled: true)
+        check(!YoshPayDevelopment.isEnabled(bundleURL: app), "production identity ignores development flag")
+        try writeDevelopmentIdentity(YoshPayDevelopment.bundleIdentifier, enabled: false)
+        check(!YoshPayDevelopment.isEnabled(bundleURL: app), "separate identity still requires an explicit bundled flag")
+        try writeDevelopmentIdentity(YoshPayDevelopment.bundleIdentifier, enabled: true)
+        let development = BackendLaunchConfiguration(environment: ["YOSH_PORT": "3049", "YOSH_PAY_DEV": "0"], bundleURL: app, developmentHome: developmentHome)
+        check(try development.isPayDevelopment && development.servicePort() == 13049, "development port cannot target the production service")
+        try rejectsConfiguration { _ = try development.sandboxProfile() }
+        try Data("(version 1)".utf8).write(to: runtime.appending(path: "pay-dev.sb"))
+        check(try development.sandboxProfile()?.lastPathComponent == "pay-dev.sb")
+        check(try YoshPayDevelopment.selection(directory: developmentDirectory) == .offline)
+        let offlineToken = try development.managementToken()
+        let mainnet = PayDevelopmentSelection(version: 1, environment: .mainnet, mainnetRiskAccepted: true,
+            rpcUrl: "https://solana-rpc.publicnode.com")
+        try rejectsConfiguration { try PayDevelopmentSelection(version: 1, environment: .mainnet, mainnetRiskAccepted: false, rpcUrl: mainnet.rpcUrl).validate() }
+        for rpc in ["http://127.0.0.1:8899", "https://user:pass@rpc.example", "https://rpc.example?key=secret", "https://rpc.example:1234"] {
+            try rejectsConfiguration { try PayDevelopmentSelection(version: 1, environment: .mainnet, mainnetRiskAccepted: true, rpcUrl: rpc).validate() }
+        }
+        try YoshPayDevelopment.saveSelection(mainnet, directory: developmentDirectory)
+        try Data("(version 1)".utf8).write(to: runtime.appending(path: "pay-dev-mainnet.sb"))
+        let mainnetChild = try development.childEnvironment(token: developmentToken)
+        check(mainnetChild["YOSH_DATA_DIR"] == developmentDirectory.appending(path: "Mainnet").path)
+        check(mainnetChild["YOSH_PAY_DEV_ENV"] == "mainnet" && mainnetChild["YOSH_PAY_MCP_MAINNET"] == "1")
+        check(mainnetChild["YOSH_ENABLE_MAINNET_EXECUTION"] == "0" && mainnetChild["APP2049_ENABLE_MAINNET_EXECUTION"] == "0")
+        check(mainnetChild["SOLANA_MAINNET_RPC_URL"] == mainnet.rpcUrl)
+        check(try development.sandboxProfile()?.lastPathComponent == "pay-dev-mainnet.sb")
+        let mainnetToken = try development.managementToken()
+        check(mainnetToken != offlineToken, "environments do not share management credentials")
+        try YoshPayDevelopment.saveSelection(.offline, directory: developmentDirectory)
+        check(try development.dataDirectory() == developmentDirectory && development.managementToken() == offlineToken)
+        check(try development.childEnvironment(token: developmentToken)["YOSH_PAY_MCP_MAINNET"] == nil)
+        let profile = developmentDirectory.appending(path: "development-environment.json")
+        try manager.setAttributes([.posixPermissions: 0o644], ofItemAtPath: profile.path)
+        try rejectsConfiguration { _ = try development.childEnvironment(token: developmentToken) }
+        try manager.removeItem(at: profile)
+        check(try ServiceEndpoint.createDevelopmentPaymentWallet.body() == Data(#"{"action":"create_payment_wallet"}"#.utf8))
+        check(ServiceEndpoint.prepareEnvironmentSwitch.isMutation)
+        print("Single Dev environment selection, explicit risk, separate directory/token, safe RPC and default-disabled Mainnet passed")
+        print("Development identity, fixed isolated port, persistent private token and symlink rejection passed")
         try manager.removeItem(at: runtime.appending(path: "backend/server.js"))
         try rejectsConfiguration { _ = try installed.runtimeDirectory() }
         print("Packaged launch paths, isolated data, private product config, sanitized environment and authenticated health identity passed")

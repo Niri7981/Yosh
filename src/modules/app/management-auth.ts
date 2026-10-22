@@ -5,6 +5,7 @@ import { LocalRequestError, RequestBodyError, requireLocalRequest } from '../htt
 import { DataDirectoryInUseError } from './data-directory-owner';
 import { resolveYoshConfiguration, YoshConfigurationError } from './yosh-configuration';
 import { PaymentEnvironmentError } from '../payment/payment-environment';
+import { WalletKeychainError } from '../payment/keychain';
 
 export class ManagementApiError extends Error {
   constructor(readonly code: string, readonly status: number, readonly safeMessage: string) { super(code); }
@@ -81,6 +82,9 @@ export async function managementRoute(request: Request, mutation: boolean, handl
 export function managementError(error: unknown) {
   let failure: ManagementApiError;
   if (error instanceof ManagementApiError) failure = error;
+  else if (error instanceof WalletKeychainError) failure = new ManagementApiError(error.code, 503,
+    error.code === 'WALLET_KEYCHAIN_CORRUPT' ? '钱包钥匙串项异常，未创建或替换钱包，请先恢复原钱包。'
+      : '无法访问钱包钥匙串，请在 macOS 提示中允许访问或解锁后重试。');
   else if (error instanceof LocalRequestError) failure = new ManagementApiError('LOCAL_REQUEST_FORBIDDEN', 403, '请求来源不被允许。');
   else if (error instanceof RequestBodyError || error instanceof ZodError)
     failure = new ManagementApiError('INVALID_REQUEST', 400, '请求内容无效。');

@@ -12,12 +12,12 @@ struct MembersRoster: View {
     let onRetry: (() -> Void)?
 
     private let secondaryInk = YoshShellPalette.secondaryInk
-    private let rule = Color(red: 0.73, green: 0.79, blue: 0.87).opacity(0.5)
+    private let rule = YoshShellPalette.rule
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             CardPageHeader(title: "Agents", style: .collection(subtitle: "Agents share one Daily Authority."))
-                .foregroundStyle(Color(red: 0.07, green: 0.10, blue: 0.15))
+                .foregroundStyle(YoshShellPalette.ink)
                 .overlay(alignment: .topTrailing) {
                     Button("Add custom agent", systemImage: "plus", action: onAdd)
                         .labelStyle(.iconOnly)
@@ -46,7 +46,7 @@ struct MembersRoster: View {
                     }
                 }
                 .font(.system(size: 11))
-                .foregroundStyle(Color(red: 0.58, green: 0.28, blue: 0.31))
+                .foregroundStyle(YoshShellPalette.negative)
                 .padding(.top, 8)
             }
 
