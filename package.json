@@ -13,6 +13,7 @@
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "test": "vitest run --passWithNoTests",
+    "test:pay": "python3 scripts/test-pay-integration.py --all",
     "test:watch": "vitest",
     "payment:preflight": "node scripts/run.mjs preflight",
     "e2e:evidence": "node scripts/run.mjs e2e-evidence",

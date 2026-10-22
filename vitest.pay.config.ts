@@ -1,12 +1,12 @@
 import { defineConfig } from 'vitest/config';
 import base from './vitest.config';
+import { payEnvironmentTests } from './tests/helpers/pay-environment-suites';
 
-/** Explicit opt-in suite; the sandbox runner requires the real helper first. */
+/** Full opt-in coverage; the sandbox runner checks prepared dependencies first. */
 export default defineConfig({
   ...base,
   test: {
     ...base.test,
-    include: ['tests/integration/execution-persistence.test.ts', 'tests/integration/pay-protocol-production.test.ts', 'tests/integration/pay-mcp-first.test.ts', 'tests/unit/pay-execution-boundary.test.ts'],
-    exclude: base.test?.exclude?.filter(pattern => pattern !== 'tests/integration/pay-protocol-production.test.ts'),
+    exclude: base.test?.exclude?.filter(pattern => !payEnvironmentTests.includes(pattern)),
   },
 });

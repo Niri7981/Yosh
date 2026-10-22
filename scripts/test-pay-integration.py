@@ -11,8 +11,11 @@ root = pathlib.Path(__file__).resolve().parents[1]
 node = shutil.which('node')
 if not node or not pathlib.Path('/usr/bin/sandbox-exec').is_file():
     raise SystemExit('BLOCKED: Node >=24 and macOS sandbox-exec are required')
-if not (root / 'build.noindex/pay-protocol-engine/yosh-execution-protocol').is_file():
-    raise SystemExit('Build the isolated Rust helper first; see integration/pay-protocol-engine/README.md')
+for required in [root / 'build.noindex/pay-protocol-engine/yosh-execution-protocol',
+        root / 'build.noindex/pay-mcp-target/debug/yosh-controlled-mcp',
+        root.parent / 'pay/rust/crates/mcp/tests/fixtures/agent402-mainnet-quote.json']:
+    if not required.is_file():
+        raise SystemExit(f'BLOCKED: missing prepared Pay dependency: {required}; see integration/README.md')
 
 user = pathlib.Path.home()
 private_paths = [user / 'Library/Keychains', pathlib.Path('/Library/Keychains'),
@@ -43,8 +46,7 @@ with tempfile.TemporaryDirectory(prefix='yosh-pay-verification-') as temporary:
     vitest = [node, str(root / 'node_modules/vitest/vitest.mjs'), 'run']
     commands = [vitest + ['--config', 'vitest.pay.config.ts', *tests]]
     if all_tests:
-        commands = [vitest + tests,
-            vitest + ['--config', 'vitest.pay.config.ts', 'tests/integration/pay-protocol-production.test.ts']]
+        commands = [vitest + ['--config', 'vitest.pay.config.ts', *tests]]
         # Existing native .mjs suites use node:test, not the Vitest API. Execute
         # them with their own runner rather than dropping or weakening them.
         commands.append([node, '--test', *map(str, sorted((root / 'tests/native').glob('*.test.mjs')))])
