@@ -36,6 +36,13 @@ with tempfile.TemporaryDirectory(prefix='yosh-pay-verification-') as temporary:
         '(deny file-read* file-write* ' + ' '.join(f'(subpath {json.dumps(str(path))})' for path in private_paths) + ')\n'
         '(deny file-write* ' + ' '.join(f'(subpath {json.dumps(str(path))})' for path in protected_paths) + ')\n'
         '(deny file-read* (regex #"^/Users/[^/]+/Desktop/yosh/\\.env(\\..*)?$"))\n')
+    # The RC builder supplies its already-recorded policy. This runner remains
+    # the single sandbox owner; macOS rejects nesting sandbox-exec processes.
+    supplied_profile = os.environ.get('YOSH_PAY_TEST_SANDBOX_PROFILE')
+    if supplied_profile:
+        profile = pathlib.Path(supplied_profile)
+        if not profile.is_absolute() or profile.is_symlink() or not profile.is_file():
+            raise SystemExit('BLOCKED: explicit test sandbox profile must be an absolute regular file')
     environment = {'PATH': os.environ.get('PATH', '/usr/bin:/bin'), 'HOME': str(runtime), 'TMPDIR': str(runtime),
         'NODE_ENV': 'test', 'NODE_DISABLE_COMPILE_CACHE': '1', 'CI': '1'}
     all_tests = sys.argv[1:] == ['--all']

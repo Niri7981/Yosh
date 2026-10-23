@@ -1,3 +1,4 @@
+import { YOSH_VERSION } from '../../src/modules/app/product-version';
 import { mkdtempSync, rmSync, statSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -99,6 +100,7 @@ it('uses the official MCP handshake and exposes a request-only purchase tool wit
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   try {
     await server.connect(serverTransport); await client.connect(clientTransport);
+    expect(client.getServerVersion()).toEqual({ name: 'Yosh', version: YOSH_VERSION });
     const tools = await client.listTools();
     expect(tools.tools.map(tool => tool.name)).toEqual(['get_spending_status', 'get_market_quote',
       'discover_x402_resource', 'register_x402_resource', 'get_purchase_delivery', 'quote_x402_resource', 'request_purchase']);
@@ -127,5 +129,24 @@ it('uses the official MCP handshake and exposes a request-only purchase tool wit
     read.mockRejectedValueOnce(new Error('secret-token-and-rpc-url'));
     const failed = await client.callTool({ name: 'get_spending_status', arguments: {} });
     expect(failed.isError).toBe(true); expect(JSON.stringify(failed)).not.toContain('secret-token');
+  } finally { await client.close(); await server.close(); }
+});
+
+it('MCP delivery accepts continuation beyond one MiB and rejects offsets above the serialized policy bound', async () => {
+  const delivery = vi.fn(async (purchaseId: string, offset: number) => ({ purchaseId, offset, nextOffset: null }));
+  const server = createAgentServer(async () => ({}), undefined, undefined, delivery);
+  const client = new Client({ name: 'delivery-cursor-test', version: '1' });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  try {
+    await server.connect(serverTransport); await client.connect(clientTransport);
+    for (const offset of [1_048_577, 1_572_866]) {
+      const result = await client.callTool({ name: 'get_purchase_delivery', arguments: { purchaseId: 'large-text', offset } });
+      expect(result.isError).not.toBe(true);
+      expect(delivery).toHaveBeenLastCalledWith('large-text', offset);
+    }
+    for (const offset of [-1, 1_572_867]) {
+      expect((await client.callTool({ name: 'get_purchase_delivery', arguments: { purchaseId: 'large-text', offset } })).isError).toBe(true);
+    }
+    expect(delivery).toHaveBeenCalledTimes(2);
   } finally { await client.close(); await server.close(); }
 });

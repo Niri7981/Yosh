@@ -1,6 +1,7 @@
 import { lookup } from 'node:dns/promises';
 import { request } from 'node:https';
 import { isPublicResourceAddress } from './public-resource-address';
+import { MAX_RESOURCE_DELIVERY_BYTES } from './http-resource';
 const builtinFetch = globalThis.fetch;
 
 /** Resolve before a payment submission marker, then start the pinned socket synchronously with that marker. */
@@ -32,7 +33,7 @@ export async function prepareSafeResourceFetch(url: string, init: RequestInit, f
       const parts: Buffer[] = []; let size = 0;
       incoming.on('data', (chunk: Buffer) => {
         size += chunk.length;
-        if (size > 262_144) { incoming.destroy(new Error('RESOURCE_RESPONSE_TOO_LARGE')); return; }
+        if (size > MAX_RESOURCE_DELIVERY_BYTES) { incoming.destroy(new Error('RESOURCE_RESPONSE_TOO_LARGE')); return; }
         parts.push(chunk);
       });
       incoming.on('error', reject);

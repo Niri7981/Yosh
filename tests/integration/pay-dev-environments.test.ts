@@ -1,3 +1,4 @@
+import { PAY_DEVELOPMENT_PROFILE } from '../../src/modules/pay-dev/profile';
 import { z } from 'zod';
 import * as resourceFetch from '../../src/modules/resources/safe-resource-fetch';
 import agent402Quote from '../fixtures/agent402-crypto-price-v2.json';
@@ -41,7 +42,7 @@ afterEach(async () => {
 function fixture(behavior: { writeDenied?: boolean } = {}) {
   for (const key of Object.keys(process.env)) if (/^(YOSH_|APP2049_|DEMO_|SOLANA_)/.test(key) || key === 'USDC_MINT') vi.stubEnv(key, undefined);
   const parent = realpathSync(mkdtempSync(join(tmpdir(), 'yosh-dev-environments-'))); directories.push(parent);
-  const root = join(parent, 'Yosh Pay Dev'); mkdirSync(root, { mode: 0o700 });
+  const root = join(parent, PAY_DEVELOPMENT_PROFILE.directoryName); mkdirSync(root, { mode: 0o700 });
   const directory = join(root, 'Mainnet'); mkdirSync(directory, { mode: 0o700 });
   const privateHome = join(directory, 'home'); mkdirSync(privateHome, { mode: 0o700 });
   vi.stubEnv('HOME', privateHome);
@@ -155,11 +156,11 @@ it('a denied Dev Keychain write returns an actionable error without creating a r
 });
 
 it('the existing root MCP entry selects Mainnet and discovers the real Pay curl tool without a second host configuration', async () => {
-  const { parent, root, directory } = fixture(); const port = await freePort(); vi.stubEnv('YOSH_PORT', undefined);
+  const { parent, root, directory } = fixture(); const port = PAY_DEVELOPMENT_PROFILE.backendPort; vi.stubEnv('YOSH_PORT', undefined);
   backend = await startMainnetDevelopmentBackend({ directory, port });
   await backend.app.setMemberConnection(true, backend.origin, backend.descriptor.memberId);
   const wrapper = join(parent, 'mcp.cjs');
-  execFileSync(resolve('node_modules/.bin/esbuild'), ['scripts/pay-dev-mcp.ts', '--bundle', '--platform=node', '--format=cjs', `--outfile=${wrapper}`], { stdio: 'pipe' });
+  execFileSync(resolve('node_modules/.bin/esbuild'), ['scripts/pay-dev-mcp.ts', '--bundle', '--platform=node', '--format=cjs', '--define:__YOSH_RC5__=true', '--minify-syntax', `--outfile=${wrapper}`], { stdio: 'pipe' });
   copyFileSync(resolve('build.noindex/pay-mcp-target/debug/yosh-controlled-mcp'), join(parent, 'pay-mcp')); chmodSync(join(parent, 'pay-mcp'), 0o755);
   const client = new Client({ name: 'mainnet-profile-discovery', version: '1' });
   const transport = new StdioClientTransport({ command: process.execPath, args: [wrapper, '--data-dir', root],
@@ -169,6 +170,8 @@ it('the existing root MCP entry selects Mainnet and discovers the real Pay curl 
     const tools = await client.listTools();
     expect(tools.tools.some(tool => tool.name === 'curl')).toBe(true);
     expect(tools.tools.find(tool => tool.name === 'get_spending_status')?.description).toContain('Mainnet');
+    expect(tools.tools.find(tool => tool.name === 'recover_payment')).toMatchObject({ annotations: { readOnlyHint: false } });
+    expect((await client.callTool({ name: 'recover_payment', arguments: { operationId: 'not-a-purchase', amount: '1' } })).isError).toBe(true);
     expect(backend.app.ledger.listForAdministration()).toEqual([]); expect(writes).toEqual([]);
   } finally { await client.close(); }
 });
@@ -279,11 +282,11 @@ it('Dev exposes the original authenticated Add API discovery, preview, registrat
   expect(backend.app.spendGrantSummary()).toBeNull(); expect(backend.app.ledger.listForAdministration()).toEqual([]); expect(writes).toEqual([]);
 });
 it('same real Pay stdio host discovers and registers into Dev Grant choices without exposing another purchase or management tool', async () => {
-  const { parent, root, directory, token } = fixture(); const port = await freePort(); const outbound = publicQuote();
+  const { parent, root, directory, token } = fixture(); const port = PAY_DEVELOPMENT_PROFILE.backendPort; const outbound = publicQuote();
   backend = await startMainnetDevelopmentBackend({ directory, port });
   await backend.app.setMemberConnection(true, backend.origin, backend.descriptor.memberId);
   const wrapper = join(parent, 'mcp.cjs');
-  execFileSync(resolve('node_modules/.bin/esbuild'), ['scripts/pay-dev-mcp.ts', '--bundle', '--platform=node', '--format=cjs', `--outfile=${wrapper}`], { stdio: 'pipe' });
+  execFileSync(resolve('node_modules/.bin/esbuild'), ['scripts/pay-dev-mcp.ts', '--bundle', '--platform=node', '--format=cjs', '--define:__YOSH_RC5__=true', '--minify-syntax', `--outfile=${wrapper}`], { stdio: 'pipe' });
   copyFileSync(resolve('build.noindex/pay-mcp-target/debug/yosh-controlled-mcp'), join(parent, 'pay-mcp')); chmodSync(join(parent, 'pay-mcp'), 0o755);
   const client = new Client({ name: 'resource-lifecycle-host', version: '1' });
   const transport = new StdioClientTransport({ command: process.execPath, args: [wrapper, '--data-dir', root],
@@ -336,4 +339,25 @@ it('Dev resource routes preserve discovery ownership and do not grant Agent acce
   expect((await post('/api/agent/purchases', first.token, {})).status).toBe(404);
   expect((await post('/api/agent/resources', first.token, registration)).status).toBe(201);
   expect(app.spendGrantSummary()).toBeNull(); expect(app.ledger.listForAdministration()).toEqual([]); expect(writes).toEqual([]);
+});
+
+it('controlled HTTP uses its 128 KiB envelope cap and records strict schema rejection before execution', async () => {
+  const { directory } = fixture(); const port = await freePort(); vi.stubEnv('YOSH_PORT', String(port));
+  backend = await startMainnetDevelopmentBackend({ directory, port });
+  await backend.app.setMemberConnection(true, backend.origin, backend.descriptor.memberId);
+  const connection = readConnection(directory);
+  const payloads = [
+    { endpoint: 'execute', body: { facts: { operation_id: 'fixture-size-only', attempt_id: randomUUID(), payment_required: { description: 'x'.repeat(9000) } }, unexpected: 'SECRET' } },
+    { endpoint: 'recover', body: { operationId: 'fixture-size-only', unexpected: 'SECRET' } },
+  ];
+  for (const { endpoint, body } of payloads) {
+    const response = await fetch(`${backend.origin}/pay/${endpoint}`, { method: 'POST', headers: { authorization: `Bearer ${connection.token}`, 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    expect(response.status).toBe(400);
+  }
+  const log = readFileSync(join(directory, 'pay-controller-diagnostics.jsonl'), 'utf8');
+  const entries = log.trim().split('\n').map(line => JSON.parse(line));
+  expect(entries).toHaveLength(2);
+  for (const entry of entries) expect(entry).toMatchObject({ httpStatus: 400, backendCode: 'CONTROLLER_INPUT_INVALID', validationStage: 'http_input', issues: [{ path: [], code: 'unrecognized_keys' }] });
+  expect(log).not.toContain('SECRET');
+  expect(backend.app.ledger.listForOwner(backend.descriptor.memberId, 50)).toHaveLength(0);
 });

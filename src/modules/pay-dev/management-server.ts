@@ -1,3 +1,4 @@
+import { recordControllerDiagnostic, controllerBackendDiagnostic, readControllerJson, parseControllerInput } from '../payment/pay-controller-diagnostics';
 import { createServer } from 'node:http';
 import { z } from 'zod';
 import type { AppRuntime } from '../app/app-runtime';
@@ -58,6 +59,7 @@ export async function serveDevelopmentRuntime<T extends { memberId: string }>(op
   let stopping = false;
   let ready = false;
   const server = createServer(async (incoming, outgoing) => {
+    let correlation: { callerId: string; operationId: string; attemptId: string | null; stage: 'plan' | 'execute' | 'recover' } | undefined;
     try {
       if (incoming.headers.host !== `127.0.0.1:${port}` || !['127.0.0.1', '::ffff:127.0.0.1'].includes(incoming.socket.remoteAddress ?? ''))
         throw new Error('PAY_DEVELOPMENT_LOOPBACK_REQUIRED');
@@ -82,13 +84,21 @@ export async function serveDevelopmentRuntime<T extends { memberId: string }>(op
       } else if (url.pathname.startsWith('/pay/') && method === 'POST') {
         if (!ready) { outgoing.writeHead(503); outgoing.end(); return; }
         const principal = app.authenticateAgent(request, 'request_purchase');
-        const raw: unknown = await smallJson(request);
+        const raw: unknown = await readControllerJson(request);
+        const stage = z.enum(['plan', 'execute', 'recover']).safeParse(url.pathname.slice('/pay/'.length));
+        const identity = z.object({ facts: z.object({ operation_id: z.string().regex(/^[a-zA-Z0-9_.:-]{1,128}$/), attempt_id: z.uuid() }) }).safeParse(raw);
+        const recovery = z.object({ operationId: z.string().regex(/^[a-zA-Z0-9_.:-]{1,128}$/) }).safeParse(raw);
+        if (stage.success && (identity.success || recovery.success)) correlation = {
+          callerId: principal.cardMemberId, operationId: identity.success ? identity.data.facts.operation_id : recovery.data!.operationId,
+          attemptId: identity.success ? identity.data.facts.attempt_id : null, stage: stage.data };
+        if (url.pathname === '/pay/recover') {
+          response = Response.json(await app.payMcpRecovery(parseControllerInput(z.object({ operationId: z.string().regex(/^[a-zA-Z0-9_.:-]{1,128}$/) }).strict(), raw, 'http_input'), principal, origin));
+        } else {
         const action = z.enum(['authorize', 'plan', 'execute']).parse(url.pathname.slice('/pay/'.length));
-        if (!authority) response = Response.json(await app.payMcpOperation(action, raw, principal, origin));
-        else if (action === 'authorize') response = Response.json(await authority.authorize(raw, principal));
-        else {
-          const input = z.object({ facts: z.unknown(), unsigned: z.unknown().optional() }).strict().parse(raw);
-          response = Response.json(await (action === 'plan' ? authority.plan(input.facts, principal) : authority.execute(input.facts, input.unsigned, principal)));
+        if (action === 'authorize') response = Response.json(await (authority ? authority.authorizeSpend(raw, principal) : app.payMcpOperation(action, raw, principal, origin))); else {
+          const input = parseControllerInput(z.object({ facts: z.unknown(), unsigned: z.unknown().optional() }).strict(), raw, 'http_input');
+          response = Response.json(await (!authority ? app.payMcpOperation(action, input, principal, origin) : action === 'plan' ? authority.prepareControlled(input.facts, principal) : authority.execute(input.facts, input.unsigned, principal)));
+        }
         }
       } else {
         const handler = routes.get(`${method} ${url.pathname}`);
@@ -113,6 +123,11 @@ export async function serveDevelopmentRuntime<T extends { memberId: string }>(op
       outgoing.writeHead(response.status, Object.fromEntries(response.headers));
       outgoing.end(Buffer.from(await response.arrayBuffer()));
     } catch (error) {
+      if (correlation) {
+        try { recordControllerDiagnostic(app.directory, { target: 'yosh_controller', version: 1, ...correlation,
+          endpoint: `/pay/${correlation.stage}`, ...controllerBackendDiagnostic(error), httpStatus: 400 }); }
+        catch { process.stderr.write('CONTROLLER_DIAGNOSTICS_UNAVAILABLE\n'); }
+      }
       // Fixed, bounded diagnostic codes only. Never echo credentials/requests.
       const message = error instanceof Error ? error.message : '';
       const code = /^[A-Z][A-Z0-9_]{2,80}$/.test(message) ? message : 'PAY_DEVELOPMENT_REQUEST_REJECTED';

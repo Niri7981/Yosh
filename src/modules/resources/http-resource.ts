@@ -43,9 +43,12 @@ export const DeliveryRecoveryCapabilitySchema = z.discriminatedUnion('kind', [
     }),
 ]);
 export type DeliveryRecoveryCapability = z.infer<typeof DeliveryRecoveryCapabilitySchema>;
+export const MAX_RESOURCE_DELIVERY_BYTES = 262_144;
+/** A permitted text byte can become a six-byte JSON escape, plus two quotes. */
+export const MAX_SERIALIZED_RESOURCE_DELIVERY_BYTES = MAX_RESOURCE_DELIVERY_BYTES * 6 + 2;
 export const ResourceDeliveryPolicySchema = z.object({ format: z.enum(['json', 'text']),
   mimeTypes: z.array(z.string().regex(/^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/)).min(1).max(8),
-  maxBytes: z.number().int().min(1).max(262_144) }).strict();
+  maxBytes: z.number().int().min(1).max(MAX_RESOURCE_DELIVERY_BYTES) }).strict();
 export type ResourceDeliveryPolicy = z.infer<typeof ResourceDeliveryPolicySchema>;
 
 const inputName = z.string().regex(/^[A-Za-z][A-Za-z0-9_-]{0,79}$/);

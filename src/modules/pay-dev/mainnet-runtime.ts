@@ -1,3 +1,4 @@
+import { PAY_DEVELOPMENT_PROFILE } from './profile';
 import { AppRuntime } from '../app/app-runtime';
 import { isMainnetDevelopment } from './environment';
 import { serveDevelopmentRuntime } from './management-server';
@@ -7,7 +8,7 @@ import { resolveYoshConfiguration } from '../app/yosh-configuration';
  * never provisions a wallet, signs, enables payments or loads an Offline key. */
 export async function startMainnetDevelopmentBackend(options: { directory: string; port?: number }) {
   if (!isMainnetDevelopment(options.directory) || process.env.YOSH_PAY_MCP_MAINNET !== '1') throw new Error('PAY_MAINNET_CONFIGURATION_REQUIRED');
-  const port = options.port ?? 13049;
+  const port = options.port ?? PAY_DEVELOPMENT_PROFILE.backendPort;
   const configuredPort = resolveYoshConfiguration().port;
   if (configuredPort !== undefined && configuredPort !== String(port)) throw new Error('PAY_DEVELOPMENT_PORT_MISMATCH');
   // The native launcher supplies PORT for the server, while the authority

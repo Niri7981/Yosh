@@ -33,6 +33,7 @@ import { hash, nextSpendingDayBoundary, spendingDay } from './spending-policy';
 import { MAINNET_NETWORK, MAINNET_USDC_MINT, PurchaseExecutionModeSchema, type PurchaseExecutionMode } from '../payment/payment-environment';
 import { WalletLibrary } from '../app-wallet/wallet-library';
 import { WalletAccounts } from '../app-wallet/wallet-accounts';
+import { assertCredentialFreeDelivery } from './delivery-credential-guard';
 
 export type { DeliveryStatus } from './delivery-state';
 export { PurchaseExecutionModeSchema, type PurchaseExecutionMode } from '../payment/payment-environment';
@@ -110,7 +111,7 @@ export class PurchaseLedger {
     this.defaultCardMemberId = options.defaultCardMemberId;
     if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     this.db = new DatabaseSync(path);
-    try { this.executionSafety = new ExecutionSafety(this.db, path); }
+    try { this.executionSafety = new ExecutionSafety(this.db, path, this.now); }
     catch (error) { this.db.close(); throw error; }
     if (path !== ':memory:') chmodSync(path, 0o600);
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON;
@@ -510,7 +511,7 @@ export class PurchaseLedger {
   assertCanSign(approvalId: string, now = this.now(), validate?: (record: PurchaseRecord) => void, permit?: ExternalExecutionPermit) {
     if (this.stopping) throw new Error('Service is stopping');
     const record = this.recordForApproval(approvalId);
-    this.executionSafety.assert(record, permit);
+    this.executionSafety.assert(record, permit, now);
     if (!isLiveMode(record?.executionMode)) throw new Error('PURCHASE_EXECUTION_MODE_MISMATCH');
     if (record?.status !== 'PAYING' || record.intent.expiresAt <= now) throw new Error('Approval inactive or expired');
     if (record.executionMode === 'live_mainnet' && (!this.managed || !this.requireSpendGrant)) throw new Error('MAINNET_AUTHORITY_REQUIRED');
@@ -542,6 +543,21 @@ export class PurchaseLedger {
       const rows = this.transitionEligible('FAIL_BEFORE_SUBMISSION', "status IN ('PAYING','PAYMENT_UNKNOWN') AND ((status='PAYING' AND payload IS NULL) OR id IN (SELECT purchase_id FROM original_payments WHERE state='SIGNED_NOT_SUBMITTED' AND submission_attempted_at IS NULL))");
       for (const row of rows) this.db.prepare("UPDATE original_payments SET state='NOT_SUBMITTED' WHERE purchase_id=? AND state='SIGNED_NOT_SUBMITTED'").run(String(row.id));
       for (const row of rows) this.event(String(row.id), 'payment.FAILED_BEFORE_SUBMISSION');
+    });
+  }
+  /** An external approval is resumable only by its live owner and epoch. A
+   * reopened process must terminate unclaimed approvals rather than minting a
+   * replacement permit or releasing any signed/possibly submitted payment. */
+  recoverUnclaimedExternalAuthorizationsOnStartup() {
+    if (!this.executionSafety.active) return;
+    if (!this.hasExecutionProvenanceTable()) return;
+    const current = this.executionSafety.snapshot();
+    this.atomic(() => {
+      const rows = this.transitionEligible('INTERRUPT_EXTERNAL_AUTHORIZATION', `status='APPROVED' AND payload IS NULL
+        AND id IN (SELECT purchase_id FROM purchase_execution_provenance
+          WHERE origin='external_pay' AND phase='AUTHORIZED' AND (owner_id<>? OR epoch<>?)
+          AND purchase_id NOT IN (SELECT purchase_id FROM external_execution_leases))`, current.ownerId, current.epoch);
+      for (const row of rows) this.event(String(row.id), 'purchase.EXTERNAL_AUTHORIZATION_INTERRUPTED');
     });
   }
   pendingRecovery() {
@@ -626,6 +642,12 @@ export class PurchaseLedger {
       try { paymentPayloadHash = hash(JSON.parse(String(row.payload))); } catch { /* Malformed legacy payloads cannot prove a live payment. */ }
     }
     const delivery = this.delivery.state(String(row.id));
+    let data: unknown;
+    if (row.data) {
+      const stored = z.json().parse(JSON.parse(String(row.data)));
+      try { this.assertSafeDelivery(String(row.approval_id), stored); data = stored; }
+      catch { /* Historical reflected data remains in the ledger but never leaves it. */ }
+    }
     return { monetaryScope: monetary, intent, quote: JSON.parse(String(row.quote)), approvalId: String(row.approval_id), decision: parseStoredAuthorityDecision(JSON.parse(String(row.decision))), status: parseStoredPurchaseStatus(row.status),
       deliveryStatus: delivery.status, receiptStatus: delivery.receiptStatus, deliveryRecovery: delivery,
       executionMode: storedExecutionMode(row.execution_mode), paymentPayloadPresent,
@@ -633,7 +655,13 @@ export class PurchaseLedger {
       ...(ownerCardMemberId ? { ownerCardMemberId } : {}),
       ...(this.db.prepare("SELECT answer FROM purchase_answers WHERE purchase_id=?").get(String(row.id)) as { answer: string } | undefined),
       ...(row.transaction_id ? { transaction: String(row.transaction_id) } : {}),
-      ...(row.data ? { data: z.json().parse(JSON.parse(String(row.data))) } : {}) };
+      ...(data === undefined ? {} : { data }) };
+  }
+  private assertSafeDelivery(approvalId: string, data: unknown) {
+    const payload = this.savedPayload(approvalId);
+    const row = this.db.prepare('SELECT o.evidence FROM original_payments o JOIN purchases p ON p.id=o.purchase_id WHERE p.approval_id=?').get(approvalId);
+    const original = row ? OriginalPaymentRecordSchema.parse(JSON.parse(String(row.evidence))) : undefined;
+    assertCredentialFreeDelivery(data, payload, original?.identity.buyerSignature);
   }
   private hasVerifiedPaymentProof(record: SpendReservation) {
     const evidence = record.paymentEvidence;
@@ -712,17 +740,27 @@ export class PurchaseLedger {
           ownerCardMemberId ?? intent.authority?.cardMemberId ?? null, mode === 'UNKNOWN' ? null : mode, storeMonetaryScope(this.db, monetary));
       this.delivery.initialize({ id: intent.id, purchase: JSON.stringify(intent), owner: ownerCardMemberId ?? intent.authority?.cardMemberId,
         status: decision.decision, delivered: false, receiptConfirmed: false });
-      this.executionSafety.reserve((memberId ? this.getOwned(intent.idempotencyKey, memberId) : this.getLegacy(intent.idempotencyKey))!, external);
+      this.executionSafety.reserve((memberId ? this.getOwned(intent.idempotencyKey, memberId) : this.getLegacy(intent.idempotencyKey))!, external, now);
       this.event(intent.id, `authority.${decision.decision}`);
       return (memberId ? this.getOwned(intent.idempotencyKey, memberId) : this.getLegacy(intent.idempotencyKey))!;
     });
   }
   /** Release only approvals that never reached the signer. Caller holds the write lock. */
   private expireUnclaimed(now: number, scope: MonetaryScope = this.scope()) {
-    const rows = this.transitionEligible('EXPIRE_APPROVAL', `status='APPROVED' AND payload IS NULL AND json_extract(purchase,'$.expiresAt')<=?${this.scopeFilter(scope)}`, now);
+    const externalExpiry = this.hasExecutionProvenanceTable()
+      ? ` OR id IN (SELECT purchase_id FROM purchase_execution_provenance
+          WHERE origin='external_pay' AND phase='AUTHORIZED' AND permit_expires_at<=?
+          AND purchase_id NOT IN (SELECT purchase_id FROM external_execution_leases))`
+      : '';
+    const rows = this.transitionEligible('EXPIRE_APPROVAL', `status='APPROVED' AND payload IS NULL
+      AND (json_extract(purchase,'$.expiresAt')<=?${externalExpiry})${this.scopeFilter(scope)}`,
+    ...(externalExpiry ? [now, now] : [now]));
     for (const row of rows) this.event(String(row.id), 'purchase.EXPIRED');
   }
-  releaseExpired(now = Date.now()) { this.atomic(() => this.expireUnclaimed(now)); }
+  private hasExecutionProvenanceTable() {
+    return Boolean(this.db.prepare("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='purchase_execution_provenance'").get());
+  }
+  releaseExpired(now = Date.now(), scope?: MonetaryScope) { this.atomic(() => this.expireUnclaimed(now, scope)); }
   saveAnswer(taskId: string, answer: string, memberId?: string) {
     if (!answer.trim() || answer.length > 12000) throw new Error('Invalid final answer');
     this.atomic(() => {
@@ -732,16 +770,11 @@ export class PurchaseLedger {
       if (result.changes) this.event(record.intent.id, 'task.ANSWERED');
     });
   }
-  claim(approvalId: string, now = this.now(), validate?: (record: PurchaseRecord) => void, expectedMode?: PurchaseExecutionMode, permit?: ExternalExecutionPermit): SpendReservation {
-    return this.atomic(() => {
-      if (this.stopping) throw new Error('Service is stopping');
-      const record = this.recordForApproval(approvalId);
-      this.executionSafety.assert(record, permit);
-      if (expectedMode && record.executionMode !== expectedMode) throw new Error('PURCHASE_EXECUTION_MODE_MISMATCH');
+  private assertReservedExecution(record: PurchaseRecord, now: number) {
       if (record.status !== 'APPROVED' || record.decision.decision !== 'APPROVED' || record.intent.expiresAt <= now) throw new Error('Approval inactive or expired');
       if (record.executionMode === 'live_mainnet' && (!this.managed || !this.requireSpendGrant)) throw new Error('MAINNET_AUTHORITY_REQUIRED');
       if (record.executionMode === 'live_mainnet' && this.requireRegisteredResource && !this.resources.active().some(resource => resource.resourceId === record.intent.resourceId)) throw new Error('MAINNET_REGISTERED_RESOURCE_REQUIRED');
-    validate?.(record);
+
       if (this.managed) {
         const controls = this.controls(undefined, record.monetaryScope);
         if (controls.paused) throw new Error('Payments are paused');
@@ -752,6 +785,29 @@ export class PurchaseLedger {
         if (this.requireSpendGrant) this.assertGrantCovers(record, now);
       }
       if (this.hasBlockingPayment(record.intent, record.monetaryScope)) throw new Error('Another payment requires reconciliation');
+  }
+  recoverExternalPrepayment(approvalId: string, now = this.now()) {
+    return this.atomic(() => {
+      if (this.stopping) throw new Error('SERVICE_STOPPING');
+      const record = this.recordForApproval(approvalId);
+      if (this.savedOriginalPayment(approvalId) || record.paymentPayloadPresent || record.transaction || record.paymentEvidence
+        || this.executionSafety.provenance(record.intent.id)?.phase !== 'AUTHORIZED')
+        throw new Error('PAY_ORIGINAL_PAYMENT_RECOVERY_REQUIRED');
+      if (record.status !== 'APPROVED') throw new Error('PAY_PREPAYMENT_RECOVERY_UNAVAILABLE');
+      this.assertReservedExecution(record, now);
+      const permit = this.executionSafety.renewPrepaymentLease(record, now);
+      this.event(record.intent.id, 'payment.EXECUTION_LEASE_RECOVERED');
+      return permit;
+    });
+  }
+  claim(approvalId: string, now = this.now(), validate?: (record: PurchaseRecord) => void, expectedMode?: PurchaseExecutionMode, permit?: ExternalExecutionPermit): SpendReservation {
+    return this.atomic(() => {
+      if (this.stopping) throw new Error('Service is stopping');
+      const record = this.recordForApproval(approvalId);
+      this.executionSafety.assert(record, permit, now);
+      if (expectedMode && record.executionMode !== expectedMode) throw new Error('PURCHASE_EXECUTION_MODE_MISMATCH');
+      validate?.(record);
+      this.assertReservedExecution(record, now);
       this.db.prepare("UPDATE purchases SET status=? WHERE approval_id=? AND status='APPROVED'").run(purchaseStatusAfter(record.status, 'START_PAYMENT'), approvalId);
       this.executionSafety.phase(record, 'CLAIMED');
       this.event(record.intent.id, 'payment.PAYING');
@@ -926,6 +982,7 @@ export class PurchaseLedger {
       const row = this.db.prepare('SELECT task_id,owner_card_member_id,status,execution_mode FROM purchases WHERE approval_id=?').get(approvalId);
       if (!row) throw new Error('Unknown approval');
       const record = this.recordForApproval(approvalId);
+      this.assertSafeDelivery(approvalId, data);
       if (record?.executionMode === 'simulated') {
         if (!result.transaction.startsWith('simulated-') || !['PAYING', 'PAID'].includes(record.status)) throw new Error('Simulated purchase cannot be completed from this state');
         if (record.status !== 'PAID') {

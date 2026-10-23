@@ -72,10 +72,18 @@ async function main() {
         for await (const chunk of incoming) { const buffer=Buffer.from(chunk);size+=buffer.length;if(size>131_072) throw new Error('INPUT_TOO_LARGE');chunks.push(buffer); }
         const raw: unknown=JSON.parse(Buffer.concat(chunks).toString('utf8'));
         let result: unknown;
-        if (incoming.url === '/pay/authorize') result = await authority!.authorize(raw, authenticated);
+        if (incoming.url === '/pay/authorize') {
+          result = authority!.authorizeSpend(raw, authenticated);
+        }
         else {
           const value=z.object({facts:z.unknown(),unsigned:z.unknown().optional()}).strict().parse(raw);
-          if (incoming.url === '/pay/plan') result=authority!.plan(value.facts,authenticated);
+          if (incoming.url === '/pay/plan') {
+            result = await authority!.prepareControlled(value.facts, authenticated);
+            if (process.env.TEST_CRASH_AFTER_AUTHORIZATION === '1') {
+              stage = 'authorization-reserved-before-build';
+              process.kill(process.pid, 'SIGKILL');
+            }
+          }
           else if (incoming.url === '/pay/execute') result=await authority!.execute(value.facts,value.unsigned,authenticated);
           else throw new Error('PATH_REJECTED');
         }

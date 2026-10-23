@@ -1,7 +1,10 @@
+import { createServer } from 'node:http';
+import { once } from 'node:events';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { VersionedTransaction } from '@solana/web3.js';
 import { expect, it } from 'vitest';
+import { z } from 'zod';
 import { X402ResourceSchema } from '../../src/modules/resources/http-resource';
 import { resolvePaymentEnvironment, MAINNET_GENESIS, TOKEN_PROGRAM } from '../../src/modules/payment/payment-environment';
 import { preparePayUnsigned, runPayUnsignedPreflight } from '../../src/modules/payment/pay-unsigned-preflight';
@@ -37,14 +40,28 @@ function fixture(change?: { fee?: number | null; sponsorBalance?: number; simula
     return Response.json({ jsonrpc: '2.0', id: 1, result: values[input.method] });
   };
   return { methods, run: (override = resource) => runPayUnsignedPreflight({ wallet, resource: override, environment, binary, fetcher,
-    ...(change?.signed ? { prepare: async (path, input) => {
-      const raw = await preparePayUnsigned(path, input);
-      const value = JSON.parse(JSON.stringify(raw));
-      const transaction = VersionedTransaction.deserialize(Buffer.from(value.result.unsigned.transaction, 'base64'));
-      transaction.signatures[0][0] = 1;
-      value.result.unsigned.transaction = Buffer.from(transaction.serialize()).toString('base64');
-      return value;
-    } } : {}) }) };
+    prepare: async (path, input) => {
+      const server = createServer(async (request, response) => {
+        const chunks: Buffer[] = []; for await (const chunk of request) chunks.push(Buffer.from(chunk));
+        const rpc = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+        const mint = Buffer.alloc(82); mint[44] = 6; mint[45] = 1;
+        const result = rpc.method === 'isBlockhashValid' ? { context: { slot: 1 }, value: true }
+          : rpc.method === 'getAccountInfo' ? { context: { slot: 1 }, value: { data: [mint.toString('base64'), 'base64'],
+            executable: false, lamports: 1000000, owner: TOKEN_PROGRAM, rentEpoch: 0 } } : null;
+        response.setHeader('content-type', 'application/json'); response.end(JSON.stringify({ jsonrpc: '2.0', id: rpc.id, result }));
+      });
+      server.listen(0, '127.0.0.1'); await once(server, 'listening');
+      const address = server.address(); if (!address || typeof address === 'string') throw new Error('TEST_RPC_REQUIRED');
+      try {
+        const raw = await preparePayUnsigned(path, { ...z.record(z.string(), z.unknown()).parse(input), rpcUrl: `http://127.0.0.1:${address.port}` });
+        if (!change?.signed) return raw;
+        const value = JSON.parse(JSON.stringify(raw));
+        const transaction = VersionedTransaction.deserialize(Buffer.from(value.result.unsigned.transaction, 'base64'));
+        transaction.signatures[0][0] = 1;
+        value.result.unsigned.transaction = Buffer.from(transaction.serialize()).toString('base64');
+        return value;
+      } finally { server.closeAllConnections(); server.close(); }
+    } }) };
 }
 
 it('uses the Pay SDK without signatures while execution remains disabled and estimates the actual sponsored fee', async () => {

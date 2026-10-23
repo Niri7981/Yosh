@@ -21,9 +21,9 @@ class PayDevCodexConfiguration(unittest.TestCase):
         self.data = self.root / "data"
         self.data.mkdir(mode=0o700)
         self.manifest = self.data / "pay-dev-runtime.json"
-        launcher.private_write(self.manifest, json.dumps(dict(version=1, profile="isolated-pay-dev", origin="http://127.0.0.1:13049",
-            memberId="00000000-0000-4000-8000-000000000001", merchantUrl="http://127.0.0.1:13049/dev-api")))
-        self.bundle = self.root / "Yosh Pay Dev.app"
+        launcher.private_write(self.manifest, json.dumps(dict(version=1, profile="isolated-pay-dev", origin="http://127.0.0.1:13449",
+            memberId="00000000-0000-4000-8000-000000000001", merchantUrl="http://127.0.0.1:13449/dev-api")))
+        self.bundle = self.root / "Yosh Pay Dev v0.1.1-rc.5.app"
         runtime = self.bundle / "Contents/Resources/Runtime"
         runtime.mkdir(parents=True)
         for name in ("node", "mcp.cjs", "pay-mcp"):

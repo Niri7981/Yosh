@@ -1,3 +1,5 @@
+import { LEGACY_PAY_DEV_MAINNET, legacyMainnetSignerSelected } from '../pay-dev/mainnet-signer-selection';
+import { PAY_DEVELOPMENT_PROFILE } from '../pay-dev/profile';
 import { spawn } from "node:child_process";
 import { address } from "@solana/kit";
 import { validatePaymentEnvironment, type PaymentEnvironment } from './payment-environment';
@@ -48,16 +50,16 @@ function security(args: string[], input?: string): Promise<string> {
 
 export const APP_WALLET_KEYCHAIN = Object.freeze({ service: 'com.2049.wallet.v1', account: 'consumer-wallet-v1' });
 export const MAINNET_WALLET_KEYCHAIN = Object.freeze({ service: 'com.yosh.wallet.mainnet.v1', account: 'consumer-wallet-mainnet-v1' });
-export const DEV_MAINNET_WALLET_KEYCHAIN = Object.freeze({ service: 'com.yosh.pay-development.wallet.mainnet.v1', account: 'consumer-wallet-mainnet-v1' });
-const DEV_OFFLINE_WALLET_KEYCHAIN = Object.freeze({ service: 'com.yosh.pay-development.wallet.offline.v1', account: 'consumer-wallet-offline-v1' });
+export const DEV_MAINNET_WALLET_KEYCHAIN = Object.freeze({ service: `${PAY_DEVELOPMENT_PROFILE.keychainNamespace}.wallet.mainnet.v1`, account: 'consumer-wallet-mainnet-v1' });
+const DEV_OFFLINE_WALLET_KEYCHAIN = Object.freeze({ service: `${PAY_DEVELOPMENT_PROFILE.keychainNamespace}.wallet.offline.v1`, account: 'consumer-wallet-offline-v1' });
 
 function scopedWalletItem(item: Readonly<{ service: string; account: string }>) {
   if (process.env.YOSH_PAY_DEV !== '1') return item;
   // Fail closed before any Keychain command; HOME does not isolate macOS Keychain.
   if (!isMainnetDevelopment()) throw new Error('PAY_DEVELOPMENT_KEYCHAIN_FORBIDDEN');
-  if (item === MAINNET_WALLET_KEYCHAIN) return DEV_MAINNET_WALLET_KEYCHAIN;
+  if (item === MAINNET_WALLET_KEYCHAIN) return legacyMainnetSignerSelected() ? { service: LEGACY_PAY_DEV_MAINNET.service, account: LEGACY_PAY_DEV_MAINNET.account } : DEV_MAINNET_WALLET_KEYCHAIN;
   if (item === APP_WALLET_KEYCHAIN) return DEV_OFFLINE_WALLET_KEYCHAIN;
-  if (item.service === 'com.yosh.wallet.library.v1') return { ...item, service: 'com.yosh.pay-development.wallet.library.v1' };
+  if (item.service === 'com.yosh.wallet.library.v1') return { ...item, service: `${PAY_DEVELOPMENT_PROFILE.keychainNamespace}.wallet.library.v1` };
   throw new Error('PAY_DEVELOPMENT_KEYCHAIN_FORBIDDEN');
 }
 
@@ -85,6 +87,7 @@ async function readWalletKeychain(item: Readonly<{ service: string; account: str
 }
 
 async function createWalletKeychain(item: Readonly<{ service: string; account: string }>, secret: string): Promise<void> {
+  if (item === MAINNET_WALLET_KEYCHAIN && legacyMainnetSignerSelected()) throw new Error('LEGACY_MAINNET_SIGNER_READ_ONLY');
   item = scopedWalletItem(item);
   if (process.platform !== 'darwin') throw new Error('The Yosh wallet requires macOS Keychain');
   if (!/^[1-9A-HJ-NP-Za-km-z]{64,100}$/.test(secret)) throw new Error('Invalid Yosh wallet signer encoding');

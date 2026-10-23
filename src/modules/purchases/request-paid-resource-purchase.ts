@@ -65,6 +65,7 @@ export async function requestPaidResourcePurchase(raw: unknown, options: {
   deferExecution?: boolean;
   externalExecution?: ExternalExecutionFacts;
   externalQuote?: unknown;
+  externalSelectedQuote?: unknown;
   externalRequest?: import('../resources/http-resource').HttpResourceRequest;
   pay?: typeof executeApprovedPayment; recover?: typeof recoverApprovedPayment;
 }): Promise<PurchaseRequestResult> {
@@ -101,7 +102,8 @@ export async function requestPaidResourcePurchase(raw: unknown, options: {
     if (existing.intent.requestHash !== requestHash || existing.intent.resourceId !== input.resourceId || !existing.intent.resourcePath) throw new Error('REQUEST_ID_CONFLICT');
     return complete(existing, true);
   }
-  const { quote, challenge, request: quotedRequest } = await fetchPaidResourceQuote(input.resourceId, options.origin, options.config, options.fetcher);
+  if (options.externalSelectedQuote !== undefined && !options.externalExecution) throw new Error('EXTERNAL_PROVENANCE_REQUIRED');
+  const { quote, challenge, request: quotedRequest } = await fetchPaidResourceQuote(input.resourceId, options.origin, options.config, options.fetcher, options.externalSelectedQuote);
   // The isolated Pay GET profile authorizes Accept: application/json. Persist
   // it in the same immutable request used for binding, signing and final HTTP.
   // ExecutionSafety checks this exact request against the external requestHash.

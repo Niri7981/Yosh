@@ -17,9 +17,10 @@ export function createX402SpendIntent(input: {
   buyer: string; reason?: string; now?: number; authority?: SpendAuthorityBinding;
   requestInputFingerprint?: string;
   paymentRequiredHeader?: string;
+  selectedQuote?: unknown;
 }): SpendIntent {
   const resource = X402ResourceSchema.parse(input.resource);
-  const { challenge, quote } = validateResourceChallenge(input.challenge, resource, input.environment);
+  const { challenge, quote } = validateResourceChallenge(input.challenge, resource, input.environment, input.selectedQuote);
   if (input.paymentRequiredHeader && hash(readPaymentRequiredHeader(input.paymentRequiredHeader,
     challenge.accepts.some(quote => Object.hasOwn(quote, 'outputSchema')))) !== hash(challenge))
     throw new Error('MERCHANT_QUOTE_EVIDENCE_MISMATCH');

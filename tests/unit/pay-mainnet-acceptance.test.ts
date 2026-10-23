@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { afterEach, expect, it, vi } from 'vitest';
-import { assertPayMainnetAcceptance, recordPayMainnetAcceptance } from '../../src/modules/payment/pay-mainnet-control';
+import { assertPayMainnetAcceptance, recordPayMainnetAcceptance, consentEconomicIntentV3 } from '../../src/modules/payment/pay-mainnet-control';
 import { resolvePaymentEnvironment } from '../../src/modules/payment/payment-environment';
 import { hash } from '../../src/modules/purchases/spending-policy';
 
@@ -23,7 +23,7 @@ function fixture() {
   const receipt = { version: 2, callerId: facts.caller_id, operationId: facts.operation_id, wallet: config.buyer,
     ...resource, network: facts.network, asset: facts.asset, recipient: facts.recipient, amountAtomic: facts.amount_atomic,
     requestHash: hash(facts.request), quoteHash: hash(facts.accepted), challengeHash: hash(facts.payment_required), expiresAt: Date.now() + 60_000 };
-  recordPayMainnetAcceptance(directory, receipt);
+  writeFileSync(join(directory, 'pay-mainnet-acceptance.json'), JSON.stringify(receipt), { mode: 0o600 });
   return { directory, config, facts, resource, receipt };
 }
 
@@ -51,4 +51,42 @@ it('rejects wallet replacement and expiry, including after a persistent receipt 
   expect(() => assertPayMainnetAcceptance(f.directory, { ...f.config, buyer: f.config.merchant }, f.facts, f.resource)).toThrow();
   vi.useFakeTimers(); vi.setSystemTime(f.receipt.expiresAt + 1);
   expect(() => assertPayMainnetAcceptance(f.directory, f.config, f.facts, f.resource)).toThrow();
+});
+
+
+it('v3 allows only known blockhash freshness across attempts and rejects economic or unknown mutation', () => {
+  const f = fixture();
+  const offer = { ...f.facts.accepted, scheme: 'exact', network: f.facts.network, asset: f.facts.asset,
+    payTo: f.facts.recipient, maxTimeoutSeconds: 300,
+    extra: { ...f.facts.accepted.extra, recentBlockhash: f.config.buyer, memo: 'order-1' } };
+  const envelope = { x402Version: 2, resource: { url: f.resource.resourceUrl }, accepts: [offer], extensions: { bazaar: { info: {} } } };
+  const facts = { ...f.facts, accepted: offer, payment_required: envelope };
+  const { quoteHash: _quote, challengeHash: _challenge, ...base } = f.receipt;
+  void _quote; void _challenge;
+  recordPayMainnetAcceptance(f.directory, { ...base, version: 3, ...consentEconomicIntentV3(offer, envelope) });
+  const fresh = { ...offer, extra: { ...offer.extra, recentBlockhash: f.config.merchant } };
+  const next = { ...facts, accepted: fresh, payment_required: { ...envelope, resource: { ...envelope.resource, description: 'updated display text' },
+    accepts: [fresh, { ...fresh, amount: '2000' }] } };
+  expect(() => assertPayMainnetAcceptance(f.directory, f.config, next, f.resource)).not.toThrow();
+  const { payment_required: _envelope, ...spend } = next;
+  void _envelope;
+  expect(() => assertPayMainnetAcceptance(f.directory, f.config, spend, f.resource)).not.toThrow();
+  for (const changed of [
+    { ...fresh, amount: '2000' }, { ...fresh, payTo: f.config.buyer },
+    { ...fresh, asset: f.config.buyer }, { ...fresh, network: 'solana:other' },
+    { ...fresh, scheme: 'other' }, { ...fresh, extra: { ...fresh.extra, feePayer: f.config.buyer } },
+    { ...fresh, extra: { ...fresh.extra, memo: 'other-order' } },
+    { ...fresh, extra: { ...fresh.extra, unknown: 'new' } },
+  ]) expect(() => assertPayMainnetAcceptance(f.directory, f.config, { ...next, accepted: changed }, f.resource)).toThrow();
+  expect(() => assertPayMainnetAcceptance(f.directory, f.config, { ...next,
+    payment_required: { ...next.payment_required, extensions: { unknown: { responsibility: 'buyer' } } } }, f.resource)).toThrow();
+  expect(() => assertPayMainnetAcceptance(f.directory, f.config, { ...next, request: { ...next.request, url: 'https://other.invalid' } }, f.resource)).toThrow();
+});
+
+it('new issuance requires v3; existing v2 remains exact and is never upgraded', () => {
+  const f = fixture();
+  expect(() => recordPayMainnetAcceptance(f.directory, f.receipt)).toThrow('PAY_MAINNET_ACCEPTANCE_V3_REQUIRED');
+  expect(() => assertPayMainnetAcceptance(f.directory, f.config, f.facts, f.resource)).not.toThrow();
+  expect(() => assertPayMainnetAcceptance(f.directory, f.config, { ...f.facts,
+    accepted: { ...f.facts.accepted, extra: { ...f.facts.accepted.extra, recentBlockhash: f.config.buyer } } }, f.resource)).toThrow();
 });

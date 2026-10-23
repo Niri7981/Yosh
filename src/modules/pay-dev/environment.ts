@@ -1,3 +1,4 @@
+import { PAY_DEVELOPMENT_PROFILE } from './profile';
 import { closeSync, existsSync, fsyncSync, lstatSync, openSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { z } from 'zod';
@@ -9,13 +10,18 @@ export const DevelopmentEnvironment = z.object({ version: z.literal(1), environm
       && (!url.port || url.port === '443');
   }) }).strict().refine(value => value.environment !== 'mainnet' || value.mainnetRiskAccepted);
 export const DEFAULT_DEV_RPC = 'https://solana-rpc.publicnode.com';
+export function assertDevelopmentOrigin(origin: string) {
+  if (PAY_DEVELOPMENT_PROFILE.bundleIdentifier === 'com.yosh.pay-development.v011rc5'
+    && origin !== `http://127.0.0.1:${PAY_DEVELOPMENT_PROFILE.backendPort}`)
+    throw new Error('PAY_PROFILE_MISMATCH');
+}
 export function assertDevelopmentDirectory(directory: string, name: string) {
   const stat = lstatSync(directory);
   if (realpathSync(directory) !== directory || basename(directory) !== name || !stat.isDirectory() || stat.isSymbolicLink()
     || stat.uid !== process.getuid?.() || (stat.mode & 0o777) !== 0o700) throw new Error('PAY_DEVELOPMENT_DIRECTORY_REQUIRED');
 }
 export function readDevelopmentEnvironment(root: string) {
-  assertDevelopmentDirectory(root, 'Yosh Pay Dev');
+  assertDevelopmentDirectory(root, PAY_DEVELOPMENT_PROFILE.directoryName);
   const path = join(root, 'development-environment.json');
   let stat: ReturnType<typeof lstatSync>;
   try { stat = lstatSync(path); }

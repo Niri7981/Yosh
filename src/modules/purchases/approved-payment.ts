@@ -56,7 +56,7 @@ export function checkPaymentBinding(record: PurchaseRecord, config: PaymentConfi
       throw new Error('Approval quote evidence changed');
     const { quote } = validateResourceChallenge(intent.x402Challenge, { resourceId: intent.resourceId, providerId: intent.providerId,
       request: intent.httpRequest, network: config.network, mint: intent.assetId, decimals: 6,
-      recipientSource: 'live_challenge', maximumAmount: intent.amount }, config);
+      recipientSource: 'live_challenge', maximumAmount: intent.amount }, config, record.quote);
     if (intent.paymentScheme !== quote.scheme || intent.assetDecimals !== config.asset.decimals || intent.network !== config.network || endpoint !== intent.httpRequest.url
       || hash(quote) !== intent.quoteFingerprint || hash(record.quote) !== intent.quoteFingerprint
       || intent.executionBinding !== resourcePaymentBinding(config, config.buyer, intent.httpRequest, intent.x402Challenge, intent.deliveryRecovery, intent.paymentRequiredHeader)) throw new Error('Approval binding changed');

@@ -7,6 +7,8 @@ export default defineConfig({
   ...base,
   test: {
     ...base.test,
+    // Candidate wrapper integration uses the fixed candidate listener.
+    fileParallelism: false,
     exclude: base.test?.exclude?.filter(pattern => !payEnvironmentTests.includes(pattern)),
   },
 });

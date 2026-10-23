@@ -8,6 +8,7 @@ import { type PaymentEnvironment, MAINNET_GENESIS, TOKEN_PROGRAM } from './payme
 import { readPaymentJson } from './read-payment-json';
 import { assertUnsignedPaymentBindings, decodeOriginalTransaction } from './original-payment-evidence';
 import { getStandardTokenAccount } from './payment-preflight';
+import { consentEconomicIntentV3 } from './pay-mainnet-control';
 import { hash } from '../purchases/spending-policy';
 
 const lamports = z.number().int().safe().nonnegative();
@@ -19,7 +20,7 @@ const Prepared = z.object({ transaction: z.string().max(1644), recentBlockhash: 
  * subcommand has no account store, authority, signer or payment transport. */
 export async function preparePayUnsigned(binary: string, input: unknown) {
   return new Promise<unknown>((resolve, reject) => {
-    const child = spawn(binary, ['--unsigned-preflight'], { env: { PATH: '/usr/bin:/bin', NODE_ENV: 'production' }, stdio: ['pipe', 'pipe', 'ignore'] });
+    const child = spawn(binary, ['--unsigned-preflight'], { env: { PATH: '/usr/bin:/bin', NODE_ENV: process.env.NODE_ENV === 'test' ? 'test' : 'production' }, stdio: ['pipe', 'pipe', 'ignore'] });
     const chunks: Buffer[] = []; let size = 0;
     const timeout = setTimeout(() => { child.kill(); reject(new Error('PAY_UNSIGNED_TIMEOUT')); }, 20_000);
     child.stdout.on('data', (chunk: Buffer) => {
@@ -103,7 +104,7 @@ export async function runPayUnsignedPreflight(options: {
   // both existing token accounts are verified above. No rent estimate is guessed.
   return { checkedAt: Date.now(), wallet, resourceId: resource.resourceId, providerId: resource.providerId,
     request: { method: request.method, url: request.url, headers: Object.entries(request.headers).sort(), body: null },
-    challenge, quote, quoteHash: hash(quote), challengeHash: hash(challenge), lifetime,
+    challenge, quote, ...consentEconomicIntentV3(quote, challenge), quoteHash: hash(quote), challengeHash: hash(challenge), lifetime,
     unsignedHash: hash(wire), feePayer, feeLamports: String(fee), accountCreationLamports: '0',
     buyerFeeLamports: '0', feePayerBalanceLamports: String(payerBalance), buyerSolLamports: String(buyerSol),
     buyerUsdcAtomic: buyerBalance, simulationUnits: simulation.value.unitsConsumed ?? null,

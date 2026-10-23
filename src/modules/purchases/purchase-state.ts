@@ -15,6 +15,7 @@ export function parseStoredPurchaseStatus(value: unknown): PurchaseStatus {
 export type PurchaseTransition =
   | 'START_PAYMENT'
   | 'EXPIRE_APPROVAL'
+  | 'INTERRUPT_EXTERNAL_AUTHORIZATION'
   | 'MARK_PAYMENT_UNKNOWN'
   | 'CONFIRM_PAYMENT'
   | 'FAIL_BEFORE_SUBMISSION'
@@ -24,6 +25,7 @@ export type PurchaseTransition =
 const transitions: Record<PurchaseTransition, { from: readonly PurchaseStatus[]; to: PurchaseStatus }> = {
   START_PAYMENT: { from: ['APPROVED'], to: 'PAYING' },
   EXPIRE_APPROVAL: { from: ['APPROVED'], to: 'EXPIRED' },
+  INTERRUPT_EXTERNAL_AUTHORIZATION: { from: ['APPROVED'], to: 'EXPIRED' },
   MARK_PAYMENT_UNKNOWN: { from: ['PAYING', 'PAYMENT_UNKNOWN'], to: 'PAYMENT_UNKNOWN' },
   CONFIRM_PAYMENT: { from: ['PAYING', 'PAYMENT_UNKNOWN', 'PAID'], to: 'PAID' },
   FAIL_BEFORE_SUBMISSION: { from: ['PAYING', 'PAYMENT_UNKNOWN'], to: 'FAILED' },

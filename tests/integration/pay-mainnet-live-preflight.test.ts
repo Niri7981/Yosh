@@ -11,7 +11,7 @@ import { expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { AppRuntime } from '../../src/modules/app/app-runtime';
 import { PurchaseLedger } from '../../src/modules/purchases/purchase-ledger';
-import { preparePayMainnetCutover, recordPayMainnetAcceptance } from '../../src/modules/payment/pay-mainnet-control';
+import { preparePayMainnetCutover, recordPayMainnetAcceptance, consentEconomicIntentV3 } from '../../src/modules/payment/pay-mainnet-control';
 import { safeResourceFetch } from '../../src/modules/resources/safe-resource-fetch';
 import { readPaymentRequiredHeader } from '../../src/modules/payment/x402-client';
 import { MAINNET_REFERENCE_API } from '../../src/modules/payment/pay-mainnet-preflight';
@@ -90,11 +90,11 @@ it.skipIf(process.env.YOSH_LIVE_MAINNET_PREFLIGHT !== '1')('real Mainnet Pay MCP
       resourceId: resource.resourceId, providerId: resource.providerId, operation: PAID_RESOURCE_PURCHASE_OPERATION,
       network: quote.network, assetId: quote.asset, assetDecimals: 6, payTo: quote.payTo, paymentScheme: 'exact' }, Date.now(), 'live_mainnet');
     const operation = `unsigned-public-${randomUUID()}`;
-    recordPayMainnetAcceptance(directory, { version: 2, callerId: principal.cardMemberId, operationId: operation, wallet: buyer,
+    recordPayMainnetAcceptance(directory, { version: 3, callerId: principal.cardMemberId, operationId: operation, wallet: buyer,
       resourceId: resource.resourceId, providerId: resource.providerId, resourceUrl: MAINNET_REFERENCE_API,
       network: quote.network, asset: quote.asset, recipient: quote.payTo, amountAtomic: quote.amount,
       requestHash: hash({ method: 'GET', url: MAINNET_REFERENCE_API, headers: [['accept', 'application/json']], body: null }),
-      quoteHash: hash(quote), challengeHash: hash(raw), expiresAt: Date.now() + 120_000 });
+      ...consentEconomicIntentV3(quote, raw), expiresAt: Date.now() + 120_000 });
     const config = join(directory, 'host.json'); writeFileSync(config, JSON.stringify({ origin, token: connection.token, caller: principal.cardMemberId, timeout_ms: 5000 }), { mode: 0o600 });
     client = new Client({ name: 'unsigned-mainnet-preflight', version: '1' });
     const transport = new StdioClientTransport({ command: resolve('build.noindex/pay-mcp-target/debug/yosh-controlled-mcp'), args: [config], cwd: directory,

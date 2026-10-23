@@ -14,7 +14,7 @@ class PayDevelopmentHostGate(unittest.TestCase):
     def run_host(self, development, mode=0o600):
         with tempfile.TemporaryDirectory(prefix="pay-host-gate-") as temporary:
             config = Path(temporary) / "host.json"
-            config.write_text(json.dumps(dict(origin="http://127.0.0.1:13049", token="a" * 43,
+            config.write_text(json.dumps(dict(origin="http://127.0.0.1:13449", token="a" * 43,
                 caller="00000000-0000-4000-8000-000000000001", timeout_ms=5000)))
             config.chmod(mode)
             env = dict(PATH="/usr/bin:/bin", HOME=temporary, NODE_ENV="production")

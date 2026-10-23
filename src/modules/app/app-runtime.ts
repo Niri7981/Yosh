@@ -1,3 +1,4 @@
+import { dirname, resolve as resolveRuntimePath } from 'node:path';
 import { isPayDevelopmentDirectory } from '../pay-dev/isolation';
 import { assertDevelopmentStorage, isMainnetDevelopment } from '../pay-dev/environment';
 import { readPayTrace } from '../payment/pay-execution-trace';
@@ -327,14 +328,22 @@ export class AppRuntime {
     if (!this.accepting) return Promise.reject(new Error('SERVICE_STOPPING'));
     return this.track(operation());
   }
+  async payMcpRecovery(raw: unknown, principal: SpendPrincipal, origin: string) {
+    if (!this.payMainnet || !this.payAuthority) throw new Error('PAY_MAINNET_NOT_ENABLED');
+    const { operationId } = z.object({ operationId: z.string().regex(/^[a-zA-Z0-9_.:-]{1,128}$/) }).strict().parse(raw);
+    await this.start(origin); await this.initializeWallet();
+    if (!this.accepting) throw new Error('SERVICE_STOPPING');
+    return this.payAuthority.recoverOperation(operationId, principal,
+      resolveRuntimePath(dirname(process.execPath), '../Resources/Runtime/pay-mcp'));
+  }
   async payMcpOperation(action: 'authorize' | 'plan' | 'execute', raw: unknown, principal: SpendPrincipal, origin: string) {
     if (!this.payMainnet || !this.payAuthority) throw new Error('PAY_MAINNET_NOT_ENABLED');
     await this.start(origin);
     if (!this.accepting) throw new Error('SERVICE_STOPPING');
     await this.initializeWallet();
-    if (action === 'authorize') return this.payAuthority.authorize(raw, principal);
+    if (action === 'authorize') return this.payAuthority.authorizeSpend(raw, principal);
     const input = z.object({ facts: z.unknown(), unsigned: z.unknown().optional() }).strict().parse(raw);
-    return action === 'plan' ? this.payAuthority.plan(input.facts, principal) : this.payAuthority.execute(input.facts, input.unsigned, principal);
+    return action === 'plan' ? this.payAuthority.prepareControlled(input.facts, principal) : this.payAuthority.execute(input.facts, input.unsigned, principal);
   }
   start(origin: string): Promise<void> {
     resolveYoshConfiguration();
@@ -347,6 +356,7 @@ export class AppRuntime {
   private async recoverOnStartup(origin: string) {
     this.recoveryStatus = 'running';
     // The Electron single-instance owner starts this once before new purchases.
+    this.ledger.recoverUnclaimedExternalAuthorizationsOnStartup();
     this.ledger.recoverUnsubmittedOnStartup();
     this.ledger.recoverDeliveryClaimsOnStartup();
     this.ledger.reconciliation.recoverClaimsOnStartup();
@@ -389,6 +399,7 @@ export class AppRuntime {
   private scheduleDeliveryRecovery(origin: string) {
     if (!this.accepting) return;
     this.deliveryRecoveryTimer = setTimeout(() => {
+      this.ledger.releaseExpired(Date.now());
       const operation = this.track(Promise.all([this.retryDueDeliveries(origin), this.reconcileDuePayments()]));
       void operation.finally(() => this.scheduleDeliveryRecovery(origin));
     }, 1000);

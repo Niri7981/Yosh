@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { AgentResourceRegistrationInput, ResourceDocumentationSchema } from './agent-resource-registration';
-import { ResourceRequestInputSchema, authorizedRequestInstance } from './http-resource';
+import { ResourceRequestInputSchema, authorizedRequestInstance, MAX_RESOURCE_DELIVERY_BYTES } from './http-resource';
 import { SpendPrincipalSchema, type SpendPrincipal } from '../authority/spend-grant';
 import type { discoverResource } from './mainnet-resource-discovery';
 import type { DatabaseSync } from 'node:sqlite';
@@ -43,7 +43,7 @@ export const builtInResources: readonly X402Resource[] = [{ resourceId: 'you-web
   requestInputs: { query: ['query'] },
   network: MAINNET_NETWORK, mint: MAINNET_USDC_MINT, decimals: 6, recipientSource: 'live_challenge',
   baseAmount: '5000', maximumAmount: '5000', deliveryRecovery: { kind: 'none' },
-  deliveryPolicy: { format: 'json', mimeTypes: ['application/json'], maxBytes: 262_144 } }];
+  deliveryPolicy: { format: 'json', mimeTypes: ['application/json'], maxBytes: MAX_RESOURCE_DELIVERY_BYTES } }];
 
 /** Shares the existing ledger connection; immutable definitions and tombstones preserve references. */
 export class RuntimeResourceRegistry {
@@ -98,7 +98,7 @@ export class RuntimeResourceRegistry {
             this.db.exec('DROP TRIGGER resource_definition_immutable');
             this.db.prepare('UPDATE resource_registry SET definition=? WHERE resource_id=?').run(JSON.stringify({ ...prior,
               requestInputs: { query: ['query'] },
-              deliveryPolicy: { format: 'json', mimeTypes: ['application/json'], maxBytes: 262_144 } }), 'you-web-search');
+              deliveryPolicy: { format: 'json', mimeTypes: ['application/json'], maxBytes: MAX_RESOURCE_DELIVERY_BYTES } }), 'you-web-search');
             this.db.exec(`CREATE TRIGGER resource_definition_immutable BEFORE UPDATE OF resource_id,source,definition,created_at ON resource_registry
               BEGIN SELECT RAISE(ABORT,'resource definition is immutable'); END;`);
           }

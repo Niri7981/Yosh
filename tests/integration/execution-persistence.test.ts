@@ -45,6 +45,29 @@ function financialSnapshot(path: string) {
         db.close();
     }
 }
+it('migrates an existing execution-provenance table to durable permit expiry under the new writer epoch', () => {
+    const path = join(temporary(), 'app-ledger.sqlite');
+    const original = new PurchaseLedger(path, { managed: true, mode: 'live_devnet' });
+    original.executionSafety.enable(Date.now());
+    const originalEpoch = original.executionSafety.snapshot().epoch;
+    original.close();
+    const legacy = new DatabaseSync(path);
+    legacy.exec('DROP TRIGGER execution_provenance_immutable; ALTER TABLE purchase_execution_provenance DROP COLUMN permit_expires_at;');
+    legacy.close();
+
+    const migrated = new PurchaseLedger(path, { managed: true, mode: 'live_devnet' });
+    try {
+        const inspect = new DatabaseSync(path, { readOnly: true });
+        const columns = inspect.prepare('PRAGMA table_info(purchase_execution_provenance)').all().map(row => String(row.name));
+        expect(columns).toContain('permit_expires_at');
+        expect(inspect.prepare("SELECT 1 FROM ledger_schema_migrations WHERE id='019_external_permit_lease'").get()).toBeDefined();
+        inspect.close();
+        expect(migrated.executionSafety.snapshot().epoch).toBeGreaterThan(originalEpoch);
+    }
+    finally {
+        migrated.close();
+    }
+});
 it.each(['head', 'pre_owner', 'yosh'] as const)('upgrades a database made by actual %s source and blocks that old writer, including its startup recovery', async (version) => {
     const path = join(temporary(), 'app-ledger.sqlite');
     expect(await old(path, version, 'create')).toEqual({ code: 0, output: 'ALLOWED\n' });
