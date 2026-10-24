@@ -27,6 +27,16 @@ Yosh separates the ability to request a purchase from the authority to spend. A 
 
 JSON POST discovery requires separate native user confirmation of the exact outbound request before it is sent. An Agent cannot supply that approval itself.
 
+## Yosh × pay.sh integration
+
+Yosh keeps pay.sh's MCP and x402 request flow while using three upstream extension interfaces to keep spending authority and custody in the host:
+
+- [Pay #514 — External Spending Authority](https://github.com/solana-foundation/pay/pull/514) lets Pay submit the selected payment terms to a trusted host policy before execution. Yosh checks the Agent's Resource Grant, shared Daily Authority, and purchase reservation.
+- [pay-kit #393 — unsigned exact transaction preparation](https://github.com/solana-foundation/pay-kit/pull/393) separates construction of the supported x402 exact transaction from signing, so Yosh can validate it and use its backend signer.
+- [Pay #530 — host-controlled x402 exact execution](https://github.com/solana-foundation/pay/pull/530) adds an opt-in controller path for the host to authorize and carry out the exact payment flow. Pay's normal behavior remains available when the controller is not configured.
+
+Together, Pay handles its MCP request flow and x402 offer selection, while Yosh remains responsible for authorization, budgets, signing, payment records, and recovery. These upstream PRs are still open as of October 24, 2026; Yosh v0.1.1 uses pinned and validated sources, recorded in the [final source record](docs/releases/v0.1.1-rc.5-final-source.md), rather than relying on the PRs having merged.
+
 ## Core capabilities
 
 - **Scoped Spend Grants:** revocable spending authority for a specific Agent and Resource.
