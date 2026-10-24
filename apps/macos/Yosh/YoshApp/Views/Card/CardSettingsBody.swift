@@ -25,7 +25,7 @@ struct CardSettingsBody: View {
     var body: some View {
         VStack(alignment: .leading, spacing: CardPageHeader.Layout.firstSectionSpacing) {
             CardPageHeader(title: "Settings", style: .collection(subtitle: YoshPayDevelopment.isEnabled()
-                ? "Development · \(development?.environment == .mainnet ? "Mainnet · Real funds" : "Offline · No real funds")" : "Manage Yosh on this Mac."))
+                ? "\(development?.environment == .mainnet ? "Mainnet · Real funds" : "Offline · No real funds")" : "Manage Yosh on this Mac."))
                 .foregroundStyle(YoshShellPalette.ink)
             ScrollView(.vertical) {
                 VStack(alignment: .leading, spacing: 28) {
@@ -107,7 +107,7 @@ struct CardSettingsBody: View {
                             separator
                         }
                         SettingsRow(title: "Key storage", value: YoshPayDevelopment.isEnabled()
-                            ? development?.environment == .mainnet ? "Dev macOS Keychain" : "Offline test key" : "macOS Keychain")
+                            ? development?.environment == .mainnet ? "macOS Keychain" : "Offline test key" : "macOS Keychain")
                         separator
                         SettingsRow(title: "Local management", value: information == nil ? unavailableValue : "Protected")
                     }

@@ -42,7 +42,7 @@ struct WalletsView: View {
                            snapshot.wallets.contains(where: { $0.id == "mainnet" && $0.status == .missing }) {
                             Button("Create Wallet", systemImage: "plus") { confirmPaymentWallet = true }
                                 .disabled(saving).accessibilityIdentifier("wallets.create-payment-wallet")
-                            note("Create your Dev Mainnet payment wallet in its own macOS Keychain slot. It starts empty; payments remain disabled.")
+                            note("Create your Mainnet payment wallet in macOS Keychain. It starts empty; payments remain disabled.")
                         }
                     }
                     if !snapshot.library.isEmpty {
@@ -104,11 +104,11 @@ struct WalletsView: View {
             }
         }
         .task(id: isActive) { if isActive { await reload() } }
-        .alert("Create Dev Mainnet wallet?", isPresented: $confirmPaymentWallet) {
+        .alert("Create Mainnet wallet?", isPresented: $confirmPaymentWallet) {
             Button("Cancel", role: .cancel) {}
             Button("Create Wallet") { Task { await createPaymentWallet() } }
         } message: {
-            Text("Creates an empty wallet for this Dev environment only. Your formal Yosh wallet is untouched. No transfer, signing or purchase will occur.")
+            Text("Creates an empty wallet for this Mainnet profile. Existing wallets are unchanged. No transfer, signing or purchase will occur.")
         }
         .onDisappear { privateKey = "" }
     }
@@ -210,7 +210,7 @@ struct WalletsView: View {
                 return
             }
             await reload(); onChanged()
-        } catch { self.error = "Wallet setup was not completed. Allow Dev Keychain access and retry." }
+        } catch { self.error = "Wallet setup was not completed. Allow Keychain access and retry." }
     }
     private struct WalletFailure: Decodable { let error: String }
 }

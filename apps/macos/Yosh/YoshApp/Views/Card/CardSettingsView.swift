@@ -68,7 +68,7 @@ struct CardSettingsView: View {
                 Button("Cancel", role: .cancel) {}
                 Button("Use Mainnet") { Task { await switchEnvironment(.mainnet) } }
             } message: {
-                Text("Mainnet uses real SOL and USDC. Payments are irreversible. Dev wallets and records stay separate from Offline and formal Yosh. Selecting Mainnet does not create a wallet or enable payments.")
+                Text("Mainnet uses real SOL and USDC. Payments are irreversible. Mainnet wallets and records stay separate from Offline. Selecting Mainnet does not create a wallet or enable payments.")
             }
             .onReceive(NotificationCenter.default.publisher(for: .nativeServiceExited)) { _ in
                 guard !switchingEnvironment else { return }

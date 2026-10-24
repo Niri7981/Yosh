@@ -37,7 +37,7 @@ final class CardApplicationDelegate: NSObject, NSApplicationDelegate, NSWindowDe
             backing: .buffered,
             defer: false
         )
-        window.title = isDevelopment ? "Yosh Pay Dev" : "Yosh"
+        window.title = "Yosh"
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
         window.titlebarSeparatorStyle = .none
