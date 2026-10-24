@@ -16,11 +16,11 @@ it('keeps package, native build settings and resolved bundle fields on the same 
   const plist = readFileSync(new URL('../../apps/macos/Yosh/YoshApp/Info.plist', import.meta.url), 'utf8');
   expect(packageLock.version).toBe(packageMetadata.version);
   expect(packageLock.packages[''].version).toBe(packageMetadata.version);
-  const settings = (key: string) => [...project.matchAll(new RegExp(`\\b${key} = "?([^";]+)"?;`, 'g'))].map(match => match[1]);
+  const settings = (key: string) => [...project.matchAll(new RegExp(`\\b${key} = "?([^";]*)"?;`, 'g'))].map(match => match[1]);
   expect(settings('MARKETING_VERSION')).toEqual([packageMetadata.version, packageMetadata.version]);
   expect(settings('CURRENT_PROJECT_VERSION')).toEqual([packageMetadata.yoshRelease.buildNumber, packageMetadata.yoshRelease.buildNumber]);
   expect(settings('YOSH_RELEASE_CANDIDATE')).toEqual([packageMetadata.yoshRelease.candidate, packageMetadata.yoshRelease.candidate]);
-  expect(packageMetadata.yoshRelease.candidate).toMatch(new RegExp(`^${packageMetadata.version.replaceAll('.', '\\.')}-rc\\.[1-9]\\d*$`));
+  expect(packageMetadata.yoshRelease.candidate).toBe('');
   expect(packageMetadata.yoshRelease.buildNumber).toMatch(/^[1-9]\d*$/);
   expect(plist).toContain('<key>CFBundleShortVersionString</key><string>$(MARKETING_VERSION)</string>');
   expect(plist).toContain('<key>CFBundleVersion</key><string>$(CURRENT_PROJECT_VERSION)</string>');

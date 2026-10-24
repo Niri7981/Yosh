@@ -21,7 +21,7 @@ class CandidateIsolationTests(unittest.TestCase):
             self.assertIn(value, native)
         for port in identity['ports'].values():
             self.assertIn(str(port), native)
-        self.assertEqual(builder.check_version(), {
+        self.assertEqual(json.loads(builder.LOCK.read_text())['product'], {
             'version': '0.1.1', 'releaseCandidate': '0.1.1-rc.5', 'buildNumber': '6'})
 
     def test_predecessor_comparison_rejects_business_and_pay_changes(self):

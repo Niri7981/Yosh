@@ -4,6 +4,13 @@ set -euo pipefail
 fail() { printf '%s\n' "$*" >&2; exit 1; }
 [[ "$(uname -s)" == Darwin ]] || fail "This installer requires macOS."
 repository_root="$(cd "$(dirname "$0")/.." && pwd -P)"
+if [[ "${1-}" == --stable-app ]]; then
+  [[ $# == 2 && "$2" == */Yosh.app ]] || fail 'Usage: install-macos-app.sh --stable-app /absolute/staging/Yosh.app'
+  exec python3 -B "$repository_root/scripts/build-stable-release.py" install --output "$(dirname "$2")"
+fi
+[[ $# == 0 ]] || fail 'Unknown installer arguments.'
+# The no-argument path below is retained for the historical v0 Beta workflow.
+# Current Pay v1 releases use --stable-app after staging acceptance.
 applications_directory="$HOME/Applications"
 installed_app="$applications_directory/Yosh.app"
 legacy_app="$applications_directory/2049.app"

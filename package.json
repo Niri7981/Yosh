@@ -57,7 +57,7 @@
     "vitest": "^4.1.11"
   },
   "yoshRelease": {
-    "candidate": "0.1.1-rc.5",
-    "buildNumber": "6"
+    "candidate": "",
+    "buildNumber": "7"
   }
 }
