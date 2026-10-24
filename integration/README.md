@@ -1,7 +1,11 @@
 # Integration records
 
-For the current candidate, start with [Yosh Pay v1 / v0.1.1-rc.5 final source](../docs/releases/v0.1.1-rc.5-final-source.md)
-and the RC build entry point `scripts/build-release-candidate.py`. Its source
+For the current stable release, start with [Yosh v0.1.1](../docs/releases/v0.1.1.md)
+and `scripts/build-stable-release.py`. Yosh Pay v1 is complete; final rc.5 is
+promoted as App v0.1.1 build 7 without payment-core or persisted-identity changes.
+
+The historical [Yosh Pay v1 / v0.1.1-rc.5 final source](../docs/releases/v0.1.1-rc.5-final-source.md)
+and RC build entry `scripts/build-release-candidate.py` remain unchanged. Its source
 final file inventory identifies the reproducible source independently of Git
 staging and the archival commit. Build Provenance Manifests identify produced
 artifacts. Yosh Pay v0 is the first integration merged in PR #2; Yosh Pay v1

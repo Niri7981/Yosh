@@ -6,7 +6,11 @@
 
 Yosh is a native macOS app and an economic authority layer between agents and payment infrastructure. Agents request purchases; users set permissions and budgets; a local backend authorizes and signs supported x402 payments.
 
-**[Download Yosh for macOS](https://2049-web.vercel.app/)** · Apple Silicon · macOS 15+ · Beta
+**Current release: [Yosh v0.1.1 stable](docs/releases/v0.1.1.md)** — Yosh Pay v1,
+promoted from validated final rc.5 source merged in PR #3. App version is 0.1.1,
+build 7. Local stable promotion does not publish a new website download.
+
+**[Historical Beta download](https://2049-web.vercel.app/)** · Apple Silicon · macOS 15+
 
 ## The problem
 
@@ -19,10 +23,10 @@ Yosh separates the ability to request a purchase from the authority to spend. A 
 1. **Discover.** The Agent finds an x402 API and inspects its unpaid challenge with `discover_x402_resource`.
 2. **Register.** It calls `register_x402_resource` with Yosh's validated discovery record. The API appears in the app for review; registration grants no spending permission.
 3. **Authorize.** The user creates a **Spend Grant** for that Agent and Resource, setting a total amount, per-transaction limit, and expiration. Sample inputs provide quotes for dynamic resources.
-4. **Request.** The Agent calls `request_purchase` with the Resource, permitted inputs, purpose, and stable request ID.
+4. **Request.** In Yosh Pay v1, the Agent calls Pay MCP `curl`; Yosh's SpendingAuthority and ControlledExecution enforce the existing authorization and purchase lifecycle.
 5. **Check.** Yosh validates the fresh quote, checks permissions and budget, atomically reserves the amount, and rechecks authorization before signing.
 6. **Pay.** The official x402 SDK handles the supported payment flow, using Yosh's local signer and the merchant's settlement infrastructure.
-7. **Deliver.** The Agent receives the result; stored content is also available through `get_purchase_delivery`.
+7. **Deliver.** Pay returns the bounded result to the Agent; Yosh persists the purchase and delivery evidence.
 8. **Record.** Yosh records payment and delivery separately: payment confirmation alone does not prove delivery.
 
 JSON POST discovery requires separate native user confirmation of the exact outbound request before it is sent. An Agent cannot supply that approval itself.
@@ -46,7 +50,11 @@ Together, Pay handles its MCP request flow and x402 offer selection, while Yosh 
 - **Durable tracking:** idempotent purchases, separate payment/delivery records, and recovery of the original purchase.
 - **Native visibility:** API review, permission management, and purchase outcomes.
 
-## Download / Installation
+## Historical Beta download / Installation
+
+The following public download describes v0.1.0 Beta. For the current stable
+App identity, state continuity and canonical build/install entry, use the
+[v0.1.1 stable release record](docs/releases/v0.1.1.md).
 
 **[Download Yosh](https://2049-web.vercel.app/)** from the official website. The current **v0.1.0 Beta** is for **Apple Silicon Macs (M1 or later), macOS 15 or later**; Intel Macs are not supported by this download. You do not need Node.js, Homebrew, Xcode, or the source code to run it.
 
@@ -134,14 +142,14 @@ Policies and records persist locally across restarts. The installed bundle runs 
 
 Requirements: **macOS 15 or later**, **Node.js 24.5 or later**, npm, and Xcode with macOS build tools.
 
-From the repository root:
+For the current stable release, follow the pinned Pay source recovery and
+isolated staging build in [Yosh v0.1.1](docs/releases/v0.1.1.md). The active entry is:
 
 ```sh
-npm ci
-./scripts/install-macos-app.sh
+python3 -B scripts/build-stable-release.py check --pay build.noindex/stable-inputs/pay
 ```
 
-The script installs `~/Applications/Yosh.app` with its backend, Node runtime, and MCP bridge. Launch it from Finder or Spotlight. Before rebuilding, quit Yosh normally and wait for its backend to stop.
+Build and accept the staged `Yosh.app` before using `scripts/install-macos-app.sh --stable-app /absolute/staging/Yosh.app`. The installed App contains its backend, Node runtime and Pay MCP. Before switching Apps, quit Yosh normally and wait for its backend to stop. The installer's no-argument path and the Beta CI/DMG workflow are historical v0 tooling and do not reproduce Pay v1.
 
 Local builds use ad hoc signing by default. macOS may request Keychain access confirmation; complete it through the system prompt. Building from source does not add wallet onboarding. See the [runtime guide](docs/architecture/product-startup-runtime.md), [payment configuration](docs/architecture/payment-product-configuration.md), [MCP registration guide](docs/architecture/resources/agent-mcp-registration.md), and [macOS release guide](docs/releasing-macos.md) for development and packaging details.
 
