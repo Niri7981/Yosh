@@ -1,3 +1,4 @@
+import { payMainnetConsentDecision } from '../../src/modules/payment/pay-authorization-outcome';
 import { once } from 'node:events';
 import { spawn } from 'node:child_process';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
@@ -60,7 +61,7 @@ async function requestBody(request: IncomingMessage) {
  * is local; unexpected external endpoints and RPC submissions fail the test. */
 export async function productionPayFixture(options: { hooks?: ExecutionOptions['hooks'];
   signerBarrier?: ReturnType<typeof deferred>; preflightBarrier?: ReturnType<typeof deferred>; grant?: boolean; payMcp?: boolean; quoteAmount?: string;
-  routeLevelQuote?: boolean; quoteExtensions?: PaymentRequired['extensions'] } = {}) {
+  routeLevelQuote?: boolean; quoteExtensions?: PaymentRequired['extensions']; quoteAlternatives?: 'price' | 'metadata' | 'duplicate' } = {}) {
   const directory = mkdtempSync(join(tmpdir(), 'yosh-pay-production-'));
   chmodSync(directory, 0o700);
   const buyer = Keypair.generate();
@@ -92,7 +93,7 @@ export async function productionPayFixture(options: { hooks?: ExecutionOptions['
   let execution: ReturnType<typeof createIsolatedPayExecution> | undefined;
   let origin = '';
   let authority: ReturnType<typeof createPayAuthorityAdapter> | undefined;
-  let authorityFailure: 'deny' | 'timeout' | 'unavailable' | undefined;
+  let authorityFailure: 'deny' | 'timeout' | 'unavailable' | 'consent' | undefined;
   let loseControllerAck = false;
   let mutateUnsigned = false;
   let failPayInterpretation = false;
@@ -153,6 +154,7 @@ export async function productionPayFixture(options: { hooks?: ExecutionOptions['
           result = stored ? { transaction: [stored.wire, 'base64'], meta: { err: null } } : null;
           break;
         }
+        case 'isBlockhashValid': result = { context: { slot: 1 }, value: true }; break;
         default: throw new Error(`UNSUPPORTED_FAKE_RPC_METHOD:${input.method}`);
       }
       response.writeHead(200, { 'content-type': 'application/json' });
@@ -189,10 +191,11 @@ export async function productionPayFixture(options: { hooks?: ExecutionOptions['
             lastFacts = raw;
             if (authorityFailure === 'unavailable') throw new Error('TEST_AUTHORITY_UNAVAILABLE');
             if (authorityFailure === 'timeout') { outgoing.setTimeout(200, () => outgoing.destroy()); return; }
-            result = authorityFailure === 'deny' ? { allow: false } : await authority.authorize(raw, principal);
+            result = authorityFailure === 'deny' ? { allow: false } : authorityFailure === 'consent'
+              ? payMainnetConsentDecision(() => { throw new Error('PAY_MAINNET_ACCEPTANCE_REQUIRED'); }) : authority.authorizeSpend(raw, principal);
           } else {
             const input = z.object({ facts: z.unknown(), unsigned: z.unknown().optional() }).strict().parse(raw);
-            if (incoming.url === '/pay/plan') result = authority.plan(input.facts, principal);
+            if (incoming.url === '/pay/plan') { lastFacts = input.facts; result = await authority.prepareControlled(input.facts, principal); }
             else if (incoming.url === '/pay/execute') {
               lastUnsigned = input.unsigned;
               let prepared = input.unsigned;
@@ -234,6 +237,11 @@ export async function productionPayFixture(options: { hooks?: ExecutionOptions['
             payTo: merchant.publicKey.toBase58(), maxTimeoutSeconds: 300,
             extra: { decimals: 6, feePayer: sponsor.publicKey.toBase58(), memo: `yosh-production-pay-isolated-${unpaidRequests}` } }],
           ...(options.quoteExtensions ? { extensions: options.quoteExtensions } : {}) };
+        if (options.quoteAlternatives) {
+          const quote = challenge.accepts[0];
+          challenge.accepts.push(options.quoteAlternatives === 'price' ? { ...quote, amount: '400000' }
+            : options.quoteAlternatives === 'metadata' ? { ...quote, extra: { ...quote.extra, memo: 'alternative-memo' } } : quote);
+        }
         outgoing.writeHead(402, { 'payment-required': encodePaymentRequiredHeader(challenge), 'content-type': 'application/json' });
         outgoing.end(JSON.stringify({ error: 'PAYMENT_REQUIRED' })); return;
       }
@@ -313,7 +321,7 @@ export async function productionPayFixture(options: { hooks?: ExecutionOptions['
       get lastFacts() { return lastFacts; },
       get lastUnsigned() { return lastUnsigned; },
       get bridgeCalls() { return bridgeCalls; },
-      authorityFailure(mode: 'deny' | 'timeout' | 'unavailable') { authorityFailure = mode; },
+      authorityFailure(mode: 'deny' | 'timeout' | 'unavailable' | 'consent' | undefined) { authorityFailure = mode; },
       loseControllerAckOnce() { loseControllerAck = true; },
       mutateUnsigned() { mutateUnsigned = true; },
       failPayInterpretationOnce() { failPayInterpretation = true; },
@@ -376,7 +384,7 @@ export async function productionPayFixture(options: { hooks?: ExecutionOptions['
         await app.initializeWallet();
         return app;
       },
-      async crashAfterSubmissionMarker(requestId: string, stage: 'before'|'after'|'http' = 'after') {
+      async crashAfterSubmissionMarker(requestId: string, stage: 'before'|'after'|'http'|'authorization' = 'after') {
         if (app) { await app.prepareQuit(); app.close(); app = undefined; }
         execution?.close(); execution = undefined;
         globals.__yosh = {};
@@ -385,7 +393,7 @@ export async function productionPayFixture(options: { hooks?: ExecutionOptions['
         const child = spawn(process.execPath, ['--import', resolve('node_modules/tsx/dist/loader.mjs'),
           resolve('tests/helpers/pay-production-crash-worker.ts')], { cwd: process.cwd(),
           env: { ...environment, PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: process.env.TMPDIR,
-            NODE_ENV: 'test', VITEST: '1', ...(stage === 'before' ? {TEST_CRASH_BEFORE_MARKER:'1'} : {}), ...(stage === 'http' ? {TEST_CRASH_AFTER_HTTP:'1'} : {}), ...(options.payMcp ? {TEST_PAY_MCP_FIRST: '1'} : {}), TEST_RPC_URL: rpcUrl, TEST_MERCHANT_ORIGIN: origin,
+            NODE_ENV: 'test', VITEST: '1', ...(stage === 'before' ? {TEST_CRASH_BEFORE_MARKER:'1'} : {}), ...(stage === 'http' ? {TEST_CRASH_AFTER_HTTP:'1'} : {}), ...(stage === 'authorization' ? {TEST_CRASH_AFTER_AUTHORIZATION:'1'} : {}), ...(options.payMcp ? {TEST_PAY_MCP_FIRST: '1'} : {}), TEST_RPC_URL: rpcUrl, TEST_MERCHANT_ORIGIN: origin,
             TEST_PAY_ENGINE_PATH: ENGINE_PATH, TEST_BUYER_KEYPAIR: signerFile, TEST_REQUEST_ID: requestId },
           stdio: ['ignore', 'ignore', 'pipe'] });
         const timeout = setTimeout(() => child.kill(), 10_000);

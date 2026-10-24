@@ -1,3 +1,4 @@
+import { PAY_DEVELOPMENT_PROFILE } from './profile';
 import { lstatSync, readFileSync, realpathSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { z } from 'zod';
@@ -14,7 +15,7 @@ export function isPayDevelopmentDirectory(directory: string) {
   if (isMainnetDevelopment(directory)) return false;
   const info = lstatSync(directory);
   const canonical = realpathSync(directory);
-  if (canonical !== directory || basename(canonical) !== 'Yosh Pay Dev' || !info.isDirectory() || info.isSymbolicLink()
+  if (canonical !== directory || basename(canonical) !== PAY_DEVELOPMENT_PROFILE.directoryName || !info.isDirectory() || info.isSymbolicLink()
     || info.uid !== process.getuid?.() || (info.mode & 0o777) !== 0o700 || process.env.YOSH_DATA_DIR !== directory)
     throw new Error('PAY_DEVELOPMENT_DIRECTORY_REQUIRED');
   const marker = join(directory, 'pay-development.json');

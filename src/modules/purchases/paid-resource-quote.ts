@@ -11,13 +11,13 @@ export function displayAmount(amount: string) {
 }
 
 /** Always reads a fresh, server-issued HTTP 402; the descriptor contains no price. */
-export async function fetchPaidResourceQuote(id: PaidResourceId, origin: string, config: PaymentConfig, fetcher: typeof fetch = fetch) {
+export async function fetchPaidResourceQuote(id: PaidResourceId, origin: string, config: PaymentConfig, fetcher: typeof fetch = fetch, selectedQuote?: unknown) {
   if (config.cluster !== 'devnet' || config.network !== DEVNET_NETWORK || config.mint !== DEVNET_USDC_MINT) throw new Error('UNSUPPORTED_PURCHASE_NETWORK');
   const resource = paidResource(id);
   const endpoint = paymentEndpointForResource(origin, id);
   return fetchResourceChallenge({ resourceId: resource.id, providerId: resource.providerId,
     request: { url: endpoint, method: 'GET', headers: {}, access: 'test_loopback' },
-    network: config.network, mint: config.mint, decimals: config.asset.decimals, recipient: config.merchant }, config, fetcher);
+    network: config.network, mint: config.mint, decimals: config.asset.decimals, recipient: config.merchant }, config, fetcher, selectedQuote);
 }
 
 export async function readPaidResourceQuotes(origin: string, config: PaymentConfig = loadPaymentConfig(), fetcher: typeof fetch = fetch) {

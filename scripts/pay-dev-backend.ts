@@ -1,13 +1,19 @@
+import { PAY_DEVELOPMENT_PROFILE } from '../src/modules/pay-dev/profile';
 import { resolve } from 'node:path';
 import { startPayDevelopmentBackend } from '../src/modules/pay-dev/runtime';
 import { startMainnetDevelopmentBackend } from '../src/modules/pay-dev/mainnet-runtime';
+import { assertLoopbackPortsAvailable } from '../src/modules/pay-dev/port-availability';
 
 async function main() {
   if (!process.env.YOSH_DATA_DIR || !process.env.YOSH_PACKAGED_RUNTIME_DIR) throw new Error('PAY_DEVELOPMENT_LAUNCH_REQUIRED');
+  if (PAY_DEVELOPMENT_PROFILE.bundleIdentifier === 'com.yosh.pay-development.v011rc5') {
+    await assertLoopbackPortsAvailable([PAY_DEVELOPMENT_PROFILE.backendPort,
+      PAY_DEVELOPMENT_PROFILE.merchantPort, PAY_DEVELOPMENT_PROFILE.rpcPort]);
+  }
   const backend = process.env.YOSH_PAY_DEV_ENV === 'mainnet'
-    ? await startMainnetDevelopmentBackend({ directory: resolve(process.env.YOSH_DATA_DIR), port: 13049 })
+    ? await startMainnetDevelopmentBackend({ directory: resolve(process.env.YOSH_DATA_DIR), port: PAY_DEVELOPMENT_PROFILE.backendPort })
     : await startPayDevelopmentBackend({ directory: resolve(process.env.YOSH_DATA_DIR),
-      runtimeDirectory: resolve(process.env.YOSH_PACKAGED_RUNTIME_DIR), port: 13049 });
+      runtimeDirectory: resolve(process.env.YOSH_PACKAGED_RUNTIME_DIR), port: PAY_DEVELOPMENT_PROFILE.backendPort });
   let quitting = false;
   const quit = async () => {
     if (quitting) return; quitting = true;

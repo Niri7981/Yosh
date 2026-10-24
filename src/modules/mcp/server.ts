@@ -1,6 +1,7 @@
+import { YOSH_VERSION } from '../app/product-version';
 import { AgentResourceRegistrationInput } from '../resources/agent-resource-registration';
 import { DiscoveryInput } from '../resources/mainnet-resource-discovery';
-import { ResourceRequestInputSchema } from '../resources/http-resource';
+import { MAX_SERIALIZED_RESOURCE_DELIVERY_BYTES, ResourceRequestInputSchema } from '../resources/http-resource';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 
@@ -35,7 +36,7 @@ export function createAgentServer(read: AgentRead, requestPurchase: AgentPurchas
   delivery: AgentDelivery = async () => { throw new Error('DELIVERY_NOT_AVAILABLE'); },
   quoteResource: AgentQuote = async () => { throw new Error('RESOURCE_QUOTE_UNAVAILABLE'); },
   registerResource: AgentDiscover = async () => { throw new Error('RESOURCE_REGISTRATION_UNAVAILABLE'); }) {
-  const server = new McpServer({ name: 'Yosh', version: '0.1.0' });
+  const server = new McpServer({ name: 'Yosh', version: YOSH_VERSION });
   const annotations = { readOnlyHint: true, destructiveHint: false, openWorldHint: false };
   for (const [name, operation, description] of [
     ['get_spending_status', 'status', 'Read the Yosh wallet address and shared spending budget. Does not pay.'],
@@ -69,7 +70,7 @@ export function createAgentServer(read: AgentRead, requestPurchase: AgentPurchas
   });
   server.registerTool('get_purchase_delivery', {
     description: 'Read one bounded chunk of a completed purchase delivery owned by this Agent. Use nextOffset until null; decode base64 chunks in order as UTF-8 JSON.',
-    inputSchema: z.object({ purchaseId: z.string().regex(/^[a-zA-Z0-9_-]{1,80}$/), offset: z.number().int().min(0).max(1_048_576).default(0) }).strict(),
+    inputSchema: z.object({ purchaseId: z.string().regex(/^[a-zA-Z0-9_-]{1,80}$/), offset: z.number().int().min(0).max(MAX_SERIALIZED_RESOURCE_DELIVERY_BYTES).default(0) }).strict(),
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
   }, async input => {
     try { return { content: [{ type: 'text' as const, text: JSON.stringify(await delivery(input.purchaseId, input.offset)) }] }; }

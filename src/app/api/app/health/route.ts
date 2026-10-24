@@ -1,3 +1,4 @@
+import { YOSH_PRODUCT_RELEASE } from '@/modules/app/product-version';
 import { realpathSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { managementRoute } from '@/modules/app/management-auth';
@@ -20,11 +21,11 @@ export async function GET(request: Request) {
           ? 'CORE_CONFIGURATION_INVALID' : 'CORE_INITIALIZATION_FAILED';
       // Whitelisted operational labels only: never the original exception or config.
       console.error(`YOSH_STARTUP_${code}`);
-      return Response.json({ ready: false, coreReady: false, service: 'Yosh', pid: process.pid,
+      return Response.json({ ready: false, coreReady: false, service: 'Yosh', product: YOSH_PRODUCT_RELEASE, pid: process.pid,
         dataDirectory: directory, wallet: 'walletChecking', recovery: 'recoveryPending', code }, { status: 503 });
     }
     void backend.start(new URL(request.url).origin).catch(() => undefined);
-    return Response.json({ ready: true, service: 'Yosh', pid: process.pid,
+    return Response.json({ ready: true, service: 'Yosh', product: YOSH_PRODUCT_RELEASE, pid: process.pid,
       dataDirectory: realpathSync(backend.directory), ...backend.healthStatus() },
       { headers: { 'cache-control': 'no-store' } });
   });

@@ -119,9 +119,9 @@ struct DailyAuthorityContent: View {
                             Text(wallet.network == "Solana Mainnet" ? "Mainnet wallet unavailable" : "Wallet unavailable")
                                 .font(.system(size: 13)).foregroundStyle(secondaryInk).padding(.top, 8)
                         } else {
+                            // Selectable Text supplies its native accessibility label; overriding it re-enters the platform label bridge.
                             Text(wallet.address).font(.system(size: 11)).textSelection(.enabled)
                                 .fixedSize(horizontal: false, vertical: true).padding(.top, 8)
-                                .accessibilityLabel("Wallet address, \(wallet.address)")
                         }
                     }
                     if let balanceDisplay {

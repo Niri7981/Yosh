@@ -7,6 +7,7 @@ import { acquireDataDirectoryOwnership } from '../app/data-directory-owner';
 import type { PurchaseRecord } from './purchase-contract';
 import { hash } from './spending-policy';
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
+export const EXTERNAL_EXECUTION_PERMIT_TTL_MS = 120_000;
 export const ExternalExecutionFactsSchema = z.object({ callerId: z.string().uuid(), operationId: z.string().min(1).max(128),
     attemptId: z.string().uuid(), factsHash: digest, requestHash: digest, quoteHash: digest }).strict();
 // Match Pay's canonical wire request, not the purchase-use-case requestHash.
@@ -21,6 +22,8 @@ export type ExternalExecutionPermit = ExternalExecutionFacts & {
     purchaseId: string;
     ownerId: string;
     epoch: number;
+    expiresAt: number;
+    leaseId?: string;
 };
 /** Execution metadata only; all monetary state remains in purchases/original_payments.
  * Missing rows mean historical/unattributed, never an inferred JS or Pay origin.
@@ -31,7 +34,7 @@ export class ExecutionSafety {
     private ownerId = randomUUID();
     private live = true;
     private enabled = false;
-    constructor(private db: DatabaseSync, private path: string) {
+    constructor(private db: DatabaseSync, private path: string, private now: () => number = Date.now) {
         db.function('yosh_execution_writer', () => this.enabled && this.live ? this.ownerId : '');
         db.function('yosh_execution_lease', () => this.live && (this.lease || this.path === ':memory:') ? 1 : 0);
         if (db.prepare("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='execution_owner'").get())
@@ -49,7 +52,7 @@ export class ExecutionSafety {
             return;
         this.open(true, now);
     }
-    private open(migrate: boolean, now = Date.now()) {
+    private open(migrate: boolean, now = this.now()) {
         this.lock();
         try {
             this.db.exec('BEGIN IMMEDIATE');
@@ -60,12 +63,31 @@ export class ExecutionSafety {
         CREATE TABLE IF NOT EXISTS purchase_execution_provenance (
           purchase_id TEXT PRIMARY KEY REFERENCES purchases(id), origin TEXT NOT NULL CHECK(origin IN ('external_pay','js_x402')),
           caller_id TEXT,operation_id TEXT,attempt_id TEXT UNIQUE,facts_hash TEXT,request_hash TEXT NOT NULL,quote_hash TEXT NOT NULL,
-          record_binding TEXT NOT NULL,owner_id TEXT NOT NULL,epoch INTEGER NOT NULL,
+          record_binding TEXT NOT NULL,owner_id TEXT NOT NULL,epoch INTEGER NOT NULL,permit_expires_at INTEGER NOT NULL,
           phase TEXT NOT NULL CHECK(phase IN ('AUTHORIZED','CLAIMED','SIGNED','SUBMISSION_ATTEMPTED')),
           UNIQUE(caller_id,operation_id),
           CHECK(origin='js_x402' OR (caller_id IS NOT NULL AND operation_id IS NOT NULL AND attempt_id IS NOT NULL AND facts_hash IS NOT NULL)));
+        `);
+            // An execution lease is renewable; original authorization provenance is immutable.
+            // Only new Mainnet reservations opt in. Historical terminal records stay terminal.
+            this.db.exec(`CREATE TABLE IF NOT EXISTS external_execution_leases (
+              purchase_id TEXT PRIMARY KEY REFERENCES purchase_execution_provenance(purchase_id),
+              lease_id TEXT NOT NULL, owner_id TEXT NOT NULL, epoch INTEGER NOT NULL, expires_at INTEGER NOT NULL);`);
+            // The public Pay SpendRequest has no envelope until controller plan.
+            // Persist its Allow fence before replying, independently of reserve.
+            this.db.exec(`CREATE TABLE IF NOT EXISTS external_authority_claims (
+              caller_id TEXT NOT NULL, operation_id TEXT NOT NULL, attempt_id TEXT NOT NULL UNIQUE,
+              request_hash TEXT NOT NULL, quote_hash TEXT NOT NULL,
+              PRIMARY KEY(caller_id, operation_id));`);
+            const provenanceColumns = new Set(this.db.prepare('PRAGMA table_info(purchase_execution_provenance)').all().map(row => String(row.name)));
+            const needsPermitLeaseMigration = !provenanceColumns.has('permit_expires_at');
+            if (needsPermitLeaseMigration) {
+                this.db.exec('ALTER TABLE purchase_execution_provenance ADD COLUMN permit_expires_at INTEGER NOT NULL DEFAULT 0');
+                this.db.exec('DROP TRIGGER IF EXISTS execution_provenance_immutable');
+            }
+            this.db.exec(`
         CREATE TRIGGER IF NOT EXISTS execution_provenance_immutable BEFORE UPDATE OF purchase_id,origin,caller_id,operation_id,attempt_id,
-          facts_hash,request_hash,quote_hash,record_binding,owner_id,epoch ON purchase_execution_provenance
+          facts_hash,request_hash,quote_hash,record_binding,owner_id,epoch,permit_expires_at ON purchase_execution_provenance
           BEGIN SELECT RAISE(ABORT,'execution provenance is immutable'); END;`);
             const prior = this.db.prepare('SELECT format,epoch FROM execution_owner WHERE id=1').get();
             if (!migrate && !prior)
@@ -93,6 +115,10 @@ export class ExecutionSafety {
             }
             if (migrate)
                 this.db.prepare("INSERT OR IGNORE INTO ledger_schema_migrations VALUES ('018_execution_safety',?)").run(now);
+            if (migrate || needsPermitLeaseMigration)
+                this.db.prepare("INSERT OR IGNORE INTO ledger_schema_migrations VALUES ('019_external_permit_lease',?)").run(now);
+            this.db.prepare("INSERT OR IGNORE INTO ledger_schema_migrations VALUES ('020_external_authority_claim',?)").run(now);
+            this.db.prepare("INSERT OR IGNORE INTO ledger_schema_migrations VALUES ('021_external_execution_recovery',?)").run(now);
             this.db.exec('COMMIT');
         }
         catch (error) {
@@ -102,6 +128,24 @@ export class ExecutionSafety {
             this.lease = undefined;
             throw error;
         }
+    }
+    hasExternalAuthorityClaim(callerId: string, operationId: string) {
+        this.snapshot();
+        return Boolean(this.db.prepare('SELECT 1 FROM external_authority_claims WHERE caller_id=? AND operation_id=?').get(callerId, operationId));
+    }
+    claimExternalAuthority(facts: ExternalExecutionFacts) {
+        this.snapshot();
+        const parsed = ExternalExecutionFactsSchema.parse(facts);
+        const existing = this.db.prepare('SELECT request_hash,quote_hash FROM external_authority_claims WHERE caller_id=? AND operation_id=?')
+            .get(parsed.callerId, parsed.operationId);
+        if (existing) {
+            if (existing.request_hash !== parsed.requestHash || existing.quote_hash !== parsed.quoteHash)
+                throw new Error('PAY_OPERATION_CONFLICT');
+            throw new Error('PAY_ORIGINAL_OUTCOME_UNRESOLVED');
+        }
+        // Single SQLite statement and primary key arbitrate concurrent owners.
+        this.db.prepare('INSERT INTO external_authority_claims VALUES(?,?,?,?,?)')
+            .run(parsed.callerId, parsed.operationId, parsed.attemptId, parsed.requestHash, parsed.quoteHash);
     }
     invalidate() {
         if (!this.enabled)
@@ -123,7 +167,7 @@ export class ExecutionSafety {
             throw new Error('EXECUTION_OWNER_FENCED');
         return { ownerId: this.ownerId, epoch };
     }
-    reserve(record: PurchaseRecord, external?: ExternalExecutionFacts) {
+    reserve(record: PurchaseRecord, external?: ExternalExecutionFacts, now = this.now()) {
         if (!this.enabled) {
             if (external)
                 throw new Error('EXECUTION_SAFETY_REQUIRED');
@@ -136,13 +180,36 @@ export class ExecutionSafety {
                 || external.requestHash !== externalRequestHash(record))
                 throw new Error('EXTERNAL_PROVENANCE_MISMATCH');
         }
-        this.db.prepare('INSERT INTO purchase_execution_provenance VALUES (?,?,?,?,?,?,?,?,?,?,?,?)')
-            .run(record.intent.id, external ? 'external_pay' : 'js_x402', external?.callerId ?? null, external?.operationId ?? null, external?.attemptId ?? null, external?.factsHash ?? null, external?.requestHash ?? hash(record.intent.httpRequest ?? null), hash(record.quote), record.intent.executionBinding, current.ownerId, current.epoch, 'AUTHORIZED');
+        const permitExpiresAt = external ? Math.min(record.intent.expiresAt, now + EXTERNAL_EXECUTION_PERMIT_TTL_MS) : record.intent.expiresAt;
+        this.db.prepare(`INSERT INTO purchase_execution_provenance
+          (purchase_id,origin,caller_id,operation_id,attempt_id,facts_hash,request_hash,quote_hash,record_binding,owner_id,epoch,phase,permit_expires_at)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+            .run(record.intent.id, external ? 'external_pay' : 'js_x402', external?.callerId ?? null, external?.operationId ?? null,
+                external?.attemptId ?? null, external?.factsHash ?? null, external?.requestHash ?? hash(record.intent.httpRequest ?? null),
+                hash(record.quote), record.intent.executionBinding, current.ownerId, current.epoch, 'AUTHORIZED', permitExpiresAt);
+        if (external && record.executionMode === 'live_mainnet')
+            this.db.prepare('INSERT INTO external_execution_leases VALUES(?,?,?,?,?)')
+                .run(record.intent.id, randomUUID(), current.ownerId, current.epoch, permitExpiresAt);
     }
     provenance(purchaseId: string) {
         if (!this.enabled)
             return undefined;
         return this.db.prepare('SELECT * FROM purchase_execution_provenance WHERE purchase_id=?').get(purchaseId);
+    }
+    recoveryEnabled(purchaseId: string) {
+        return this.enabled && Boolean(this.db.prepare('SELECT 1 FROM external_execution_leases WHERE purchase_id=?').get(purchaseId));
+    }
+    renewPrepaymentLease(record: PurchaseRecord, now: number) {
+        const row = this.provenance(record.intent.id);
+        if (!this.recoveryEnabled(record.intent.id) || row?.origin !== 'external_pay' || row.phase !== 'AUTHORIZED'
+            || record.status !== 'APPROVED' || record.paymentPayloadPresent || record.transaction || record.paymentEvidence
+            || record.intent.expiresAt <= now || row.record_binding !== record.intent.executionBinding
+            || row.quote_hash !== hash(record.quote) || row.request_hash !== externalRequestHash(record))
+            throw new Error('PAY_PREPAYMENT_RECOVERY_UNAVAILABLE');
+        const current = this.snapshot();
+        this.db.prepare('UPDATE external_execution_leases SET lease_id=?,owner_id=?,epoch=?,expires_at=? WHERE purchase_id=?')
+            .run(randomUUID(), current.ownerId, current.epoch, Math.min(record.intent.expiresAt, now + EXTERNAL_EXECUTION_PERMIT_TTL_MS), record.intent.id);
+        return this.permit(record);
     }
     permit(record: PurchaseRecord): ExternalExecutionPermit {
         const row = this.provenance(record.intent.id);
@@ -150,9 +217,10 @@ export class ExecutionSafety {
             throw new Error('EXTERNAL_PROVENANCE_REQUIRED');
         const facts = ExternalExecutionFactsSchema.parse({ callerId: row.caller_id, operationId: row.operation_id, attemptId: row.attempt_id,
             factsHash: row.facts_hash, requestHash: row.request_hash, quoteHash: row.quote_hash });
-        return { ...facts, purchaseId: record.intent.id, ownerId: String(row.owner_id), epoch: Number(row.epoch) };
+        const lease = this.db.prepare('SELECT * FROM external_execution_leases WHERE purchase_id=?').get(record.intent.id);
+        return { ...facts, ...(lease ? { leaseId: String(lease.lease_id) } : {}), purchaseId: record.intent.id, ownerId: String(lease?.owner_id ?? row.owner_id), epoch: Number(lease?.epoch ?? row.epoch), expiresAt: Number(lease?.expires_at ?? row.permit_expires_at) };
     }
-    assert(record: PurchaseRecord, permit?: ExternalExecutionPermit) {
+    assert(record: PurchaseRecord, permit?: ExternalExecutionPermit, now = this.now()) {
         if (this.enabled)
             this.snapshot();
         const row = this.provenance(record.intent.id);
@@ -167,7 +235,8 @@ export class ExecutionSafety {
             return;
         }
         const current = this.snapshot();
-        if (!permit || hash(this.permit(record)) !== hash(permit) || permit.ownerId !== current.ownerId || permit.epoch !== current.epoch
+        if (!permit || permit.expiresAt <= now || this.permit(record).expiresAt <= now
+            || hash(this.permit(record)) !== hash(permit) || permit.ownerId !== current.ownerId || permit.epoch !== current.epoch
             || row.record_binding !== record.intent.executionBinding || row.quote_hash !== hash(record.quote)
             || row.request_hash !== externalRequestHash(record))
             throw new Error('EXTERNAL_EXECUTION_FENCED');

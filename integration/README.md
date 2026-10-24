@@ -1,7 +1,15 @@
 # Integration records
 
+For the current candidate, start with [Yosh Pay v1 / v0.1.1-rc.5 final source](../docs/releases/v0.1.1-rc.5-final-source.md)
+and the RC build entry point `scripts/build-release-candidate.py`. Its source
+final file inventory identifies the reproducible source independently of Git
+staging and the archival commit. Build Provenance Manifests identify produced
+artifacts. Yosh Pay v0 is the first integration merged in PR #2; Yosh Pay v1
+is the final Mainnet hardening archived here. App/package version remains 0.1.1.
+Historical build scripts are not final RC provenance.
+
 Start with the [2026-10-21 source archive](archive-20261021/README.md) for the
-funded Mainnet source mapping and current archive boundary.
+historical funded Mainnet source mapping and that stage's archive boundary.
 
 The remaining subdirectories preserve dated investigation, isolated validation
 and Dev acceptance stages. Their historical BLOCKED status, installation claims,

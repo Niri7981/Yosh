@@ -40,7 +40,7 @@ export function assertProductionPaymentGate(ledger: PurchaseLedger, record: Purc
   assertGrantPostScope(declared, grant);
   if (declared.request.method === 'POST' && grant?.id !== intent.authority.grantId) throw new Error('SPEND_GRANT_INACTIVE');
   const instance = { ...declared, request: intent.httpRequest };
-  const { quote } = validateResourceChallenge(intent.x402Challenge, instance, config);
+  const { quote } = validateResourceChallenge(intent.x402Challenge, instance, config, record.quote);
   if (hash(quote) !== hash(record.quote) || quote.amount !== intent.amount || quote.asset !== intent.assetId || quote.network !== intent.network
     || hash(quote) !== intent.quoteFingerprint || intent.paymentScheme !== quote.scheme
     || intent.executionBinding !== resourcePaymentBinding(config, config.buyer, intent.httpRequest, intent.x402Challenge, declared.deliveryRecovery, intent.paymentRequiredHeader)

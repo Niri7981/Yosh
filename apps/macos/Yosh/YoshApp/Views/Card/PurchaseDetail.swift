@@ -213,6 +213,7 @@ struct PurchaseDetail: View {
                 .tracking(1.1)
                 .foregroundStyle(secondaryInk)
                 .frame(width: 98, alignment: .leading)
+            // Keep the selectable text's native label; an override can recursively query the same platform element.
             Text(receipt.value)
                 .font(.system(size: 11))
                 .foregroundStyle(secondaryInk)
@@ -220,7 +221,6 @@ struct PurchaseDetail: View {
                 .truncationMode(.middle)
                 .frame(maxWidth: .infinity, alignment: .trailing)
                 .textSelection(.enabled)
-                .accessibilityLabel(receipt.value)
             if let value = receipt.copyValue {
                 Button {
                     onCopy(value)

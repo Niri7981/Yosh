@@ -1,3 +1,4 @@
+import { assertLegacyMainnetSignerAddress, legacyMainnetSignerSelected } from '../pay-dev/mainnet-signer-selection';
 import { randomBytes } from 'node:crypto';
 import { createKeyPairSignerFromBytes, createKeyPairSignerFromPrivateKeyBytes, getBase58Decoder, getBase58Encoder } from '@solana/kit';
 import { createAppWalletKeychain, readAppWalletKeychain, createMainnetWalletKeychain, readMainnetWalletKeychain, WalletKeychainError } from '../payment/keychain';
@@ -27,7 +28,11 @@ export async function readExistingProductWallets(
       return { id, label, address: null, status: 'unavailable' as const, failure };
     }
     if (secret === undefined) return { id, label, address: null, status: 'missing' as const };
-    try { return { id, label, address: (await signerFromSecret(secret)).address, status: 'available' as const }; }
+    try {
+      const address = (await signerFromSecret(secret)).address;
+      if (id === 'mainnet') assertLegacyMainnetSignerAddress(address);
+      return { id, label, address, status: 'available' as const };
+    }
     catch { return { id, label, address: null, status: 'unavailable' as const, failure: 'corrupt' as const }; }
   }));
 }
@@ -109,6 +114,8 @@ function assertDistinctWallet(actualAddress: string, testAddress: string | undef
 /** Explicit backend provisioning only; App startup never creates a Mainnet wallet. */
 export async function initializeEnvironmentWallet(environment: PaymentEnvironment, stores: ProductWalletStores = macOSWalletStores) {
   const selected = validatePaymentEnvironment(environment);
+  // Acceptance borrows an existing signer only; do not even generate a replacement seed.
+  if (selected.mode === 'live_mainnet' && legacyMainnetSignerSelected()) throw new Error('LEGACY_MAINNET_SIGNER_READ_ONLY');
   if (selected.mode !== 'live_mainnet') return initializeStoredWallet(stores.test);
   if (stores.test === stores.mainnet) throw new Error('MAINNET_WALLET_ISOLATION: separate Keychain stores required');
   const testAddress = await testWalletAddress(stores);
@@ -136,5 +143,6 @@ export async function loadEnvironmentWalletSigner(expectedAddress: string | unde
   if (expectedAddress !== undefined) assertDistinctWallet(expectedAddress, testAddress);
   const signer = await loadStoredSigner(expectedAddress, stores.mainnet);
   assertDistinctWallet(signer.address, testAddress);
+  assertLegacyMainnetSignerAddress(signer.address);
   return signer;
 }

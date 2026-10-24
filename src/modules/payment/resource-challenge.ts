@@ -56,7 +56,7 @@ function validatedResource(declared: X402Resource, environment: PaymentEnvironme
   return { resource, validated };
 }
 
-export function validateResourceChallenge(raw: unknown, declared: X402Resource, environment: PaymentEnvironment): { challenge: X402Challenge; quote: PaymentRequirements } {
+export function validateResourceChallenge(raw: unknown, declared: X402Resource, environment: PaymentEnvironment, selectedQuote?: unknown): { challenge: X402Challenge; quote: PaymentRequirements } {
   const { resource, validated } = validatedResource(declared, environment);
   const challenge = X402ChallengeSchema.parse(raw);
   const challengeUrl = resource.request.access === 'test_loopback' && challenge.resource.url.startsWith('/') && !challenge.resource.url.startsWith('//')
@@ -72,7 +72,11 @@ export function validateResourceChallenge(raw: unknown, declared: X402Resource, 
     } catch { /* Reject malformed resource identifiers. */ }
   }
   if (!matchesRequest) throw new Error('INVALID_X402_QUOTE');
-  const candidates = challenge.accepts.filter(item => item.scheme === 'exact' && item.network === validated.network && item.asset === validated.asset.mint
+  const selected = selectedQuote === undefined ? challenge.accepts : challenge.accepts.filter(item => hash(item) === hash(selectedQuote));
+  // A backend caller may carry Pay's SDK selection. It must identify exactly
+  // one original offer; never project accepts or silently select a substitute.
+  if (selectedQuote !== undefined && selected.length !== 1) throw new Error('INVALID_X402_QUOTE');
+  const candidates = selected.filter(item => item.scheme === 'exact' && item.network === validated.network && item.asset === validated.asset.mint
     && (item.extra.paymentFlow == null || item.extra.paymentFlow === 'authorization')
     && (item.extra.assetTransferMethod == null || item.extra.assetTransferMethod === 'default'));
   if (candidates.length !== 1) throw new Error('INVALID_X402_QUOTE');
@@ -98,7 +102,7 @@ export function validateResourceChallenge(raw: unknown, declared: X402Resource, 
 }
 
 /** One fresh challenge for the exact approved request; no redirect or unsigned retry. */
-export async function fetchResourceChallenge(resource: X402Resource, environment: PaymentEnvironment, fetcher?: typeof fetch) {
+export async function fetchResourceChallenge(resource: X402Resource, environment: PaymentEnvironment, fetcher?: typeof fetch, selectedQuote?: unknown) {
   const { resource: declared } = validatedResource(resource, environment);
   const { url, method, headers, body } = declared.request;
   const response = declared.request.access === 'https'
@@ -107,7 +111,7 @@ export async function fetchResourceChallenge(resource: X402Resource, environment
   try {
     if (response.status !== 402 || (response.url && response.url !== url)) throw new Error('INVALID_X402_QUOTE');
     const paymentRequiredHeader = response.headers.get('PAYMENT-REQUIRED') ?? '';
-    const parsed = validateResourceChallenge(readPaymentRequiredHeader(paymentRequiredHeader), declared, environment);
+    const parsed = validateResourceChallenge(readPaymentRequiredHeader(paymentRequiredHeader), declared, environment, selectedQuote);
     return { endpoint: url, request: declared.request, paymentRequiredHeader, ...parsed };
   } finally { await response.body?.cancel(); }
 }

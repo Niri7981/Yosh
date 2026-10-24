@@ -28,6 +28,7 @@ export async function requestRegisteredResourcePurchase(raw: unknown, options: {
   deferExecution?: boolean;
   externalExecution?: ExternalExecutionFacts;
   externalQuote?: unknown;
+  externalSelectedQuote?: unknown;
   externalRequest?: HttpResourceRequest;
   config: PaymentConfig; ledger: PurchaseLedger; principal: SpendPrincipal; fetcher?: typeof fetch; now?: () => number;
 }) {
@@ -71,10 +72,10 @@ export async function requestRegisteredResourcePurchase(raw: unknown, options: {
   assertPaymentConfigExecutionEnabled(config);
   const quoteRequestedAt = options.now?.() ?? Date.now();
   assertGrantPostScope(resource, ledger.activeSpendGrant(quoteRequestedAt, principal.cardMemberId, config.mode, resource.resourceId), quoteRequestedAt);
-  if (options.externalQuote !== undefined && !options.externalExecution) throw new Error('EXTERNAL_PROVENANCE_REQUIRED');
+  if ((options.externalQuote !== undefined || options.externalSelectedQuote !== undefined) && !options.externalExecution) throw new Error('EXTERNAL_PROVENANCE_REQUIRED');
   const { challenge, quote, paymentRequiredHeader } = options.externalQuote === undefined
-    ? await fetchResourceChallenge(approvedRequest, config, options.fetcher)
-    : { ...validateResourceChallenge(options.externalQuote, approvedRequest, config),
+    ? await fetchResourceChallenge(approvedRequest, config, options.fetcher, options.externalSelectedQuote)
+    : { ...validateResourceChallenge(options.externalQuote, approvedRequest, config, options.externalSelectedQuote),
       paymentRequiredHeader: Buffer.from(JSON.stringify(options.externalQuote)).toString('base64') };
   const winner = ledger.getOwned(input.requestId, principal.cardMemberId);
   if (winner) return reuse(winner);
@@ -82,7 +83,7 @@ export async function requestRegisteredResourcePurchase(raw: unknown, options: {
   const authority = ledger.spendAuthorityForDecision(principal, PAID_RESOURCE_PURCHASE_OPERATION, now, config.mode, resource.resourceId);
   const intent = createX402SpendIntent({ idempotencyKey: input.requestId, resource: approvedRequest, challenge, environment: config,
     buyer: config.buyer, reason: input.reason, now: quoteRequestedAt, authority,
-    requestInputFingerprint: hash({ query: input.query ?? null, request: input.request ?? null }), paymentRequiredHeader });
+    requestInputFingerprint: hash({ query: input.query ?? null, request: input.request ?? null }), paymentRequiredHeader, selectedQuote: quote });
   const record = ledger.reserve(intent, quote, now, config.mode, principal.cardMemberId, ledger.paymentScope(config, config.mode), options.externalExecution);
   if (record.status === 'APPROVED' && !options.deferExecution) {
     try { await executeApprovedPayment(ledger, record.approvalId, config, approvedRequest.request.url); } catch { /* Never translate a lost submission response into 'no payment'. */ }

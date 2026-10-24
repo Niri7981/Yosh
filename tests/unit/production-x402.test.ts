@@ -114,6 +114,21 @@ it('rejects ambiguous multiple payment alternatives', () => {
   expect(() => validateResourceChallenge(required, resource, mainnet)).toThrow('INVALID_X402_QUOTE');
 });
 
+it.each(['price', 'metadata'] as const)('binds the explicit selected offer among %s alternatives without discarding the envelope', difference => {
+  const required = challenge(); const first = required.accepts[0];
+  const selected = { ...first, ...(difference === 'price' ? { amount: '9000' } : { extra: { ...first.extra, memo: 'selected-memo' } }) };
+  required.accepts.push(selected);
+  const parsed = validateResourceChallenge(required, resource, mainnet, selected);
+  expect(parsed).toEqual({ challenge: required, quote: selected });
+  const intent = createX402SpendIntent({ idempotencyKey: `selected-${difference}`, resource, challenge: required, environment: mainnet, buyer, selectedQuote: selected });
+  expect(intent).toMatchObject({ amount: selected.amount, x402Challenge: required });
+  expect(() => validateResourceChallenge(required, resource, mainnet)).toThrow('INVALID_X402_QUOTE');
+  expect(() => validateResourceChallenge(required, resource, mainnet, { ...selected, amount: '8000' })).toThrow('INVALID_X402_QUOTE');
+  expect(() => validateResourceChallenge({ ...required, accepts: [...required.accepts, selected] }, resource, mainnet, selected)).toThrow('INVALID_X402_QUOTE');
+  expect(() => validateResourceChallenge({ ...required, accepts: [...required.accepts, { ...selected, network: DEVNET_NETWORK }] },
+    resource, mainnet, { ...selected, network: DEVNET_NETWORK })).toThrow('INVALID_X402_QUOTE');
+});
+
 const receipt = { success: true, network: mainnet.network, payer: buyer, transaction: FIXTURE_TRANSACTION_SIGNATURE, amount: '10000' };
 function settlement(raw: unknown) { return new Response(null, { headers: { 'PAYMENT-RESPONSE': Buffer.from(JSON.stringify(raw)).toString('base64') } }); }
 it('decodes an exact Solana settlement receipt through the SDK and validates authoritative bindings', () => {

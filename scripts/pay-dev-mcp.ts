@@ -1,3 +1,4 @@
+import { PAY_DEVELOPMENT_PROFILE } from '../src/modules/pay-dev/profile';
 import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { lstatSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
@@ -5,8 +6,9 @@ import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { z } from 'zod';
 import { ConnectionSchema, connectionFile } from '../src/modules/mcp/connection';
+import { ControllerDiagnostic, recordControllerDiagnostic } from '../src/modules/payment/pay-controller-diagnostics';
 import { recordPayTrace } from '../src/modules/payment/pay-execution-trace';
-import { readDevelopmentEnvironment } from '../src/modules/pay-dev/environment';
+import { assertDevelopmentOrigin, readDevelopmentEnvironment } from '../src/modules/pay-dev/environment';
 import { DiscoveryInput } from '../src/modules/resources/mainnet-resource-discovery';
 import { AgentResourceRegistrationInput } from '../src/modules/resources/agent-resource-registration';
 import { ResourceRequestInputSchema } from '../src/modules/resources/http-resource';
@@ -30,10 +32,14 @@ async function main() {
   if (args.length && (args.length !== 2 || args[0] !== '--data-dir')) throw new Error('PAY_DEV_ARGUMENTS_INVALID');
   let directory = args[1] ?? process.env.YOSH_DATA_DIR;
   if (!directory || !isAbsolute(directory)) throw new Error('PAY_DEV_DIRECTORY_REQUIRED');
-  const development = basename(directory) === 'Yosh Pay Dev' ? readDevelopmentEnvironment(directory) : undefined;
+  const candidate = PAY_DEVELOPMENT_PROFILE.bundleIdentifier === 'com.yosh.pay-development.v011rc5';
+  if (candidate && basename(directory) !== PAY_DEVELOPMENT_PROFILE.directoryName)
+    throw new Error('PAY_DEV_DIRECTORY_REQUIRED');
+  const development = basename(directory) === PAY_DEVELOPMENT_PROFILE.directoryName ? readDevelopmentEnvironment(directory) : undefined;
   const mainnet = development ? development.environment === 'mainnet' : process.env.YOSH_PAY_MCP_MAINNET === '1';
   if (development?.environment === 'mainnet') directory = join(directory, 'Mainnet');
   const manifest = ManifestSchema.parse(privateJson(join(directory, mainnet ? 'pay-mainnet-runtime.json' : 'pay-dev-runtime.json')));
+  assertDevelopmentOrigin(manifest.origin);
   if (manifest.profile !== (mainnet ? 'pay-mcp-mainnet' : 'isolated-pay-dev')) throw new Error('PAY_PROFILE_MISMATCH');
   if (mainnet && process.env.YOSH_CARD_MEMBER_ID && process.env.APP2049_CARD_MEMBER_ID
     && process.env.YOSH_CARD_MEMBER_ID !== process.env.APP2049_CARD_MEMBER_ID) throw new Error('PAY_CALLER_CONFIGURATION_CONFLICT');
@@ -45,6 +51,7 @@ async function main() {
     descriptor = privateJson(connectionFile(directory));
   }
   const connection = ConnectionSchema.parse(descriptor);
+  assertDevelopmentOrigin(connection.origin);
   if (connection.cardMemberId !== callerId || connection.origin !== manifest.origin
     || !connection.capabilities.includes('request_purchase')) throw new Error('PAY_DEV_CONNECTION_MISMATCH');
   const binary = join(dirname(resolve(process.argv[1])), 'pay-mcp');
@@ -68,7 +75,11 @@ async function main() {
   const traceLines = createInterface({ input: child.stderr });
   let traceWarning = false;
   traceLines.on('line', (line: string) => {
-    try { recordPayTrace(directory, connection.cardMemberId, binarySha256, line); }
+    try {
+      const diagnostic = ControllerDiagnostic.safeParse(JSON.parse(line));
+      if (diagnostic.success) recordControllerDiagnostic(directory, diagnostic.data, connection.cardMemberId);
+      else recordPayTrace(directory, connection.cardMemberId, binarySha256, line);
+    }
     catch {
       if (!traceWarning) process.stderr.write('Pay execution trace unavailable; payment state remains in Yosh.\n');
       traceWarning = true;
@@ -92,6 +103,39 @@ async function main() {
       schema: z.object({ resourceId: z.string().min(1).max(200), sample: ResourceRequestInputSchema.optional() }).strict(),
       description: 'Read a fresh unpaid quote for a registered Yosh API and validated sample. Does not reserve budget, sign or pay. Purchases use the Pay curl tool and require a user-created Yosh Spend Grant.' },
   ] : [];
+  const recoveryTool = { name: 'recover_payment',
+    description: 'Resume an existing Yosh operation after a lost controller plan, only if durable evidence proves payment never started. Reuses its original Purchase and reservation. Never creates a new purchase or replaces an unknown payment. Can execute the original payment; use only with user authorization.',
+    inputSchema: { type: 'object', properties: { operationId: { type: 'string' } }, required: ['operationId'], additionalProperties: false },
+    annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true } };
+  const recoverPayment = async (id: string | number, params: unknown) => {
+    let result;
+    try {
+      const input = z.object({ name: z.literal('recover_payment'), arguments: z.object({ operationId: z.string().regex(/^[a-zA-Z0-9_.:-]{1,128}$/) }).strict(), _meta: z.unknown().optional() }).strict().parse(params);
+      const response = await fetch(`${connection.origin}/pay/recover`, { method: 'POST',
+        headers: { authorization: `Bearer ${connection.token}`, 'content-type': 'application/json' },
+        body: JSON.stringify(input.arguments), redirect: 'error', signal: AbortSignal.timeout(60_000) });
+      const reader = response.body?.getReader(); if (!reader) throw new Error('PAY_RECOVERY_REQUIRED');
+      const chunks: Uint8Array[] = []; let size = 0;
+      try { for (;;) { const { done, value } = await reader.read(); if (done) break;
+        size += value.length; if (size > 4 * 64 * 1024 * 1024 + 1024 * 1024) throw new Error('PAY_RECOVERY_REQUIRED'); chunks.push(value);
+      } } finally { await reader.cancel().catch(() => {}); reader.releaseLock(); }
+      const value: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+      if (!response.ok) {
+        const error = z.object({ error: z.enum(['PAY_ORIGINAL_PAYMENT_RECOVERY_REQUIRED', 'PAY_PREPAYMENT_RECOVERY_UNAVAILABLE',
+          'PAY_RECOVERY_IN_PROGRESS', 'PAY_RECOVERY_FACTS_MISMATCH', 'PAY_DURABLE_RECOVERY_REQUIRED']) }).safeParse(value);
+        throw new Error(error.success ? error.data.error : 'PAY_RECOVERY_REQUIRED');
+      }
+      const valueResponse = z.object({ status: z.number().int(), headers: z.array(z.tuple([z.string(), z.string()])),
+        body: z.array(z.number().int().min(0).max(255)).max(64 * 1024 * 1024) }).strict().parse(value);
+      result = { content: [{ type: 'text', text: Buffer.from(valueResponse.body).toString('utf8') }] };
+    } catch (error) {
+      const allowed = ['PAY_ORIGINAL_PAYMENT_RECOVERY_REQUIRED', 'PAY_PREPAYMENT_RECOVERY_UNAVAILABLE', 'PAY_RECOVERY_IN_PROGRESS',
+        'PAY_RECOVERY_FACTS_MISMATCH', 'PAY_DURABLE_RECOVERY_REQUIRED'];
+      result = { isError: true, content: [{ type: 'text', text: error instanceof Error && allowed.includes(error.message)
+        ? error.message : 'PAY_RECOVERY_REQUIRED: outcome unresolved; do not create a replacement payment.' }] };
+    }
+    if (!closed) process.stdout.write(`${JSON.stringify({ jsonrpc: '2.0', id, result })}\n`);
+  };
   const callResource = async (id: string | number, params: unknown) => {
     let result;
     try {
@@ -209,6 +253,7 @@ async function main() {
       }
       if (request.data.method === 'tools/call') {
         const call = z.object({ name: z.string() }).passthrough().safeParse(request.data.params);
+        if (mainnet && call.success && call.data.name === 'recover_payment') { void recoverPayment(request.data.id, request.data.params); return; }
         if (call.success && resourceTools.some(tool => tool.name === call.data.name)) {
           void callResource(request.data.id, request.data.params); return;
         }
@@ -222,11 +267,18 @@ async function main() {
     const response = z.object({ id: z.union([z.string(), z.number()]), result: z.object({ tools: z.array(z.unknown()) }).passthrough() }).passthrough().safeParse(JSON.parse(line));
     if (response.success && listRequests.delete(response.data.id)) {
       response.data.result.tools.push(statusTool);
+      if (mainnet) response.data.result.tools.push(recoveryTool);
       for (const tool of resourceTools) response.data.result.tools.push({ name: tool.name, description: tool.description,
         inputSchema: z.toJSONSchema(tool.schema), annotations: { readOnlyHint: tool.name === 'quote_x402_resource',
           destructiveHint: tool.name === 'discover_x402_resource', openWorldHint: tool.name !== 'register_x402_resource' } });
       process.stdout.write(`${JSON.stringify(response.data)}\n`);
-    } else process.stdout.write(`${line}\n`);
+    } else {
+      const rejection = z.object({ result: z.object({ isError: z.literal(true), content: z.array(z.object({ type: z.literal('text'), text: z.string() })) }).passthrough() }).passthrough().safeParse(JSON.parse(line));
+      if (rejection.success && rejection.data.result.content.some(item => item.text.includes('External spending authority: REJECTED_BEFORE_EXECUTION'))) {
+        rejection.data.result.content = [{ type: 'text', text: 'REJECTED_BEFORE_EXECUTION: Yosh 当前缺少完成该付款所需的确认/授权' }];
+        process.stdout.write(`${JSON.stringify(rejection.data)}\n`);
+      } else process.stdout.write(`${line}\n`);
+    }
   });
   child.stdin.on('error', close);
   process.stdout.on('error', close);

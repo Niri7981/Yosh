@@ -81,8 +81,8 @@ it('only accepts the exact buyer-signed transfer, then persists original settlem
 });
 
 it('provides all existing UI quotes with the public backend origin while retaining a private merchant endpoint', async () => {
-  const service = await start(directory(), Keypair.generate().publicKey.toBase58(), 'http://127.0.0.1:13049');
-  expect(service.origin).toBe('http://127.0.0.1:13049');
+  const service = await start(directory(), Keypair.generate().publicKey.toBase58(), 'http://127.0.0.1:13449');
+  expect(service.origin).toBe('http://127.0.0.1:13449');
   for (const id of ['market-snapshot', 'market-analysis', 'token-risk-report'] as const) {
     const target = paidResource(id).path;
     const response = await fetch(service.merchantOrigin + target);

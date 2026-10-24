@@ -1,3 +1,4 @@
+import { PAY_DEVELOPMENT_PROFILE } from './profile';
 import { createHash, randomUUID } from 'node:crypto';
 import { closeSync, existsSync, fsyncSync, lstatSync, openSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
@@ -84,8 +85,8 @@ export async function startOfflineServices(options: { directory: string; buyer: 
     if ((options.merchantPort !== undefined && options.merchantPort !== 0 && options.merchantPort !== state.merchantPort)
       || (options.rpcPort !== undefined && options.rpcPort !== 0 && options.rpcPort !== state.rpcPort)) throw new Error('OFFLINE_SERVICES_PORT_CHANGED');
   } else state = { format: 'yosh-pay-offline-v1', buyer, merchant: Keypair.generate().publicKey.toBase58(),
-    sponsor: [...Keypair.generate().secretKey], merchantPort: options.merchantPort ?? 13050,
-    rpcPort: options.rpcPort ?? 13051, ...(publicOrigin ? { publicOrigin: publicOrigin.origin } : {}), blockhashes: [], transactions: [] };
+    sponsor: [...Keypair.generate().secretKey], merchantPort: options.merchantPort ?? PAY_DEVELOPMENT_PROFILE.merchantPort,
+    rpcPort: options.rpcPort ?? PAY_DEVELOPMENT_PROFILE.rpcPort, ...(publicOrigin ? { publicOrigin: publicOrigin.origin } : {}), blockhashes: [], transactions: [] };
   const sponsor = Keypair.fromSecretKey(Uint8Array.from(state.sponsor));
   const config = loadPaymentConfig({ YOSH_EXECUTION_MODE: 'live_devnet', SOLANA_CLUSTER: 'devnet',
     SOLANA_RPC_URL: 'https://rpc.yosh-pay-dev.invalid', DEMO_BUYER_PUBLIC_KEY: buyer, DEMO_MERCHANT_PUBLIC_KEY: state.merchant });
@@ -171,6 +172,7 @@ export async function startOfflineServices(options: { directory: string; buyer: 
           const blockhash = Keypair.generate().publicKey.toBase58(); state.blockhashes.push(blockhash); save();
           result = { context: { slot: 1 }, value: { blockhash, lastValidBlockHeight: 1000 } }; break;
         }
+        case 'isBlockhashValid': result = { context: { slot: 1 }, value: typeof params[0] === 'string' && state.blockhashes.includes(params[0]) }; break;
         case 'getBlockHeight': result = 1; break;
         case 'getBalance': result = { context: { slot: 1 }, value: params[0] === sponsor.publicKey.toBase58() ? 1000000000 : params[0] === buyer ? 100000000 : 0 }; break;
         case 'getTokenAccountBalance': result = { context: { slot: 1 }, value: { amount: params[0] === ata(buyer) ? balance().toString() : (INITIAL_USDC - balance()).toString(), decimals: 6, uiAmount: null } }; break;

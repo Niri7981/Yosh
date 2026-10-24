@@ -175,6 +175,11 @@ actor NativeServiceRuntime {
         let port = try launch.servicePort()
         // Validate the current runtime before asking an old backend to stop.
         _ = try launch.normalizedEnvironment()
+        if launch.isPayDevelopment {
+            // A new candidate never adopts a listener, even if it can authenticate.
+            // Readiness retries may retain the child already owned by this actor.
+            try Self.preflightDevelopmentPorts(ownedProcessRunning: process?.isRunning == true)
+        }
         let runtime = allowsLaunch ? try launch.runtimeDirectory() : nil
         let root = runtime?.appending(path: "backend", directoryHint: .isDirectory)
         let node = allowsLaunch ? try launch.nodeExecutable() : nil
@@ -189,6 +194,7 @@ actor NativeServiceRuntime {
         let configuration = ServiceConfiguration(baseURL: URL(string: "http://127.0.0.1:\(port)")!, managementToken: token)
 
         if process?.isRunning != true && !Self.portAvailable(port) {
+            if launch.isPayDevelopment { throw ServiceRuntimeError.portConflict }
             let response: (Data, HTTPURLResponse)
             do { response = try await configuration.request(.health, timeout: 2) }
             catch {
@@ -213,7 +219,9 @@ actor NativeServiceRuntime {
         if let existing = process, existing.isRunning { child = existing }
         else {
             child = BackendChildProcess(node: node, server: server, root: root,
-                environment: try launch.childEnvironment(token: token), diagnostics: try diagnostics ?? BackendDiagnostics(), sandboxProfile: try sandboxProfileOverride ?? launch.sandboxProfile()) { [weak self] pid, status in
+                environment: try launch.childEnvironment(token: token),
+                diagnostics: try diagnostics ?? BackendDiagnostics(directory: launch.isPayDevelopment ? launch.dataDirectory().appending(path: "Logs") : nil),
+                sandboxProfile: try sandboxProfileOverride ?? launch.sandboxProfile()) { [weak self] pid, status in
                 Task { await self?.ownedProcessExited(pid: pid, status: status) }
             }
             try child.run()
@@ -459,6 +467,13 @@ actor NativeServiceRuntime {
 
     private static func pidExists(_ pid: Int32) -> Bool {
         Darwin.kill(pid, 0) == 0 || errno == EPERM
+    }
+
+    static func preflightDevelopmentPorts(ownedProcessRunning: Bool) throws {
+        guard !ownedProcessRunning else { return }
+        guard YoshPayDevelopment.servicePorts.allSatisfy(portAvailable) else {
+            throw ServiceRuntimeError.portConflict
+        }
     }
 
     private static func portAvailable(_ port: Int) -> Bool {

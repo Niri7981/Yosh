@@ -8,7 +8,7 @@ import { hash } from '../purchases/spending-policy';
 import type { PaymentConfig } from './payment-config';
 import { admitMainnetDevelopment, isMainnetDevelopment } from '../pay-dev/environment';
 import { MAINNET_NETWORK, MAINNET_USDC_MINT } from './payment-environment';
-import { SolanaPublicKeySchema } from '../resources/http-resource';
+import { SolanaPublicKeySchema, X402ChallengeSchema } from '../resources/http-resource';
 
 export function privatePayJson(directory: string, name: string): unknown {
   const folder = lstatSync(directory);
@@ -90,15 +90,45 @@ export function admitPayMainnetRuntime(directory: string) {
     writeControl(directory, 'pay-mainnet-cutover.json', { ...receipt, state: 'admitted' });
   }
 }
-const Acceptance = z.object({ version: z.literal(2), callerId: z.string().uuid(), operationId: z.string().regex(/^[a-zA-Z0-9_.:-]{1,128}$/),
+const AcceptanceV2 = z.object({ version: z.literal(2), callerId: z.string().uuid(), operationId: z.string().regex(/^[a-zA-Z0-9_.:-]{1,128}$/),
   resourceId: z.string().min(1).max(200), providerId: z.string().min(1).max(200), resourceUrl: z.url().refine(value => new URL(value).protocol === 'https:'),
   wallet: SolanaPublicKeySchema, network: z.literal(MAINNET_NETWORK), asset: z.literal(MAINNET_USDC_MINT), recipient: SolanaPublicKeySchema,
   amountAtomic: z.string().regex(/^[1-9]\d*$/).max(20),
   requestHash: z.string().regex(/^[a-f0-9]{64}$/), quoteHash: z.string().regex(/^[a-f0-9]{64}$/),
   challengeHash: z.string().regex(/^[a-f0-9]{64}$/), expiresAt: z.number().int().safe() }).strict();
+
+// Cross-attempt consent excludes only the SDK's documented execution blockhash.
+// Unselected alternatives and descriptive resource metadata confer no spending rights.
+// Unknown extra/extensions remain in the digest: adding or mutating one requires
+// fresh consent. Attempt-local provenance still hashes the entire original JSON.
+function stableOffer(raw: unknown) {
+  const offer = X402ChallengeSchema.shape.accepts.element.parse(raw);
+  if (offer.extra.recentBlockhash !== undefined) SolanaPublicKeySchema.parse(offer.extra.recentBlockhash);
+  const extra = { ...offer.extra };
+  delete extra.recentBlockhash;
+  return { ...offer, extra };
+}
+export function consentEconomicIntentV3(accepted: unknown, envelope?: unknown) {
+  const offer = stableOffer(accepted);
+  const economicOfferHash = hash(['consent-economic-intent-v3', offer]);
+  if (envelope === undefined) return { economicOfferHash };
+  const challenge = X402ChallengeSchema.parse(envelope);
+  if (challenge.accepts.filter(value => hash(value) === hash(accepted)).length !== 1)
+    throw new Error('PAY_MAINNET_ACCEPTANCE_REQUIRED');
+  return { economicOfferHash, economicEnvelopeHash: hash(['consent-economic-envelope-v3',
+    { x402Version: challenge.x402Version, resource: { url: challenge.resource.url,
+      ...(challenge.resource.mimeType === undefined ? {} : { mimeType: challenge.resource.mimeType }) },
+      economicOfferHash, ...(challenge.extensions === undefined ? {} : { extensions: challenge.extensions }) }]) };
+}
+const AcceptanceV3 = AcceptanceV2.omit({ quoteHash: true, challengeHash: true }).extend({
+  version: z.literal(3), economicOfferHash: z.string().regex(/^[a-f0-9]{64}$/),
+  economicEnvelopeHash: z.string().regex(/^[a-f0-9]{64}$/),
+}).strict();
+const Acceptance = z.discriminatedUnion('version', [AcceptanceV2, AcceptanceV3]);
 export function recordPayMainnetAcceptance(directory: string, raw: unknown) {
   const receipt = Acceptance.parse(raw);
   if (receipt.expiresAt <= Date.now()) throw new Error('PAY_MAINNET_ACCEPTANCE_EXPIRED');
+  if (receipt.version !== 3) throw new Error('PAY_MAINNET_ACCEPTANCE_V3_REQUIRED');
   // The operator command is not exposed to MCP or any Agent-facing route.
   privatePayJson(directory, isMainnetDevelopment(directory) ? 'pay-development-mainnet.json' : 'pay-mainnet-cutover.json');
   writeControl(directory, 'pay-mainnet-acceptance.json', receipt);
@@ -106,7 +136,7 @@ export function recordPayMainnetAcceptance(directory: string, raw: unknown) {
 /** A private operator receipt, never a model-supplied approved flag. It binds
  * exactly one operation; the existing Ledger prevents its second consumption. */
 export function assertPayMainnetAcceptance(directory: string, config: PaymentConfig, facts: {
-  caller_id: string; operation_id: string; request: unknown; accepted: unknown; payment_required: unknown;
+  caller_id: string; operation_id: string; request: unknown; accepted: unknown; payment_required?: unknown;
   network: string; asset: string; recipient: string; amount_atomic: string;
 }, resource: { resourceId: string; providerId: string; resourceUrl: string }) {
   const receipt = Acceptance.parse(privatePayJson(directory, 'pay-mainnet-acceptance.json'));
@@ -114,7 +144,17 @@ export function assertPayMainnetAcceptance(directory: string, config: PaymentCon
     || receipt.operationId !== facts.operation_id || receipt.network !== facts.network || receipt.asset !== facts.asset
     || receipt.network !== config.network || receipt.asset !== config.mint || receipt.recipient !== facts.recipient
     || receipt.amountAtomic !== facts.amount_atomic || receipt.requestHash !== hash(facts.request)
-    || receipt.quoteHash !== hash(facts.accepted) || receipt.challengeHash !== hash(facts.payment_required)
+    || !matchesConsentQuote(receipt, facts)
     || receipt.resourceId !== resource.resourceId || receipt.providerId !== resource.providerId || receipt.resourceUrl !== resource.resourceUrl)
     throw new Error('PAY_MAINNET_ACCEPTANCE_REQUIRED');
+}
+
+function matchesConsentQuote(receipt: z.infer<typeof Acceptance>, facts: { accepted: unknown; payment_required?: unknown }) {
+  if (receipt.version === 2) return receipt.quoteHash === hash(facts.accepted)
+    && (facts.payment_required === undefined || receipt.challengeHash === hash(facts.payment_required));
+  try {
+    const intent = consentEconomicIntentV3(facts.accepted, facts.payment_required);
+    return receipt.economicOfferHash === intent.economicOfferHash
+      && (facts.payment_required === undefined || receipt.economicEnvelopeHash === intent.economicEnvelopeHash);
+  } catch { return false; }
 }

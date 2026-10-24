@@ -104,3 +104,20 @@ it('delivers bounded arrays, scalars and declared text while rejecting undeclare
   await expect(readBoundedResourceDelivery(new Response('long', { headers: { 'content-type': 'text/plain' } }),
     { format: 'text', mimeTypes: ['text/plain'], maxBytes: 3 })).rejects.toThrow();
 });
+
+it('accepts the byte-policy boundary and rejects oversized delivery without truncation', async () => {
+  const policy = { format: 'json' as const, mimeTypes: ['application/json'], maxBytes: 262_144 };
+  for (const bytes of [65_535, 65_536, 65_537, 262_144]) {
+    const wire = JSON.stringify('x'.repeat(bytes - 2));
+    expect(Buffer.byteLength(wire)).toBe(bytes);
+    const data = await readBoundedResourceDelivery(new Response(wire, {
+      headers: { 'content-type': 'application/json' },
+    }), policy);
+    expect(data).toBe('x'.repeat(bytes - 2));
+  }
+  const oversized = JSON.stringify('x'.repeat(262_143));
+  expect(Buffer.byteLength(oversized)).toBe(262_145);
+  await expect(readBoundedResourceDelivery(new Response(oversized, {
+    headers: { 'content-type': 'application/json' },
+  }), policy)).rejects.toThrow('Resource data too large');
+});

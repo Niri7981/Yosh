@@ -1,7 +1,11 @@
 import { randomUUID } from 'node:crypto';
+import { readFileSync, rmSync } from 'node:fs';
+import { DatabaseSync } from 'node:sqlite';
 import { hash } from '../../src/modules/purchases/spending-policy';
 import { expect, it, vi } from 'vitest';
 import { z } from 'zod';
+import { GET as deliveryGET } from '../../src/app/api/agent/purchases/[purchaseId]/delivery/route';
+import { readConnection } from '../../src/modules/mcp/connection';
 import { productionPayFixture, TEST_DELIVERY, deferred, reachBoundary } from '../helpers/pay-production-fixture';
 
 function withAccepted(facts: Record<string, unknown>, accepted: unknown) {
@@ -9,6 +13,32 @@ function withAccepted(facts: Record<string, unknown>, accepted: unknown) {
   return { ...facts, accepted, payment_required: { ...envelope,
     accepts: envelope.accepts.map(quote => hash(quote) === hash(facts.accepted) ? accepted : quote) } };
 }
+
+it.each(['price', 'metadata'] as const)('preserves Pay selected offer across same-asset %s alternatives and restart', async quoteAlternatives => {
+  const f = await productionPayFixture({ payMcp: true, quoteAlternatives });
+  try {
+    const operation = `selected-offer-${quoteAlternatives}`;
+    expect((await f.callPay(await f.connectPay(), operation)).isError).not.toBe(true);
+    const facts = z.record(z.string(), z.unknown()).parse(f.lastFacts);
+    const record = f.payRecord(operation)!;
+    expect(record.quote).toEqual(facts.accepted);
+    expect(record.intent.x402Challenge).toEqual(facts.payment_required);
+    expect(record.intent.x402Challenge?.accepts).toHaveLength(2);
+    expect(f.app.ledger.savedPayload(record.approvalId)?.accepted).toEqual(facts.accepted);
+    await f.reopenWithoutPayExecutor();
+    expect((await f.callPay(await f.connectPay(), operation)).isError).not.toBe(true);
+    expect(f.signatureCalls).toBe(1); expect(f.paidRequests).toBe(1);
+  } finally { await f.close(); }
+}, 30_000);
+
+it('rejects an exactly duplicated selected offer before authorization or signing', async () => {
+  const f = await productionPayFixture({ payMcp: true, quoteAlternatives: 'duplicate' });
+  try {
+    expect((await f.callPay(await f.connectPay(), 'duplicate-selected-offer')).isError).toBe(true);
+    expect(f.payRecord('duplicate-selected-offer')).toBeUndefined();
+    expect(f.signatureCalls).toBe(0); expect(f.paidRequests).toBe(0);
+  } finally { await f.close(); }
+}, 30_000);
 
 it('real Pay MCP preserves route resource and SDK-echoable extensions through Yosh authorization, execution and replay', async () => {
   const extensions = { bazaar: { info: { input: { method: 'GET', queryParams: { asset: 'SOL' } } } },
@@ -53,6 +83,111 @@ it('real Pay MCP preserves route resource and SDK-echoable extensions through Yo
     expect(f.app.ledger.managedSummary(Date.now(), 'live_devnet')).toEqual(budget);
   } finally { await f.close(); }
 }, 30_000);
+
+it('real Pay MCP returns persisted 64 KiB through policy-max JSON after process reopen without re-paying', async () => {
+  const f = await productionPayFixture({ payMcp: true });
+  try {
+    const operation = 'large-persisted-delivery';
+    expect((await f.callPay(await f.connectPay(), operation)).isError).not.toBe(true);
+    const original = f.payRecord(operation)!;
+    const recordId = original.intent.id;
+    const encodeAtSize = (bytes: number) => ({ x: 'x'.repeat(bytes - 8) });
+    const persist = (data: unknown) => z.instanceof(DatabaseSync).parse(Reflect.get(f.app.ledger, 'db'))
+      .prepare('UPDATE purchases SET data=? WHERE id=?').run(JSON.stringify(data), recordId);
+
+    for (const bytes of [65_535, 65_536, 65_537, 131_072, 262_144]) {
+      const data = encodeAtSize(bytes);
+      expect(Buffer.byteLength(JSON.stringify(data))).toBe(bytes);
+      persist(data);
+      await f.reopenWithoutPayExecutor();
+      await f.app.start(f.origin);
+      const response = await f.callPay(await f.connectPay(), operation);
+      expect(response.isError, `body size ${bytes}: ${JSON.stringify(response.content).slice(0, 300)}`).not.toBe(true);
+      expect(JSON.stringify(response.content)).toContain('x'.repeat(bytes - 8));
+      expect(f.payRecord(operation)).toMatchObject({ status: 'PAID', deliveryStatus: 'COMPLETE' });
+      expect(f.signatureCalls).toBe(1);
+      expect(f.paidRequests).toBe(1);
+    }
+
+    const escapedText = '\0'.repeat(262_144);
+    persist(escapedText);
+    await f.reopenWithoutPayExecutor();
+    await f.app.start(f.origin);
+    const largeText = await f.callPay(await f.connectPay(), operation);
+    expect(largeText.isError).not.toBe(true);
+    const message = z.array(z.object({ text: z.string() }).passthrough()).parse(largeText.content)[0]!.text;
+    const spillPath = message.match(/written to (.+?)\. First \d+ chars:/)?.[1];
+    expect(spillPath).toBeTruthy();
+    try { expect(JSON.parse(readFileSync(spillPath!, 'utf8'))).toBe(escapedText); }
+    finally { rmSync(spillPath!, { force: true }); }
+    expect(f.signatureCalls).toBe(1);
+    expect(f.paidRequests).toBe(1);
+
+    const signature = f.app.ledger.savedOriginalPayment(original.approvalId)!.evidence.identity.buyerSignature;
+    const reflected = { x: `${signature}${'x'.repeat(70_000)}` };
+    persist(reflected);
+    await f.reopenWithoutPayExecutor();
+    await f.app.start(f.origin);
+    const denied = await f.callPay(await f.connectPay(), operation);
+    expect(denied.isError).toBe(true);
+    expect(JSON.stringify(denied.content)).not.toContain(signature);
+    expect(f.signatureCalls).toBe(1);
+    expect(f.paidRequests).toBe(1);
+  } finally { await f.close(); }
+}, 60_000);
+
+it('actual SIGKILL after Allow and before plan expires the unclaimed reservation on restart', async () => {
+  const f = await productionPayFixture({ payMcp: true });
+  try {
+    const operation = 'sigkill-after-authorize-before-plan';
+    await f.crashAfterSubmissionMarker(operation, 'authorization');
+    await f.reopenWithoutPayExecutor();
+    const beforeRecovery = f.payRecord(operation)!;
+    expect(beforeRecovery.status).toBe('APPROVED');
+    const stalePermit = f.app.ledger.executionSafety.permit(beforeRecovery);
+    await Promise.all([f.app.start(f.origin), f.app.start(f.origin)]);
+
+    expect(f.payRecord(operation)).toMatchObject({ status: 'EXPIRED', deliveryStatus: 'NOT_PAID' });
+    expect(f.app.ledger.managedSummary(Date.now(), 'live_devnet')).toMatchObject({ paid: '0', reserved: '0' });
+    expect(() => f.app.ledger.executionSafety.assert(f.payRecord(operation)!, stalePermit)).toThrow('EXTERNAL_EXECUTION_FENCED');
+    expect(f.app.ledger.executionSafety.provenance(beforeRecovery.intent.id)).toMatchObject({
+      caller_id: f.memberId, operation_id: operation, attempt_id: stalePermit.attemptId, phase: 'AUTHORIZED',
+    });
+
+    const replay = await f.callPay(await f.connectPay(), operation);
+    expect(replay.isError).toBe(true);
+    expect(f.payRecord(operation)?.status).toBe('EXPIRED');
+    expect(f.signatureCalls).toBe(0);
+    expect(f.paidRequests).toBe(0);
+  } finally { await f.close(); }
+}, 60_000);
+
+it('expires a Pay-only abandoned authorization at its permit lease without rebinding the operation', async () => {
+  const f = await productionPayFixture({ payMcp: true });
+  try {
+    expect((await f.callPay(await f.connectPay(), 'permit-lease-baseline')).isError).not.toBe(true);
+    const original = z.record(z.string(), z.unknown()).parse(f.lastFacts);
+    const operation = 'permit-lease-abandoned-operation';
+    const authorizedFacts = { ...original, operation_id: operation, attempt_id: randomUUID() };
+    expect(await f.authority.authorize(authorizedFacts, f.principal)).toEqual({ allow: true });
+    const record = f.payRecord(operation)!;
+    const permit = f.app.ledger.executionSafety.permit(record);
+    expect(permit.expiresAt).toBeGreaterThan(Date.now());
+
+    expect(await f.authority.authorize({ ...authorizedFacts, attempt_id: randomUUID() }, f.principal)).toEqual({ allow: false });
+    const offer = z.record(z.string(), z.unknown()).parse(original.accepted);
+    await expect(f.authority.authorize(withAccepted({ ...authorizedFacts, attempt_id: randomUUID(), amount_atomic: '200001' }, {
+      ...offer, amount: '200001',
+    }), f.principal)).rejects.toThrow('PAY_OPERATION_CONFLICT');
+
+    f.app.ledger.releaseExpired(permit.expiresAt);
+    expect(f.payRecord(operation)?.status).toBe('EXPIRED');
+    expect(() => f.app.ledger.executionSafety.assert(record, permit, permit.expiresAt)).toThrow('EXTERNAL_EXECUTION_FENCED');
+    expect(f.app.ledger.managedSummary(Date.now(), 'live_devnet')).toMatchObject({ paid: '200000', reserved: '0' });
+    expect(f.signatureCalls).toBe(1);
+    expect(f.paidRequests).toBe(1);
+  } finally { await f.close(); }
+}, 60_000);
 
 it('real Pay MCP tools/call uses Pay HTTP classifier, real Yosh Grant/Ledger and unsigned Pay builder with Yosh final custody', async () => {
   const f = await productionPayFixture({ payMcp: true });
@@ -256,7 +391,8 @@ it('a merchant reflection of the buyer signature never crosses back to Pay',asyn
     const result=await f.callPay(await f.connectPay(),'pay-reflection');
     expect(result.isError).toBe(true);
     const record=f.payRecord('pay-reflection')!;
-    expect(record).toMatchObject({status:'PAID',deliveryStatus:'COMPLETE'});
+    expect(record).toMatchObject({status:'PAID',deliveryStatus:'PENDING'});
+    expect(record.data).toBeUndefined();
     const original=f.app.ledger.savedOriginalPayment(record.approvalId)!;
     expect(JSON.stringify(result)).not.toContain(original.evidence.identity.buyerSignature);
     expect(f.signatureCalls).toBe(1);expect(f.paidRequests).toBe(1);
@@ -418,5 +554,132 @@ it.each(['PAID', 'PAYMENT_UNKNOWN'] as const)('real Pay MCP rejects a new accept
     expect(f.app.ledger.managedSummary(Date.now(), 'live_devnet')).toEqual(before);
     expect(f.signatureCalls).toBe(1); expect(f.paidRequests).toBe(status === 'PAID' ? 1 : 0);
     if (status === 'PAID') expect((await f.callPay(await f.connectPay(), 'review-mcp-changed-offer')).isError).not.toBe(true);
+  } finally { await f.close(); }
+}, 30_000);
+
+it('blocks reflected credentials before completion and through generic delivery after restart', async () => {
+  const f = await productionPayFixture({ payMcp: true });
+  try {
+    f.reflectCredential();
+    expect((await f.callPay(await f.connectPay(), 'generic-reflection')).isError).toBe(true);
+    const saved = f.payRecord('generic-reflection')!;
+    expect(saved.status).toBe('PAID');
+    expect(saved.deliveryStatus).not.toBe('COMPLETE');
+    expect(saved.data).toBeUndefined();
+    await f.reopenWithoutPayExecutor();
+    const response = await deliveryGET(new Request(`${f.origin}/api/agent/purchases/${saved.intent.idempotencyKey}/delivery`,
+      { headers: { authorization: `Bearer ${readConnection(f.directory).token}` } }),
+    { params: Promise.resolve({ purchaseId: saved.intent.idempotencyKey }) });
+    expect(response.status).toBe(404);
+    expect(f.signatureCalls).toBe(1); expect(f.paidRequests).toBe(1);
+  } finally { await f.close(); }
+}, 30_000);
+
+it('withholds raw transaction and complete payment header reflections from historical delivery and Pay replay', async () => {
+  const f = await productionPayFixture({ payMcp: true });
+  try {
+    expect((await f.callPay(await f.connectPay(), 'historical-reflection')).isError).not.toBe(true);
+    const saved = f.payRecord('historical-reflection')!;
+    const payload = f.app.ledger.savedPayload(saved.approvalId)!;
+    const transaction = z.object({ transaction: z.string() }).parse(payload.payload).transaction;
+    const database = z.instanceof(DatabaseSync).parse(Reflect.get(f.app.ledger, 'db'));
+    for (const reflected of [transaction, f.paidHeaders[0], `${'x'.repeat(16_380)}${transaction}`]) {
+      database.prepare('UPDATE purchases SET data=? WHERE id=?').run(JSON.stringify({ result: reflected }), saved.intent.id);
+      const response = await deliveryGET(new Request(`${f.origin}/api/agent/purchases/${saved.intent.idempotencyKey}/delivery`,
+        { headers: { authorization: `Bearer ${readConnection(f.directory).token}` } }),
+      { params: Promise.resolve({ purchaseId: saved.intent.idempotencyKey }) });
+      expect(response.status).toBe(404);
+      expect((await f.callPay(await f.connectPay(), 'historical-reflection')).isError).toBe(true);
+    }
+    await f.reopenWithoutPayExecutor();
+    expect(f.payRecord('historical-reflection')!.data).toBeUndefined();
+    expect(f.signatureCalls).toBe(1); expect(f.paidRequests).toBe(1);
+  } finally { await f.close(); }
+}, 30_000);
+
+it('generic delivery retrieves policy-max escaped text beyond a one-MiB cursor after restart', async () => {
+  const f = await productionPayFixture({ payMcp: true });
+  try {
+    const operation = 'generic-escaped-text';
+    expect((await f.callPay(await f.connectPay(), operation)).isError).not.toBe(true);
+    const saved = f.payRecord(operation)!;
+    const data = '\0'.repeat(262_144);
+    const encoded = Buffer.from(JSON.stringify(data));
+    const database = z.instanceof(DatabaseSync).parse(Reflect.get(f.app.ledger, 'db'));
+    database.prepare('UPDATE purchases SET data=? WHERE id=?').run(JSON.stringify(data), saved.intent.id);
+    await f.reopenWithoutPayExecutor();
+    const headers = { authorization: `Bearer ${readConnection(f.directory).token}` };
+    const context = { params: Promise.resolve({ purchaseId: saved.intent.idempotencyKey }) };
+    const url = `${f.origin}/api/agent/purchases/${saved.intent.idempotencyKey}/delivery`;
+    const chunkSchema = z.object({ totalBytes: z.number(), offset: z.number(), chunk: z.string(), nextOffset: z.number().nullable() });
+    for (const offset of [0, 1_048_576, encoded.length - 2, encoded.length]) {
+      const response = await deliveryGET(new Request(`${url}?offset=${offset}`, { headers }), context);
+      expect(response.status, `offset ${offset}`).toBe(200);
+      const chunk = chunkSchema.parse(await response.json());
+      const end = Math.min(offset + 16_384, encoded.length);
+      expect(chunk).toMatchObject({ totalBytes: encoded.length, offset, nextOffset: end < encoded.length ? end : null });
+      expect(Buffer.from(chunk.chunk, 'base64')).toEqual(encoded.subarray(offset, end));
+    }
+    expect((await deliveryGET(new Request(`${url}?offset=${encoded.length + 1}`, { headers }), context)).status).toBe(400);
+    expect((await deliveryGET(new Request(url), context)).status).toBe(401);
+    expect(f.signatureCalls).toBe(1); expect(f.paidRequests).toBe(1);
+  } finally { await f.close(); }
+}, 30_000);
+
+
+it('missing consent rejects before effects; identical operation retries with new attempt and executes once', async () => {
+  const f = await productionPayFixture({ payMcp: true });
+  try {
+    const client = await f.connectPay();
+    f.authorityFailure('consent');
+    const denied = await f.callPay(client, 'consent-retry');
+    expect(denied.isError).toBe(true);
+    expect(JSON.stringify(denied.content)).toContain('REJECTED_BEFORE_EXECUTION');
+    const first = z.object({ attempt_id: z.string() }).passthrough().parse(f.lastFacts);
+    expect(f.payRecord('consent-retry')).toBeUndefined();
+    expect(f.signatureCalls).toBe(0); expect(f.paidRequests).toBe(0); expect(f.transactions.size).toBe(0);
+    expect(f.app.spendGrantSummary()?.committed).toBe('0');
+    const db = z.instanceof(DatabaseSync).parse(Reflect.get(f.app.ledger, 'db'));
+    for (const table of ['purchase_execution_provenance', 'external_authority_claims'])
+      expect(db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get()?.n).toBe(0);
+    expect(f.app.ledger.managedSummary(Date.now(), 'live_devnet')).toMatchObject({ reserved: '0', paid: '0' });
+    f.authorityFailure(undefined);
+    expect((await f.callPay(client, 'consent-retry')).isError).not.toBe(true);
+    expect(z.object({ attempt_id: z.string() }).parse(f.lastFacts).attempt_id).not.toBe(first.attempt_id);
+    expect(f.signatureCalls).toBe(1); expect(f.paidRequests).toBe(1);
+    expect((await f.callPay(client, 'consent-retry')).isError).toBe(true);
+    expect(f.signatureCalls).toBe(1); expect(f.paidRequests).toBe(1);
+  } finally { await f.close(); }
+}, 30_000);
+
+
+it('Allow before plan is durable and remains fenced after restart without a Purchase', async () => {
+  const f = await productionPayFixture({ payMcp: true });
+  try {
+    await f.callPay(await f.connectPay(), 'facts-baseline');
+    const full = z.record(z.string(), z.unknown()).parse(f.lastFacts);
+    const spend = Object.fromEntries(Object.entries(full).filter(([key]) => key !== 'payment_required'));
+    const raw = { ...spend, operation_id: 'allow-without-plan', attempt_id: randomUUID() };
+    expect(f.authority.authorizeSpend(raw, f.principal)).toEqual({ allow: true });
+    expect(f.payRecord('allow-without-plan')).toBeUndefined();
+    await f.reopenWithoutPayExecutor();
+    expect(() => f.authority.authorizeSpend({ ...raw, attempt_id: randomUUID() }, f.principal)).toThrow('PAY_ORIGINAL_OUTCOME_UNRESOLVED');
+    expect(f.signatureCalls).toBe(1); expect(f.paidRequests).toBe(1);
+  } finally { await f.close(); }
+}, 30_000);
+
+
+it('a changed request after explicit rejection conflicts before a second Yosh authority call', async () => {
+  const f = await productionPayFixture({ payMcp: true });
+  try {
+    const client = await f.connectPay();
+    f.authorityFailure('consent');
+    expect((await f.callPay(client, 'rejected-request-binding')).isError).toBe(true);
+    const first = f.lastFacts;
+    const result = await client.callTool({ name: 'curl', arguments: { operation_id: 'rejected-request-binding',
+      url: `${f.origin}/api/paid/sol-market-snapshot?asset=ETH` } });
+    expect(JSON.stringify(result.content)).toContain('OPERATION_CONFLICT');
+    expect(f.lastFacts).toBe(first);
+    expect(f.signatureCalls).toBe(0); expect(f.paidRequests).toBe(0);
   } finally { await f.close(); }
 }, 30_000);

@@ -1,3 +1,4 @@
+import { PAY_DEVELOPMENT_PROFILE } from './profile';
 import { serveDevelopmentRuntime } from './management-server';
 import { randomBytes } from 'node:crypto';
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -25,8 +26,8 @@ export async function startPayDevelopmentBackend(options: { directory: string; r
   merchantPort?: number; rpcPort?: number }) {
   if (process.env.YOSH_PAY_DEV !== '1') throw new Error('PAY_DEVELOPMENT_ONLY');
   const directory = resolve(options.directory);
-  if (directory !== options.directory || basename(directory) !== 'Yosh Pay Dev') throw new Error('PAY_DEVELOPMENT_DIRECTORY_REQUIRED');
-  const port = options.port ?? 13049;
+  if (directory !== options.directory || basename(directory) !== PAY_DEVELOPMENT_PROFILE.directoryName) throw new Error('PAY_DEVELOPMENT_DIRECTORY_REQUIRED');
+  const port = options.port ?? PAY_DEVELOPMENT_PROFILE.backendPort;
   const origin = `http://127.0.0.1:${port}`;
   mkdirSync(directory, { recursive: true, mode: 0o700 });
   const directoryStat = lstatSync(directory);
@@ -69,7 +70,7 @@ export async function startPayDevelopmentBackend(options: { directory: string; r
   isPayDevelopmentDirectory(directory);
   mkdirSync(join(directory, 'simulator'), { mode: 0o700, recursive: true });
   const simulator = await startOfflineServices({ directory: join(directory, 'simulator'), buyer: signer.address,
-    publicOrigin: origin, merchantPort: options.merchantPort ?? 13050, rpcPort: options.rpcPort ?? 13051 });
+    publicOrigin: origin, merchantPort: options.merchantPort ?? PAY_DEVELOPMENT_PROFILE.merchantPort, rpcPort: options.rpcPort ?? PAY_DEVELOPMENT_PROFILE.rpcPort });
   process.env.DEMO_MERCHANT_PUBLIC_KEY = simulator.merchant;
   const nativeFetch = globalThis.fetch;
   const localFetch: typeof fetch = (input, init) => {

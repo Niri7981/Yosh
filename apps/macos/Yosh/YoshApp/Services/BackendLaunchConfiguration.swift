@@ -39,7 +39,7 @@ struct BackendLaunchConfiguration {
     var isPayDevelopment: Bool { YoshPayDevelopment.isEnabled(bundleURL: bundleURL) }
 
     func servicePort() throws -> Int {
-        if isPayDevelopment { return 13049 }
+        if isPayDevelopment { return YoshPayDevelopment.backendPort }
         let raw = try configuredValue("PORT") ?? "3049"
         guard let port = Int(raw), (1024...65535).contains(port), String(port) == raw else {
             throw ServiceRuntimeError.configuration
@@ -247,7 +247,12 @@ struct ReadyResponse: Decodable {
 /// One separately identified development application. Environment variables cannot
 /// turn the installed product into this development build or select its secrets.
 enum YoshPayDevelopment {
-    static let bundleIdentifier = "com.yosh.pay-development"
+    static let bundleIdentifier = "com.yosh.pay-development.v011rc5"
+    static let applicationSupportName = "Yosh Pay Dev v0.1.1-rc.5"
+    static let backendPort = 13449
+    static let merchantPort = 13450
+    static let protocolPort = 13451
+    static let servicePorts = [backendPort, merchantPort, protocolPort]
 
     static func isEnabled(bundleURL: URL = Bundle.main.bundleURL) -> Bool {
         let url = bundleURL.appending(path: "Contents/Info.plist")
@@ -261,7 +266,7 @@ enum YoshPayDevelopment {
         guard let resolvedHome = Darwin.realpath(home.path, nil) else { throw ServiceRuntimeError.configuration }
         defer { Darwin.free(resolvedHome) }
         let directory = URL(fileURLWithPath: String(cString: resolvedHome), isDirectory: true)
-            .appending(path: "Library/Application Support/Yosh Pay Dev", directoryHint: .isDirectory)
+            .appending(path: "Library/Application Support/\(applicationSupportName)", directoryHint: .isDirectory)
         try ensurePrivateDirectory(directory)
         return directory
     }

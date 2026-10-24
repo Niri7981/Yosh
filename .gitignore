@@ -51,6 +51,8 @@
 !/integration/pay-persistence/compat-sources.json
 !/integration/mainnet-preflight-fix/agent402-public-policy.json
 !/integration/archive-20261021/*.json
+!/integration/release-candidate/*.json
+!/integration/release-candidate/pay-overlay/agent402-mainnet-quote.json
 /integration/**/*.jsonl
 /integration/**/*.txt
 /integration/**/baseline/

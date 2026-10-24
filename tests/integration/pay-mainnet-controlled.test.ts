@@ -1,3 +1,5 @@
+import { controllerBackendDiagnostic } from '../../src/modules/payment/pay-controller-diagnostics';
+import { z } from 'zod';
 import { chmodSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -10,7 +12,7 @@ import { VersionedTransaction } from '@solana/web3.js';
 import { afterEach, expect, it, vi } from 'vitest';
 import { AppRuntime } from '../../src/modules/app/app-runtime';
 import { PurchaseLedger } from '../../src/modules/purchases/purchase-ledger';
-import { preparePayMainnetCutover } from '../../src/modules/payment/pay-mainnet-control';
+import { preparePayMainnetCutover, consentEconomicIntentV3 } from '../../src/modules/payment/pay-mainnet-control';
 import { loadPaymentConfig, MAINNET_GENESIS } from '../../src/modules/payment/payment-config';
 import { readConnection } from '../../src/modules/mcp/connection';
 import { PAID_RESOURCE_PURCHASE_OPERATION } from '../../src/modules/authority/spend-grant';
@@ -19,8 +21,12 @@ import { loadBuyerSigner } from '../../src/modules/payment/wallet';
 import { reconcileStoredOriginalPayment } from '../../src/modules/payment/reconcile-transaction';
 import { recoverApprovedPayment } from '../../src/modules/purchases/approved-payment';
 import { signedPaymentFixture, FIXTURE_TRANSACTION_SIGNATURE } from '../helpers/signed-payment-fixture';
+import { preparePayUnsigned } from '../../src/modules/payment/pay-unsigned-preflight';
 import { resolvePaymentEnvironment } from '../../src/modules/payment/payment-environment';
 
+vi.mock('../../src/modules/payment/pay-unsigned-preflight', async original => ({
+  ...await original<typeof import('../../src/modules/payment/pay-unsigned-preflight')>(), preparePayUnsigned: vi.fn(),
+}));
 vi.mock('../../src/modules/payment/wallet', () => ({ loadBuyerSigner: vi.fn() }));
 vi.mock('../../src/modules/payment/reconcile-transaction', async original => ({
   ...await original<typeof import('../../src/modules/payment/reconcile-transaction')>(), reconcileStoredOriginalPayment: vi.fn(),
@@ -93,11 +99,10 @@ async function fixture() {
   const facts = { caller_id: memberId, operation_id: 'first-mainnet', attempt_id: randomUUID(), execution_network: 'mainnet',
     request: { method: 'GET', url: 'https://merchant.integration.invalid/data?coins=SOL&currency=usd', headers: [['accept', 'application/json']], body: null },
     amount_atomic: quote.amount, asset: quote.asset, network: quote.network, recipient: quote.payTo, accepted: quote, payment_required: challenge };
-  const accept = (value = facts) => writeFileSync(join(directory, 'pay-mainnet-acceptance.json'), JSON.stringify({ version: 2,
+  const accept = (value: Pick<typeof facts, 'request' | 'operation_id'> & { accepted: unknown; payment_required: unknown } = facts) => writeFileSync(join(directory, 'pay-mainnet-acceptance.json'), JSON.stringify({ version: 3,
     resourceId: resource.resourceId, providerId: resource.providerId, resourceUrl: value.request.url,
     callerId: memberId, operationId: value.operation_id, wallet: signer.address, network: quote.network, asset: quote.asset,
-    recipient: quote.payTo, amountAtomic: quote.amount, requestHash: hash(value.request), quoteHash: hash(value.accepted),
-    challengeHash: hash(value.payment_required), expiresAt: Date.now() + 60_000 }), { mode: 0o600 });
+    recipient: quote.payTo, amountAtomic: quote.amount, requestHash: hash(value.request), ...consentEconomicIntentV3(value.accepted, value.payment_required), expiresAt: Date.now() + 300_000 }), { mode: 0o600 });
   const payload = { ...await signedPaymentFixture(signer, config, quote), resource: challenge.resource, extensions: challenge.extensions };
   const transaction = VersionedTransaction.deserialize(Buffer.from(String(payload.payload.transaction), 'base64'));
   transaction.signatures = transaction.signatures.map(() => new Uint8Array(64));
@@ -125,7 +130,10 @@ async function fixture() {
   vi.spyOn(app, 'start').mockResolvedValue();
   return { directory, facts, prepared, config, payload, signer, accept, rpc, principal,
     get app() { return app; }, record: () => app.ledger.listForOwner(memberId, 50)[0],
-    async call(action: 'authorize' | 'plan' | 'execute', raw: unknown = facts) { return app.payMcpOperation(action, raw, principal(), origin); },
+    async call(action: 'authorize' | 'plan' | 'execute', raw: unknown = facts) {
+      const input = action === 'authorize' ? Object.fromEntries(Object.entries(z.record(z.string(), z.unknown()).parse(raw)).filter(([key]) => key !== 'payment_required')) : raw;
+      return app.payMcpOperation(action, input, principal(), origin);
+    },
     async reopen() { await app.prepareQuit(); app.close(); app = new AppRuntime(directory, dependencies); await app.initializeWallet(); },
     async close() { await app.prepareQuit(); app.close(); rmSync(directory, { recursive: true, force: true }); } };
 }
@@ -133,8 +141,16 @@ async function fixture() {
 it('requires an operator acceptance independently of real Grant and Budget, then atomically reserves full Mainnet Pay facts', async () => {
   const f = await fixture();
   try {
-    await expect(f.call('authorize')).rejects.toThrow(); expect(f.record()).toBeUndefined();
-    f.accept(); expect(await f.call('authorize')).toEqual({ allow: true });
+    expect(await f.call('authorize')).toEqual({ decision: 'RejectBeforeExecution' }); expect(f.record()).toBeUndefined();
+    expect(f.app.ledger.managedSummary(Date.now(), 'live_mainnet')).toMatchObject({ reserved: '0', paid: '0' });
+    expect(f.app.spendGrantSummary()?.committed).toBe('0');
+    expect(loadBuyerSigner).not.toHaveBeenCalled();
+    expect(f.app.ledger.executionSafety.hasExternalAuthorityClaim(f.facts.caller_id, f.facts.operation_id)).toBe(false);
+    f.accept({ ...f.facts, accepted: { ...f.facts.accepted, extra: { ...f.facts.accepted.extra, recentBlockhash: f.config.buyer } },
+      payment_required: { ...f.facts.payment_required, accepts: [{ ...f.facts.accepted, extra: { ...f.facts.accepted.extra, recentBlockhash: f.config.buyer } }] } });
+    f.facts.attempt_id = randomUUID();
+    expect(await f.call('authorize')).toEqual({ allow: true });
+    expect(await f.call('plan', { facts: f.facts })).toMatchObject({ action: 'build' });
     const record = f.record()!;
     expect(record.status).toBe('APPROVED');
     const owned = f.app.ledger.getOwned(record.purchaseId, f.facts.caller_id)!;
@@ -142,8 +158,6 @@ it('requires an operator acceptance independently of real Grant and Budget, then
     expect(f.app.ledger.managedSummary(Date.now(), 'live_mainnet')).toMatchObject({ reserved: '1000', paid: '0' });
     expect(loadBuyerSigner).not.toHaveBeenCalled();
     expect(() => new AppRuntime(f.directory)).toThrow('DATA_DIRECTORY_IN_USE');
-    expect(await f.call('plan', { facts: f.facts })).toMatchObject({ action: 'build', lifetime: {
-      recentBlockhash: f.prepared.recentBlockhash, lastValidBlockHeight: '5000' } });
     await expect(f.call('execute', { facts: f.facts, unsigned: { ...f.prepared, lastValidBlockHeight: '5001' } })).rejects.toThrow('PAY_BLOCKHASH_BINDING_MISMATCH');
     expect(loadBuyerSigner).not.toHaveBeenCalled();
   } finally { await f.close(); }
@@ -182,5 +196,132 @@ it('Pause during Keychain loading fences Mainnet signature and final HTTP even a
     await expect(f.call('execute', { facts: f.facts, unsigned: f.prepared })).rejects.toThrow();
     expect(sign).not.toHaveBeenCalled();
     expect(f.rpc.mock.calls.some(([url]) => String(url) === f.facts.request.url)).toBe(false);
+  } finally { await f.close(); }
+});
+
+
+it('recovers a lost Mainnet plan on the original reservation after lease expiry and restart', async () => {
+  const f = await fixture();
+  const clock = vi.spyOn(Date, 'now');
+  try {
+    f.accept(); await f.call('authorize'); await f.call('plan', { facts: f.facts });
+    const first = f.record()!;
+    const owned = f.app.ledger.getOwned(first.purchaseId, f.facts.caller_id)!;
+    const oldPermit = f.app.ledger.executionSafety.permit(owned);
+    clock.mockReturnValue(oldPermit.expiresAt + 1);
+    f.app.ledger.releaseExpired(Date.now());
+    expect(f.record()!.status).toBe('APPROVED');
+    await f.reopen();
+    await f.app.start('http://127.0.0.1:3049');
+    expect(f.record()!.status).toBe('APPROVED');
+    const reserve = vi.spyOn(f.app.ledger, 'reserve');
+    vi.mocked(preparePayUnsigned).mockResolvedValue({ ok: true, result: { accepted: f.facts.accepted, unsigned: f.prepared } });
+    await expect(f.app.payMcpRecovery({ operationId: f.facts.operation_id }, f.principal(), 'http://127.0.0.1:3049')).rejects.toThrow();
+    expect(preparePayUnsigned).toHaveBeenCalledOnce();
+    expect(loadBuyerSigner).toHaveBeenCalledOnce();
+    expect(reserve).not.toHaveBeenCalled();
+    expect(f.record()!.purchaseId).toBe(first.purchaseId);
+    expect(f.app.ledger.listForOwner(f.facts.caller_id, 50)).toHaveLength(1);
+    expect(f.app.ledger.managedSummary(Date.now(), 'live_mainnet')).toMatchObject({ reserved: '1000', paid: '0' });
+    expect(f.app.spendGrantSummary()?.committed).toBe('1000');
+    expect(() => f.app.ledger.executionSafety.assert(owned, oldPermit)).toThrow('EXTERNAL_EXECUTION_FENCED');
+    // Submission is now unknown. Pre-payment recovery may never rebuild it.
+    vi.mocked(preparePayUnsigned).mockClear();
+    await expect(f.app.payMcpRecovery({ operationId: f.facts.operation_id }, f.principal(), 'http://127.0.0.1:3049'))
+      .rejects.toThrow('PAY_ORIGINAL_PAYMENT_RECOVERY_REQUIRED');
+    expect(preparePayUnsigned).not.toHaveBeenCalled();
+    expect(loadBuyerSigner).toHaveBeenCalledOnce();
+  } finally { clock.mockRestore(); await f.close(); }
+});
+
+it('pre-payment recovery rejects terminated purchases without a new reservation or signer', async () => {
+  const f = await fixture();
+  try {
+    f.accept(); await f.call('authorize'); await f.call('plan', { facts: f.facts });
+    const record = f.app.ledger.getOwned(f.record()!.purchaseId, f.facts.caller_id)!;
+    f.app.ledger.releaseExpired(record.intent.expiresAt);
+    await expect(f.app.payMcpRecovery({ operationId: f.facts.operation_id }, f.principal(), 'http://127.0.0.1:3049'))
+      .rejects.toThrow('PAY_PREPAYMENT_RECOVERY_UNAVAILABLE');
+    expect(f.record()!.status).toBe('EXPIRED');
+    expect(loadBuyerSigner).not.toHaveBeenCalled(); expect(preparePayUnsigned).not.toHaveBeenCalled();
+  } finally { await f.close(); }
+});
+
+it('recovery rechecks Pause, rejects concurrent rebuilds and fences an in-flight stale plan', async () => {
+  const f = await fixture();
+  try {
+    f.accept(); await f.call('authorize'); await f.call('plan', { facts: f.facts });
+    await expect(f.call('authorize', { ...f.facts, attempt_id: randomUUID() })).rejects.toThrow('PAY_DURABLE_RECOVERY_REQUIRED');
+    f.app.setPaused(true);
+    await expect(f.app.payMcpRecovery({ operationId: f.facts.operation_id }, f.principal(), 'http://127.0.0.1:3049')).rejects.toThrow('Payments are paused');
+    expect(preparePayUnsigned).not.toHaveBeenCalled();
+    f.app.setPaused(false);
+    let unblock: (value: unknown) => void = () => {};
+    const waiting = new Promise<unknown>(resolve => { unblock = resolve; });
+    let entered: () => void = () => {};
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    vi.mocked(preparePayUnsigned).mockImplementation(async () => { entered(); return waiting; });
+    const first = f.app.payMcpRecovery({ operationId: f.facts.operation_id }, f.principal(), 'http://127.0.0.1:3049');
+    const rejected = expect(first).rejects.toThrow('PAY_STALE_OR_CHANGED_ATTEMPT');
+    await started;
+    await expect(f.app.payMcpRecovery({ operationId: f.facts.operation_id }, f.principal(), 'http://127.0.0.1:3049')).rejects.toThrow('PAY_RECOVERY_IN_PROGRESS');
+    f.app.setPaused(true); f.app.setPaused(false);
+    unblock({ ok: true, result: { accepted: f.facts.accepted, unsigned: f.prepared } });
+    await rejected;
+    expect(loadBuyerSigner).not.toHaveBeenCalled();
+    expect(f.record()!.status).toBe('APPROVED');
+    expect(f.app.spendGrantSummary()?.committed).toBe('1000');
+  } finally { await f.close(); }
+});
+
+it('a durable CLAIMED fence without a saved signature is never treated as proof of no signing', async () => {
+  const f = await fixture();
+  try {
+    f.accept(); await f.call('authorize'); await f.call('plan', { facts: f.facts });
+    const record = f.app.ledger.getOwned(f.record()!.purchaseId, f.facts.caller_id)!;
+    f.app.ledger.claim(record.approvalId, undefined, undefined, 'live_mainnet', f.app.ledger.executionSafety.permit(record));
+    await expect(f.app.payMcpRecovery({ operationId: f.facts.operation_id }, f.principal(), 'http://127.0.0.1:3049'))
+      .rejects.toThrow('PAY_ORIGINAL_PAYMENT_RECOVERY_REQUIRED');
+    expect(preparePayUnsigned).not.toHaveBeenCalled(); expect(loadBuyerSigner).not.toHaveBeenCalled();
+  } finally { await f.close(); }
+});
+
+it('a controller plan failure after reserve can resume on the same runtime without authorizing again', async () => {
+  const f = await fixture();
+  try {
+    f.accept(); await f.call('authorize');
+    f.rpc.mockRejectedValueOnce(new Error('FIXTURE_PLAN_RPC_UNAVAILABLE'));
+    await expect(f.call('plan', { facts: f.facts })).rejects.toThrow('FIXTURE_PLAN_RPC_UNAVAILABLE');
+    const first = f.record()!;
+    expect(first.status).toBe('APPROVED'); expect(loadBuyerSigner).not.toHaveBeenCalled();
+    const reserve = vi.spyOn(f.app.ledger, 'reserve');
+    vi.mocked(preparePayUnsigned).mockResolvedValue({ ok: true, result: { accepted: f.facts.accepted, unsigned: f.prepared } });
+    await expect(f.app.payMcpRecovery({ operationId: f.facts.operation_id }, f.principal(), 'http://127.0.0.1:3049')).rejects.toThrow();
+    expect(loadBuyerSigner).toHaveBeenCalledOnce(); expect(reserve).not.toHaveBeenCalled();
+    expect(f.record()!.purchaseId).toBe(first.purchaseId);
+    expect(f.app.spendGrantSummary()?.committed).toBe('1000');
+  } finally { await f.close(); }
+});
+
+it.each([
+  { ok: false, code: 'UNSIGNED_PREPARE_FAILED' },
+  { ok: true, result: { accepted: {}, unsigned: { transaction: null, recentBlockhash: '', lastValidBlockHeight: 5000 } } },
+])('recovery schema failure stays on the same reserved Purchase before claim/signing: %j', async output => {
+  const f = await fixture();
+  try {
+    f.accept(); await f.call('authorize'); await f.call('plan', { facts: f.facts });
+    const first = f.record()!;
+    const reserve = vi.spyOn(f.app.ledger, 'reserve');
+    vi.mocked(preparePayUnsigned).mockResolvedValue(output.ok ? { ...output, result: { ...output.result, accepted: f.facts.accepted } } : output);
+    let diagnostic: unknown;
+    try { await f.app.payMcpRecovery({ operationId: f.facts.operation_id }, f.principal(), 'http://127.0.0.1:3049'); }
+    catch (error) { diagnostic = controllerBackendDiagnostic(error); }
+    expect(diagnostic).toMatchObject({ code: 'CONTROLLER_INPUT_INVALID', issues: expect.any(Array) });
+    expect(f.record()!.purchaseId).toBe(first.purchaseId);
+    const record = f.app.ledger.getOwned(first.purchaseId, f.facts.caller_id)!;
+    expect(f.app.ledger.executionSafety.provenance(record.intent.id)?.phase).toBe('AUTHORIZED');
+    expect(reserve).not.toHaveBeenCalled(); expect(loadBuyerSigner).not.toHaveBeenCalled();
+    expect(f.app.ledger.listForOwner(f.facts.caller_id, 50)).toHaveLength(1);
+    expect(f.app.ledger.managedSummary(Date.now(), 'live_mainnet')).toMatchObject({ reserved: '1000', paid: '0' });
   } finally { await f.close(); }
 });
