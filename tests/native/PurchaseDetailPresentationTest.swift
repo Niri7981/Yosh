@@ -106,6 +106,13 @@ struct PurchaseDetailPresentationTest {
             "transaction": String(repeating: "1", count: 88),
             "executionTrace": ["source": "pay_mcp", "traceId": "observed-attempt", "operationId": "observed-operation", "complete": true]])
         precondition(offline.explorerURL == nil, "Offline confirmations must never link to a real-chain explorer")
+        precondition(offline.stages.allSatisfy { $0.tone != .success }, "Offline records cannot imply confirmed real payment")
+        let expiredWithoutDecision = try detail(["status": "EXPIRED", "decisionReason": NSNull(), "deliveryStatus": "NOT_PAID"])
+        precondition(expiredWithoutDecision.stages.map(\.id) == [.expired], "Expiry alone does not prove a prior allowed decision")
+        let failedWithoutDecision = try detail(["status": "FAILED", "decisionReason": NSNull(), "deliveryStatus": "NOT_PAID"])
+        precondition(failedWithoutDecision.stages.map(\.id) == [.failed], "Failure alone does not prove a prior allowed decision")
+        precondition(pendingDelivery.tone == .pending && exhausted.tone == .negative,
+            "The overall status must not look delivered when retrieval is pending or exhausted")
         precondition(offline.facts.contains { $0.value == "Offline · No real funds" })
         precondition(offline.facts.contains { $0.value == "Pay MCP · Traced" })
         precondition(offline.receipts.contains { $0.label == "Trace ID" && $0.copyValue == "observed-attempt" })

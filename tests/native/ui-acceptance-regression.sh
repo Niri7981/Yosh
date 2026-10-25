@@ -18,6 +18,8 @@ app_sources=(
   apps/macos/Yosh/YoshApp/Views/Card/CardPageHeader.swift
   apps/macos/Yosh/YoshApp/Views/Card/ActivityDetail.swift
   apps/macos/Yosh/YoshApp/Views/Card/ActivityLedgerRow.swift
+  apps/macos/Yosh/YoshApp/Views/Card/HostNetworkIcon.swift
+  apps/macos/Yosh/YoshApp/Views/Card/PurchaseDetailDisclosureStyle.swift
   apps/macos/Yosh/YoshApp/Views/Card/DailyAuthorityContent.swift
   apps/macos/Yosh/YoshApp/Views/Card/PurchaseDetail.swift
   apps/macos/Yosh/YoshApp/Views/Card/YoshDetailStack.swift

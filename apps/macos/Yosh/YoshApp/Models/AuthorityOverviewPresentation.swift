@@ -18,6 +18,7 @@ struct AuthorityOverviewPresentation {
     let latest: Latest?
 
     struct Latest {
+        let purchase: AppOverview.Purchase
         let purchaseId: String
         let title: String
         let purpose: String?
@@ -111,7 +112,7 @@ struct AuthorityOverviewPresentation {
             default: .neutral
             }
             let purpose = purchase.reason?.trimmingCharacters(in: .whitespacesAndNewlines)
-            latest = Latest(purchaseId: purchase.purchaseId, title: title, purpose: purpose?.isEmpty == false ? purpose : nil,
+            latest = Latest(purchase: purchase, purchaseId: purchase.purchaseId, title: title, purpose: purpose?.isEmpty == false ? purpose : nil,
                 symbol: symbol, payment: payment, recency: elapsed, amount: formatted.amount,
                 decision: decision, decisionTone: tone, paymentConfirmed: paymentConfirmed)
         } else {

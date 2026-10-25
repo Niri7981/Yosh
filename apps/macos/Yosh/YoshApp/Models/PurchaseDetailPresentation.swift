@@ -39,19 +39,21 @@ struct PurchaseDetailPresentation {
 
     init(_ purchase: AppOverview.Purchase, agentName: String = "Agent unavailable") {
         let item = ActivityPurchasePresentation(purchase)
-        title = item.title
+        title = item.title == "agent402-crypto-price" ? "Crypto price data" : item.title
         status = item.status
         tone = switch purchase.status {
-        case "APPROVED": .success
-        case "PAID" where (purchase.executionMode == .liveDevnet || purchase.executionMode == .liveMainnet): .success
+        case "PAID" where purchase.offline != true
+            && (purchase.executionMode == .liveDevnet || purchase.executionMode == .liveMainnet):
+            purchase.deliveryStatus == "COMPLETE" ? .success : purchase.deliveryStatus == "EXHAUSTED" ? .negative : .pending
         case "PAYING", "PAYMENT_UNKNOWN", "REQUIRES_APPROVAL": .pending
         case "DENIED", "FAILED": .negative
         default: .neutral
         }
 
-        let approvedStates = ["APPROVED", "PAYING", "PAYMENT_UNKNOWN", "PAID", "FAILED", "EXPIRED"]
-        let approved = approvedStates.contains(purchase.status)
         let reason = Self.nonempty(purchase.decisionReason)
+        let approvedStates = ["APPROVED", "PAYING", "PAYMENT_UNKNOWN", "PAID"]
+        let approved = approvedStates.contains(purchase.status) || (["EXPIRED", "FAILED"].contains(purchase.status)
+            && ["AUTHORITY_AND_BUDGET_PASSED", "AUTHORITY_BUDGET_AND_GRANT_PASSED"].contains(reason ?? ""))
         authorityTitle = switch purchase.status {
         case "DENIED": "Denied by policy"
         case "REQUIRES_APPROVAL": "Approval required"
@@ -62,14 +64,14 @@ struct PurchaseDetailPresentation {
         }
         authorityReason = Self.policyReason(reason, approved: approved)
 
-        let confirmedPayment = purchase.executionMode == .liveMainnet || purchase.executionMode == .liveDevnet
+        let confirmedPayment = purchase.offline != true && (purchase.executionMode == .liveMainnet || purchase.executionMode == .liveDevnet)
         let network = Self.nonempty(purchase.network)
         let paymentContext = purchase.offline == true ? "\(item.amount) · Offline · No real funds"
             : [item.amount, network.map(Self.shortNetwork)].compactMap { $0 }.joined(separator: " · ")
         var observed: [Stage] = []
         if approved {
             observed.append(Stage(id: .approved, title: "Allowed",
-                detail: purchase.status == "APPROVED" ? "No payment made." : "Request allowed by policy.", tone: .success))
+                detail: purchase.status == "APPROVED" ? "No payment made." : "Request allowed by policy.", tone: purchase.offline == true ? .neutral : .success))
         }
         switch purchase.status {
         case "APPROVED": break
@@ -94,7 +96,7 @@ struct PurchaseDetailPresentation {
                 observed.append(Stage(id: .paymentUnverified, title: "Payment unverified",
                     detail: "\(item.amount) · Execution mode unavailable", tone: .neutral))
             case .liveDevnet, .liveMainnet:
-                observed.append(Stage(id: .paid, title: "Paid", detail: paymentContext, tone: .success))
+                observed.append(Stage(id: .paid, title: "Paid", detail: paymentContext, tone: confirmedPayment ? .success : .neutral))
             }
             if purchase.deliveryStatus == "COMPLETE" {
                 if purchase.executionMode == .simulated {
@@ -104,7 +106,7 @@ struct PurchaseDetailPresentation {
                     observed.append(Stage(id: .delivered,
                         title: purchase.executionMode == .unknown ? "Resource returned" : "Delivered",
                         detail: "Resource returned successfully.",
-                        tone: (purchase.executionMode == .liveDevnet || purchase.executionMode == .liveMainnet) ? .success : .neutral))
+                        tone: confirmedPayment ? .success : .neutral))
                 }
             } else if purchase.deliveryStatus == "PENDING" || purchase.deliveryStatus == "DELIVERING" {
                 observed.append(Stage(id: .deliveryPending, title: confirmedPayment ? "Payment confirmed · retrieving result" : "Retrieving result",

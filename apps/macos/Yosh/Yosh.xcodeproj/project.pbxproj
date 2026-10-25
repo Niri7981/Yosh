@@ -7,6 +7,8 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		C84900000000000000000063 /* PurchaseDetailDisclosureStyle.swift in Sources */ = {isa = PBXBuildFile; fileRef = C84900000000000000000064 /* PurchaseDetailDisclosureStyle.swift */; };
+		C84900000000000000000061 /* HostNetworkIcon.swift in Sources */ = {isa = PBXBuildFile; fileRef = C84900000000000000000062 /* HostNetworkIcon.swift */; };
 		B84900000000000000000055 /* PostRequestApprovalView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B84900000000000000000054 /* PostRequestApprovalView.swift */; };
 		A000000000000000000000F5 /* AuthoritySurface.swift in Sources */ = {isa = PBXBuildFile; fileRef = A000000000000000000000F4 /* AuthoritySurface.swift */; };
 		A000000000000000000000F3 /* ExecutionDetail.swift in Sources */ = {isa = PBXBuildFile; fileRef = A000000000000000000000F2 /* ExecutionDetail.swift */; };
@@ -90,6 +92,8 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		C84900000000000000000064 /* PurchaseDetailDisclosureStyle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PurchaseDetailDisclosureStyle.swift; sourceTree = "<group>"; };
+		C84900000000000000000062 /* HostNetworkIcon.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostNetworkIcon.swift; sourceTree = "<group>"; };
 		B84900000000000000000054 /* PostRequestApprovalView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PostRequestApprovalView.swift; sourceTree = "<group>"; };
 		A000000000000000000000F4 /* AuthoritySurface.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthoritySurface.swift; sourceTree = "<group>"; };
 		A000000000000000000000F2 /* ExecutionDetail.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExecutionDetail.swift; sourceTree = "<group>"; };
@@ -301,6 +305,8 @@
 				A0000000000000000000004F /* AgentConnectionDetail.swift */,
 				A00000000000000000000053 /* ActivityDetail.swift */,
 				A00000000000000000000067 /* ActivityLedgerRow.swift */,
+				C84900000000000000000064 /* PurchaseDetailDisclosureStyle.swift */,
+				C84900000000000000000062 /* HostNetworkIcon.swift */,
 				A00000000000000000000055 /* PurchaseDetail.swift */,
 				A00000000000000000000059 /* MembersView.swift */,
 				A0000000000000000000006F /* MembersRoster.swift */,
@@ -443,6 +449,8 @@
 				A00000000000000000000054 /* ActivityDetail.swift in Sources */,
 				A00000000000000000000066 /* ActivityLedgerPresentation.swift in Sources */,
 				A00000000000000000000068 /* ActivityLedgerRow.swift in Sources */,
+				C84900000000000000000063 /* PurchaseDetailDisclosureStyle.swift in Sources */,
+				C84900000000000000000061 /* HostNetworkIcon.swift in Sources */,
 				A0000000000000000000006A /* PurchaseDetailPresentation.swift in Sources */,
 				A00000000000000000000056 /* PurchaseDetail.swift in Sources */,
 				A00000000000000000000058 /* CardMemberSession.swift in Sources */,

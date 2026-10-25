@@ -12,6 +12,8 @@ struct PurchaseDetail: View {
     }
 
     @State private var copiedReceipt: String?
+    @State private var transactionExpanded = false
+    @State private var merchantExpanded = false
     private let ink = YoshShellPalette.ink
     private let secondaryInk = YoshShellPalette.secondaryInk
     private let rule = YoshShellPalette.rule
@@ -29,29 +31,30 @@ struct PurchaseDetail: View {
                 .buttonStyle(.plain)
                 .foregroundStyle(YoshShellPalette.secondaryInk)
                 .accessibilityLabel("Back to \(backTitle)")
+                .accessibilityIdentifier("purchase.back")
 
-                HStack(alignment: .center, spacing: 12) {
-                    Text(item.title)
-                        .font(.system(size: 34, weight: .regular, design: .serif))
-                        .tracking(-0.9)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .accessibilityAddTraits(.isHeader)
-                    compactStatus
+                summary.padding(.top, 24).padding(.bottom, 24)
+                hairline
+                lifecycle.padding(.vertical, 22)
+                hairline
+                VStack(spacing: 10) {
+                    DisclosureGroup(isExpanded: $transactionExpanded) {
+                        transactionDetails
+                    } label: {
+                        Label("Transaction details", systemImage: "doc.text")
+                            .font(.system(size: 13))
+                            .accessibilityIdentifier("purchase.transaction-details")
+                    }
+                    DisclosureGroup(isExpanded: $merchantExpanded) {
+                        merchantResource
+                    } label: {
+                        Label("Merchant & resource", systemImage: "shippingbox")
+                            .font(.system(size: 13))
+                            .accessibilityIdentifier("purchase.merchant-resource")
+                    }
                 }
-                .padding(.top, 12)
-                .padding(.bottom, 20)
-                hairline
-
-                lifecycle.padding(.vertical, 18)
-                hairline
-                authority.padding(.vertical, 18)
-                hairline
-                merchantResource.padding(.vertical, 18)
-                hairline
-                transactionContext.padding(.vertical, 18)
-                hairline
-                receiptDetails.padding(.top, 18)
+                .disclosureGroupStyle(PurchaseDetailDisclosureStyle())
+                .padding(.top, 16)
             }
             .padding(.horizontal, 26)
             .padding(.top, 24)
@@ -62,8 +65,34 @@ struct PurchaseDetail: View {
         .foregroundStyle(ink)
     }
 
+    private var summary: some View {
+        HStack(alignment: .top, spacing: 14) {
+            HostNetworkIcon(hostName: agentName, network: purchase.network, size: 64)
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(alignment: .top, spacing: 8) {
+                    Text(item.title)
+                        .font(.system(size: 27, weight: .regular, design: .serif))
+                        .tracking(-0.6)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .accessibilityAddTraits(.isHeader)
+                    compactStatus
+                }
+                Text(ActivityPurchasePresentation(purchase).amount)
+                    .font(.system(size: 24, weight: .regular, design: .serif))
+                    .monospacedDigit()
+                    .fixedSize(horizontal: false, vertical: true)
+                if purchase.createdAt > 0 {
+                    Text(ActivityPurchasePresentation(purchase).timestamp)
+                        .font(.system(size: 11))
+                        .foregroundStyle(secondaryInk)
+                }
+            }
+        }
+    }
+
     private var compactStatus: some View {
-        Text(item.status)
+        Text(ActivityPurchasePresentation(purchase).compactStatus)
             .font(.system(size: 9, weight: .semibold))
             .tracking(0.7)
             .foregroundStyle(item.tone == .success ? YoshShellPalette.positive : signal(item.tone))
@@ -78,7 +107,7 @@ struct PurchaseDetail: View {
 
     private var lifecycle: some View {
         VStack(alignment: .leading, spacing: 12) {
-            sectionLabel("PURCHASE LIFECYCLE")
+            sectionLabel("ACTIVITY")
             VStack(spacing: 0) {
                 ForEach(Array(item.stages.enumerated()), id: \.element.id) { index, stage in
                     lifecycleStage(stage, connects: index < item.stages.count - 1)
@@ -88,70 +117,80 @@ struct PurchaseDetail: View {
     }
 
     private func lifecycleStage(_ stage: PurchaseDetailPresentation.Stage, connects: Bool) -> some View {
-        HStack(alignment: .top, spacing: 16) {
+        let tone: PurchaseDetailPresentation.Tone = stage.id == .approved && item.tone != .success ? .neutral : stage.tone
+        return HStack(alignment: .top, spacing: 16) {
             VStack(spacing: 0) {
                 ZStack {
                     Circle()
-                        .fill(stage.tone == .success ? signal(.success) : signal(stage.tone).opacity(0.12))
-                    Image(systemName: marker(stage.tone))
+                        .fill(tone == .success ? signal(.success) : signal(tone).opacity(0.12))
+                    Image(systemName: marker(tone))
                         .font(.system(size: 9, weight: .semibold))
-                        .foregroundStyle(stage.tone == .success ? .white : signal(stage.tone))
+                        .foregroundStyle(tone == .success ? .white : signal(tone))
                 }
                 .frame(width: 16, height: 16)
                 Rectangle()
-                    .fill(connects ? signal(stage.tone).opacity(0.55) : .clear)
+                    .fill(connects ? signal(tone).opacity(0.55) : .clear)
                     .frame(width: 1)
             }
             .padding(.top, 2)
             .accessibilityHidden(true)
 
-            VStack(alignment: .leading, spacing: 4) {
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    Text(stage.title)
-                        .font(.system(size: 14, weight: .medium))
-                        .fixedSize(horizontal: false, vertical: true)
-                    Spacer(minLength: 0)
-                    Text(stage.time ?? "—")
-                        .font(.system(size: 11))
-                        .monospacedDigit()
-                        .foregroundStyle(secondaryInk)
-                        .help("Stage time not provided")
-                        .accessibilityLabel(stage.time ?? "Stage time unavailable")
-                }
-                Text(stage.detail)
-                    .font(.system(size: 12))
-                    .foregroundStyle(secondaryInk)
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(timelineTitle(stage))
+                    .font(.system(size: 14, weight: .medium))
                     .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 0)
+                if let time = stage.time {
+                    Text(time).font(.system(size: 11)).monospacedDigit()
+                        .foregroundStyle(secondaryInk)
+                }
             }
-            .padding(.bottom, connects ? 18 : 0)
+            .padding(.bottom, connects ? 22 : 0)
         }
         .fixedSize(horizontal: false, vertical: true)
         .accessibilityElement(children: .combine)
     }
 
-    private var authority: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            sectionLabel("AUTHORITY DECISION")
-            HStack(alignment: .top, spacing: 18) {
-                Image(systemName: "shield")
-                    .font(.system(size: 22, weight: .regular))
-                    .frame(width: 30, height: 28)
-                    .accessibilityHidden(true)
-                VStack(alignment: .leading, spacing: 5) {
-                    Text(item.authorityTitle)
-                        .font(.system(size: 14, weight: .medium))
-                    Text(item.authorityReason)
-                        .font(.system(size: 12))
-                        .foregroundStyle(secondaryInk)
-                        .fixedSize(horizontal: false, vertical: true)
+    private func timelineTitle(_ stage: PurchaseDetailPresentation.Stage) -> String {
+        switch stage.id {
+        case .approved: "Request allowed"
+        case .paid: purchase.offline == true ? "Offline payment" : "Payment confirmed"
+        case .delivered: "Resource delivered"
+        case .deliveryPending: "Resource delivery pending"
+        case .deliveryExhausted: "Resource not recovered"
+        case .deliveryUnavailable: "Automatic recovery unavailable"
+        default: stage.title
+        }
+    }
+
+    private var transactionDetails: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            VStack(spacing: 8) {
+                ForEach(item.facts) { receiptRow($0) }
+                ForEach(item.receipts.filter { receipt in !item.facts.contains { $0.label == receipt.label } }) {
+                    receiptRow($0)
                 }
+            }
+            Text(item.authorityTitle).font(.system(size: 12, weight: .medium))
+            Text(item.authorityReason).font(.system(size: 11)).foregroundStyle(secondaryInk)
+                .fixedSize(horizontal: false, vertical: true)
+            ForEach(item.stages.filter { ![.approved, .paid, .delivered].contains($0.id) }) { stage in
+                Text(stage.detail).font(.system(size: 11)).foregroundStyle(secondaryInk)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if let explorerURL = item.explorerURL {
+                Link(destination: explorerURL) {
+                    Label("View transaction on Solana Explorer", systemImage: "arrow.up.right.square")
+                        .font(.system(size: 12))
+                }
+                .help("Opens the network recorded for this transaction")
+                .accessibilityIdentifier("purchase.explorer")
             }
         }
     }
 
     private var merchantResource: some View {
         VStack(alignment: .leading, spacing: 14) {
-            sectionLabel("MERCHANT & RESOURCE")
             HStack(alignment: .top, spacing: 18) {
                 Image(systemName: "cube")
                     .font(.system(size: 25, weight: .regular))
@@ -179,36 +218,9 @@ struct PurchaseDetail: View {
         }
     }
 
-    private var receiptDetails: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            sectionLabel("RECEIPT DETAILS")
-            if let explorerURL = item.explorerURL {
-                Link(destination: explorerURL) {
-                    Label("View transaction on Solana Explorer", systemImage: "arrow.up.right.square")
-                        .font(.system(size: 12))
-                }
-                .help("Opens the network recorded for this transaction")
-            }
-            VStack(spacing: 7) {
-                ForEach(item.receipts) { receipt in
-                    receiptRow(receipt)
-                }
-            }
-        }
-    }
-
-    private var transactionContext: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            sectionLabel("TRANSACTION CONTEXT")
-            VStack(spacing: 7) {
-                ForEach(item.facts) { fact in receiptRow(fact) }
-            }
-        }
-    }
-
     private func receiptRow(_ receipt: PurchaseDetailPresentation.Receipt) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 10) {
-            Text(receipt.label.uppercased())
+            Text((receipt.label == "Request ID" ? "Purchase ID" : receipt.label).uppercased())
                 .font(.system(size: 9, weight: .medium))
                 .tracking(1.1)
                 .foregroundStyle(secondaryInk)
@@ -235,6 +247,7 @@ struct PurchaseDetail: View {
                 .foregroundStyle(secondaryInk)
                 .help("Copy \(receipt.label)")
                 .accessibilityLabel("Copy \(receipt.label)")
+                .accessibilityIdentifier("purchase.copy.\(receipt.id)")
                 .accessibilityValue(copiedReceipt == receipt.id ? "Copied" : "")
             } else {
                 Color.clear.frame(width: 22, height: 1)

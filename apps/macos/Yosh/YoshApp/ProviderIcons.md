@@ -18,3 +18,10 @@ network fetch is needed.
 The different image frames account for the OpenAI asset's built-in clear space
 and the other marks' silhouettes. All images scale proportionally inside the
 unchanged 44 × 44 roster containers. Custom agents retain their existing icon.
+
+## Activity payment network
+
+`NetworkSolana` uses the unchanged official gradient logomark from
+[Solana brand assets](https://solana.com/branding), downloaded from
+`https://solana.com/src/img/branding/solanaLogoMark.svg`. It renders in its original
+colors on an independent black circle; there is no runtime image loading.

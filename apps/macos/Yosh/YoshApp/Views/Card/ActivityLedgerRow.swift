@@ -28,23 +28,17 @@ struct ActivityLedgerRow: View {
 
     var body: some View {
         Button(action: selectPurchase) {
-            HStack(alignment: .top, spacing: 10) {
+            HStack(alignment: .center, spacing: 10) {
                 resourceIcon
 
                 VStack(alignment: .leading, spacing: 5) {
                     Text(row.item.title)
-                        .font(.system(size: 15, weight: .medium))
+                        .font(.system(size: 13, weight: .semibold))
                         .lineLimit(1)
                     Text(row.context)
                         .font(.system(size: 11))
                         .foregroundStyle(secondaryInk)
                         .lineLimit(1)
-                    if let purpose = row.purpose {
-                        Text(purpose)
-                            .font(.system(size: 11))
-                            .foregroundStyle(secondaryInk)
-                            .lineLimit(1)
-                    }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
 
@@ -52,17 +46,17 @@ struct ActivityLedgerRow: View {
                     Text(row.item.amount)
                         .font(.system(size: 15, weight: .medium))
                         .monospacedDigit()
-                        .lineLimit(1)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.trailing)
                         .minimumScaleFactor(0.8)
                         .frame(maxWidth: .infinity, alignment: .trailing)
 
                     HStack(spacing: 6) {
                         Text(row.item.time)
-                            .font(.system(size: 11))
+                            .font(.system(size: 10))
                             .monospacedDigit()
                             .foregroundStyle(secondaryInk)
                             .lineLimit(1)
-                            .frame(width: 54, alignment: .trailing)
                         Text(row.item.compactStatus)
                             .font(.system(size: 9, weight: .semibold))
                             .tracking(0.3)
@@ -73,46 +67,36 @@ struct ActivityLedgerRow: View {
                             .padding(.horizontal, 7)
                             .padding(.vertical, 4)
                             .background(statusTint, in: Capsule())
-                            .frame(width: 94, alignment: .trailing)
+                            .frame(maxWidth: 80, alignment: .trailing)
                     }
                 }
-                .frame(width: 154)
+                .frame(width: 112)
             }
-            .frame(minHeight: 56, alignment: .top)
+            .frame(minHeight: 44)
+            .padding(.horizontal, 14)
             .padding(.vertical, 12)
-            .contentShape(Rectangle())
-            .background(isHovered ? Color.blue.opacity(0.055) : .clear, in: .rect(cornerRadius: 8))
+            .foregroundStyle(YoshShellPalette.ink)
+            .background(isHovered ? secondaryInk.opacity(0.07) : secondaryInk.opacity(0.018),
+                in: .rect(cornerRadius: 22))
+            .overlay {
+                RoundedRectangle(cornerRadius: 22)
+                    .strokeBorder(YoshShellPalette.rule, lineWidth: 0.65)
+                    .allowsHitTesting(false)
+            }
+            .contentShape(.rect(cornerRadius: 22))
         }
         .buttonStyle(.plain)
         .onHover { isHovered = $0 }
+        .help(row.purpose ?? row.item.status)
         .accessibilityLabel("\(row.item.title), \(row.context), \(row.purpose ?? ""), requested amount \(row.item.amount), \(row.item.status), \(row.item.timestamp)")
         .accessibilityHint("Opens purchase details, including the separate payment and delivery states.")
     }
 
     private var resourceIcon: some View {
-        ZStack(alignment: .bottomTrailing) {
-            Group {
-                switch row.item.icon {
-                case .asset(let name):
-                    Image(name).resizable().scaledToFit().frame(width: 22, height: 22)
-                case .symbol(let name):
-                    Image(systemName: name).font(.system(size: 19, weight: .regular))
-                }
-            }
-            .foregroundStyle(secondaryInk)
-            .frame(width: 25, height: 25)
-            if row.solanaBadge {
-                Text("S")
-                    .font(.system(size: 7, weight: .semibold))
-                    .foregroundStyle(secondaryInk)
-                    .frame(width: 11, height: 11)
-                    .background(YoshShellPalette.surface, in: Circle())
-                    .overlay(Circle().stroke(secondaryInk.opacity(0.55), lineWidth: 0.6))
-                    .offset(x: 4, y: 4)
-            }
-        }
-        .frame(width: 29, height: 29)
-        .accessibilityHidden(true)
+        HostNetworkIcon(hostName: row.hostName, network: row.network, size: 48)
+            .frame(width: 36, height: 36)
+            .offset(x: -3)
+            .accessibilityHidden(true)
     }
 
     private func selectPurchase() {

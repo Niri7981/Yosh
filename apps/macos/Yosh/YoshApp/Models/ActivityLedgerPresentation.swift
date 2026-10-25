@@ -13,9 +13,13 @@ struct ActivityLedgerPresentation {
         let solanaBadge: Bool
         let purpose: String?
         let tone: Tone
+        let hostName: String
+        let network: String?
 
         init(_ purchase: AppOverview.Purchase, agentName: String) {
             id = purchase.purchaseId
+            hostName = agentName
+            network = purchase.network
             item = ActivityPurchasePresentation(purchase)
             let solana = purchase.network?.hasPrefix("solana:") == true
                 || purchase.network == "Solana Devnet" || purchase.network == "Solana Mainnet"

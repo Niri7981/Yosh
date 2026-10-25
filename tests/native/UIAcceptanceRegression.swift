@@ -10,6 +10,7 @@ struct UIAcceptanceRegression {
     static func main() throws {
         let app = NSApplication.shared
         app.setActivationPolicy(.prohibited)
+        app.accessibilitySetValue(true, forAttribute: .init(rawValue: "AXEnhancedUserInterface"))
         let page = CommandLine.arguments.dropFirst().first ?? "budget"
         precondition(["budget", "purchase"].contains(page))
         DispatchQueue.main.async {
@@ -135,13 +136,17 @@ struct UIAcceptanceRegression {
     @MainActor
     private static func readHostedText(_ host: NSView) {
         var textCount = 0
-        func visit(_ view: NSView) {
-            if view.accessibilityRole() == .staticText {
+        // Collapsed SwiftUI disclosures expose virtual AX text rather than NSView text children.
+        func visit(_ object: NSObject) {
+            if object.responds(to: NSSelectorFromString("accessibilityRole")),
+               object.value(forKey: "accessibilityRole") as? String == "AXStaticText" {
                 textCount += 1
-                _ = view.accessibilityLabel()
-                _ = view.accessibilityValue()
+                if object.responds(to: NSSelectorFromString("accessibilityLabel")) { _ = object.value(forKey: "accessibilityLabel") }
+                if object.responds(to: NSSelectorFromString("accessibilityValue")) { _ = object.value(forKey: "accessibilityValue") }
             }
-            for child in view.subviews { visit(child) }
+            if object.responds(to: NSSelectorFromString("accessibilityChildren")) {
+                for child in object.value(forKey: "accessibilityChildren") as? [NSObject] ?? [] { visit(child) }
+            }
         }
         visit(host)
         precondition(textCount > 0, "The fixture must reach actual native text elements, not an empty hosting tree")
