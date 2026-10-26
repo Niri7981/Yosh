@@ -17,7 +17,7 @@ fi
 for entry in pay-dev-backend.ts pay-dev-mcp.ts; do
   [[ -f "$repository_root/scripts/$entry" ]] || fail "Missing development entry: $entry"
 done
-for binary in "$repository_root/build.noindex/pay-mcp-target/debug/yosh-controlled-mcp" "$repository_root/build.noindex/pay-protocol-engine/yosh-execution-protocol"; do
+for binary in "$repository_root/build.noindex/live-devnet-feature/rust-target/debug/yosh-controlled-mcp" "$repository_root/build.noindex/pay-protocol-engine/yosh-execution-protocol"; do
   [[ -x "$binary" ]] || fail "Build the existing Pay integration binaries first: $binary"
 done
 [[ -x "$repository_root/node_modules/.bin/esbuild" ]] || fail 'Install the existing locked build dependencies first.'
@@ -49,21 +49,21 @@ built="$derived/Build/Products/Release/Yosh.app"
 if [[ -e "$app" ]]; then rm -rf "$app"; fi
 /usr/bin/ditto "$built" "$app"
 plist="$app/Contents/Info.plist"
-/usr/bin/plutil -replace CFBundleIdentifier -string com.yosh.pay-development "$plist"
+/usr/bin/plutil -replace CFBundleIdentifier -string com.yosh.pay-development.v011rc5 "$plist"
 /usr/bin/plutil -replace CFBundleDisplayName -string 'Yosh Pay Dev' "$plist"
 /usr/bin/plutil -replace CFBundleName -string 'Yosh Pay Dev' "$plist"
 /usr/bin/plutil -insert YoshPayDevelopment -bool true "$plist"
 runtime="$app/Contents/Resources/Runtime"
 mkdir -p "$runtime/backend/.next" "$runtime/licenses"
-printf '%s\n' 'yosh-pay-offline-development-v1' > "$runtime/backend/.next/BUILD_ID"
-"$repository_root/node_modules/.bin/esbuild" "$repository_root/scripts/pay-dev-backend.ts" --bundle --platform=node --target=node24 --format=cjs --outfile="$runtime/backend/server.js"
-"$repository_root/node_modules/.bin/esbuild" "$repository_root/scripts/pay-dev-mcp.ts" --bundle --platform=node --target=node24 --format=cjs --outfile="$runtime/mcp.cjs"
-"$repository_root/node_modules/.bin/esbuild" "$repository_root/scripts/confirm-pay-mainnet.ts" --bundle --platform=node --target=node24 --format=cjs --outfile="$runtime/confirm-pay-mainnet.cjs"
+printf 'yosh-pay-dev-live-networks\n' > "$runtime/backend/.next/BUILD_ID"
+"$repository_root/node_modules/.bin/esbuild" "$repository_root/scripts/pay-dev-backend.ts" --bundle --platform=node --target=node24 --format=cjs --define:__YOSH_RC5__=true --outfile="$runtime/backend/server.js"
+"$repository_root/node_modules/.bin/esbuild" "$repository_root/scripts/pay-dev-mcp.ts" --bundle --platform=node --target=node24 --format=cjs --define:__YOSH_RC5__=true --outfile="$runtime/mcp.cjs"
+"$repository_root/node_modules/.bin/esbuild" "$repository_root/scripts/confirm-pay-mainnet.ts" --bundle --platform=node --target=node24 --format=cjs --define:__YOSH_RC5__=true --outfile="$runtime/confirm-pay-mainnet.cjs"
 /usr/bin/ditto "$cache/node-v${runtime_version}-darwin-arm64/bin/node" "$app/Contents/MacOS/YoshBackendNode"
 ln -s ../../MacOS/YoshBackendNode "$runtime/node"
 /usr/bin/ditto "$repository_root/scripts/run-pay-dev-codex.py" "$runtime/run-pay-dev-codex.py"
 /usr/bin/ditto "$cache/node-v${runtime_version}-darwin-arm64/LICENSE" "$runtime/licenses/Node-LICENSE"
-/usr/bin/ditto "$repository_root/build.noindex/pay-mcp-target/debug/yosh-controlled-mcp" "$runtime/pay-mcp"
+/usr/bin/ditto "$repository_root/build.noindex/live-devnet-feature/rust-target/debug/yosh-controlled-mcp" "$runtime/pay-mcp"
 /usr/bin/ditto "$repository_root/build.noindex/pay-protocol-engine/yosh-execution-protocol" "$runtime/pay-protocol-engine"
 cat > "$runtime/pay-dev.sb" <<'SB'
 (version 1)
@@ -95,6 +95,22 @@ cat > "$runtime/pay-dev-mainnet.sb" <<'SB'
  (literal (string-append (param "REAL_HOME") "/Library/Application Support/Yosh Pay Dev/offline-buyer.json"))
  (literal (string-append (param "REAL_HOME") "/Library/Application Support/Yosh Pay Dev/app-ledger.sqlite")))
 SB
+# Live Devnet uses public HTTPS and the isolated Keychain namespace enforced by
+# the backend. It cannot read the Mainnet/Offline stores. Simulation cannot sign
+# or access the public network at all.
+cp "$runtime/pay-dev-mainnet.sb" "$runtime/pay-dev-devnet.sb"
+cat >> "$runtime/pay-dev-devnet.sb" <<'SB'
+(deny file-read* file-write*
+ (subpath (string-append (param "REAL_HOME") "/Library/Application Support/Yosh Pay Dev/Mainnet"))
+ (subpath (string-append (param "REAL_HOME") "/Library/Application Support/Yosh Pay Dev v0.1.1-rc.5")))
+SB
+cp "$runtime/pay-dev.sb" "$runtime/pay-dev-simulated.sb"
+cat >> "$runtime/pay-dev-simulated.sb" <<'SB'
+(deny file-read* file-write*
+ (subpath (string-append (param "REAL_HOME") "/Library/Application Support/Yosh Pay Dev/Mainnet"))
+ (subpath (string-append (param "REAL_HOME") "/Library/Application Support/Yosh Pay Dev/Devnet"))
+ (subpath (string-append (param "REAL_HOME") "/Library/Application Support/Yosh Pay Dev v0.1.1-rc.5")))
+SB
 for binary in "$app/Contents/MacOS/YoshBackendNode" "$runtime/pay-mcp" "$runtime/pay-protocol-engine"; do
   /usr/bin/codesign --force --sign - "$binary"
 done
@@ -110,9 +126,11 @@ output = root / 'build.noindex/pay-dev-delivery'
 app = output / 'Yosh Pay Dev.app'
 def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
-manifest = {'profile': 'pay-dev-environments', 'environments': ['offline', 'mainnet'], 'bundleIdentifier': 'com.yosh.pay-development',
+manifest = {'profile': 'pay-dev-environments', 'environments': ['offline', 'simulated', 'devnet', 'mainnet'], 'bundleIdentifier': 'com.yosh.pay-development.v011rc5',
     'nodeVersion': '24.21.0', 'nodeArchiveSha256': '6239d4cf92d864487ec8cd3615038f7b67e7f58b77b21cd2f09ea9fbd68065fe',
-    'sourcePaySha256': digest(root / 'build.noindex/pay-mcp-target/debug/yosh-controlled-mcp'),
+    'sourceOverlaySha256': digest(root / 'integration/release-candidate/pay-overlay/yosh-controlled-mcp.rs'),
+    'feature': 'live-devnet-preview-not-stable-release',
+    'sourcePaySha256': digest(root / 'build.noindex/live-devnet-feature/rust-target/debug/yosh-controlled-mcp'),
     'packagedPaySha256': digest(app / 'Contents/Resources/Runtime/pay-mcp'),
     'packagedBackendSha256': digest(app / 'Contents/Resources/Runtime/backend/server.js'),
     'packagedMcpWrapperSha256': digest(app / 'Contents/Resources/Runtime/mcp.cjs'),

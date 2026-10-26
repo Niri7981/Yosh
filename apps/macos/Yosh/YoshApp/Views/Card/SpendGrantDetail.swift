@@ -100,7 +100,7 @@ struct SpendGrantDetail: View {
             inputError = nil
         }
         .confirmationDialog("Revoke this Spend Grant?", isPresented: $showingRevokeConfirmation) {
-            Button("Revoke Spend Grant", role: .destructive) { Task { await onRevoke(isMainnet ? selectedResourceID : nil) } }
+            Button("Revoke Spend Grant", role: .destructive) { Task { await onRevoke(registeredLive ? selectedResourceID : nil) } }
         } message: {
             Text("New purchase requests will be denied until you create another Spend Grant. The Agent connection stays active.")
         }
@@ -131,7 +131,7 @@ struct SpendGrantDetail: View {
             eyebrow("SPEND GRANTS")
             if let grant = displayedGrant {
                 let scopedGrant = overview.selectedAuthority?.grant?.id == grant.id ? overview.selectedAuthority?.grant : nil
-                if isMainnet, let resourceID = grant.resourceId {
+                if registeredLive, let resourceID = grant.resourceId {
                     Text(resourceID).font(.system(size: 11)).padding(.top, 6)
                     if let api = scopedGrant?.api {
                         Text(api).font(.system(size: 10)).foregroundStyle(secondaryInk)
@@ -187,7 +187,7 @@ struct SpendGrantDetail: View {
                 .font(.system(size: 29, weight: .regular, design: .serif))
                 .tracking(-0.5)
                 .accessibilityAddTraits(.isHeader)
-            if isMainnet {
+            if registeredLive {
                 Picker("Registered API", selection: $selectedResourceID) {
                     Text("Choose an API").tag("")
                     ForEach(overview.service.registeredResources ?? []) { resource in
@@ -256,7 +256,7 @@ struct SpendGrantDetail: View {
             .buttonStyle(.plain)
             // Reads must not disable native text/wheel controls and reset their
             // focus/scroll state. Only submission waits for the in-flight read.
-            .disabled(isSaving || isRefreshing || !overview.connection.enabled || currency == nil || (isMainnet && selectedResourceID.isEmpty))
+            .disabled(isSaving || isRefreshing || !overview.connection.enabled || currency == nil || (registeredLive && selectedResourceID.isEmpty))
             .accessibilityIdentifier("grant-create")
             .padding(.top, 12)
 
@@ -291,7 +291,7 @@ struct SpendGrantDetail: View {
             Text(resource.name ?? resource.resourceId)
                 .font(.system(size: 13, weight: .medium))
                 .fixedSize(horizontal: false, vertical: true)
-            Text("\(resource.method ?? "GET") · Solana Mainnet · USDC")
+            Text("\(resource.method ?? "GET") · \(overview.service.purchaseMode.title) · \(currency ?? "Asset unavailable")")
                 .font(.system(size: 10)).foregroundStyle(secondaryInk)
             if let maximum = resource.maximumPriceDisplay {
                 Text("Maximum · \(maximum)").font(.system(size: 11)).foregroundStyle(secondaryInk)
@@ -369,14 +369,14 @@ struct SpendGrantDetail: View {
     }
 
     private var isReplacing: Bool {
-        if !isMainnet { return overview.scopedGrant?.status == .active }
+        if !registeredLive { return overview.scopedGrant?.status == .active }
         return (overview.grants ?? []).contains { $0.resourceId == selectedResourceID && $0.status == .active }
     }
     private var displayedGrant: AppOverview.Grant? {
-        if isMainnet && !selectedResourceID.isEmpty { return overview.grants?.first { $0.resourceId == selectedResourceID } }
+        if registeredLive && !selectedResourceID.isEmpty { return overview.grants?.first { $0.resourceId == selectedResourceID } }
         return overview.scopedGrant
     }
-    private var isMainnet: Bool { overview.service.purchaseMode == .liveMainnet }
+    private var registeredLive: Bool { overview.service.purchaseMode == .liveMainnet || overview.service.registeredResourceRequired == true }
     private var currency: String? { DailyAuthorityPresentation(overview: overview).currency }
     private var status: String {
         switch overview.scopedGrant?.status {
@@ -426,7 +426,7 @@ struct SpendGrantDetail: View {
     }
 
     private func saveGrant() {
-        guard !isSaving, !isRefreshing, overview.connection.enabled, currency != nil, !isMainnet || !selectedResourceID.isEmpty else { return }
+        guard !isSaving, !isRefreshing, overview.connection.enabled, currency != nil, !registeredLive || !selectedResourceID.isEmpty else { return }
         guard let total = SpendGrantDraft.minorUnits(draft.total), total != "0",
               let single = SpendGrantDraft.minorUnits(draft.perTransaction), single != "0" else {
             inputError = "Enter positive amounts with up to 6 decimal places."
@@ -444,10 +444,10 @@ struct SpendGrantDetail: View {
         inputError = nil
         let expiresAt = Int64(draft.expiration.timeIntervalSince1970 * 1_000)
         let sample: ResourceRequestSample?
-        do { sample = isMainnet ? try ResourceRequestSample.parse(queryText: sampleQuery, bodyText: sampleBody) : nil }
+        do { sample = registeredLive ? try ResourceRequestSample.parse(queryText: sampleQuery, bodyText: sampleBody) : nil }
         catch { inputError = "Enter valid JSON objects for the sample request."; return }
         let resourceID = selectedResourceID
-        if isMainnet, overview.service.registeredResources?.first(where: { $0.resourceId == resourceID })?.method == "POST" {
+        if registeredLive, overview.service.registeredResources?.first(where: { $0.resourceId == resourceID })?.method == "POST" {
             preparingPost = true
             Task {
                 defer { preparingPost = false }
@@ -457,6 +457,6 @@ struct SpendGrantDetail: View {
                     postReview = review
                 } catch { inputError = (error as? OverviewLoadError)?.message ?? "The POST request could not be prepared safely." }
             }
-        } else { Task { await onCreate(total, single, expiresAt, isMainnet ? resourceID : nil, sample, nil) } }
+        } else { Task { await onCreate(total, single, expiresAt, registeredLive ? resourceID : nil, sample, nil) } }
     }
 }

@@ -38,11 +38,10 @@ struct WalletsView: View {
                             }.padding(.bottom, 10)
                             Divider()
                         }
-                        if YoshPayDevelopment.isEnabled(), snapshot.executionMode == "live_mainnet",
-                           snapshot.wallets.contains(where: { $0.id == "mainnet" && $0.status == .missing }) {
+                        if canCreatePaymentWallet {
                             Button("Create Wallet", systemImage: "plus") { confirmPaymentWallet = true }
                                 .disabled(saving).accessibilityIdentifier("wallets.create-payment-wallet")
-                            note("Create your Mainnet payment wallet in macOS Keychain. It starts empty; payments remain disabled.")
+                            note("Create your \(paymentNetwork) payment wallet in macOS Keychain. It starts empty; spending requires its own authority.")
                         }
                     }
                     if !snapshot.library.isEmpty {
@@ -63,8 +62,7 @@ struct WalletsView: View {
                 } else if error == nil {
                     ProgressView("Loading wallets…").controlSize(.small)
                 }
-                if !(YoshPayDevelopment.isEnabled() && snapshot?.executionMode == "live_mainnet"
-                     && snapshot?.wallets.contains(where: { $0.id == "mainnet" && $0.status == .missing }) == true) {
+                if !canCreatePaymentWallet && !isolatedTestMode {
                 SettingsSection(title: "ADD WALLET", symbol: "plus") {
                     SettingsRow(title: "Create new wallet", symbol: "plus", showsChevron: true,
                         action: { start("create") }).accessibilityIdentifier("wallets.create")
@@ -104,11 +102,11 @@ struct WalletsView: View {
             }
         }
         .task(id: isActive) { if isActive { await reload() } }
-        .alert("Create Mainnet wallet?", isPresented: $confirmPaymentWallet) {
+        .alert("Create \(paymentNetwork) wallet?", isPresented: $confirmPaymentWallet) {
             Button("Cancel", role: .cancel) {}
             Button("Create Wallet") { Task { await createPaymentWallet() } }
         } message: {
-            Text("Creates an empty wallet for this Mainnet profile. Existing wallets are unchanged. No transfer, signing or purchase will occur.")
+            Text("Creates an empty wallet for this \(paymentNetwork) profile. Existing wallets are unchanged. No transfer, signing or purchase will occur.")
         }
         .onDisappear { privateKey = "" }
     }
@@ -165,6 +163,16 @@ struct WalletsView: View {
         name = draftName; privateKey = ""; publicAddress = ""; error = nil; navigation.show(kind)
     }
     private func back() { privateKey = ""; error = nil; navigation.show(nil) }
+    private var paymentNetwork: String { snapshot?.executionMode == "live_devnet" ? "Devnet" : "Mainnet" }
+    private var isolatedTestMode: Bool {
+        YoshPayDevelopment.isEnabled() && snapshot?.executionMode != "live_mainnet"
+    }
+    private var canCreatePaymentWallet: Bool {
+        guard YoshPayDevelopment.isEnabled(), let snapshot,
+              ["live_mainnet", "live_devnet"].contains(snapshot.executionMode) else { return false }
+        let slot = snapshot.executionMode == "live_mainnet" ? "mainnet" : "devnet"
+        return snapshot.wallets.contains { $0.id == slot && $0.status == .missing }
+    }
     private func isSelected(_ id: String, mode: String) -> Bool { id == (mode == "live_mainnet" ? "mainnet" : "devnet") }
     private func short(_ address: String) -> String { "\(address.prefix(8))…\(address.suffix(4))" }
     private func copy(_ address: String) {

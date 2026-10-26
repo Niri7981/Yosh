@@ -52,8 +52,8 @@ struct CardSettingsView: View {
             onSelectEnvironment: { mode in
                 guard mode != development?.environment else { return }
                 if mode == .mainnet { confirmMainnet = true }
-                else { Task { await switchEnvironment(.offline) } }
-            }, onSaveRPC: { rpc in Task { await switchEnvironment(.mainnet, rpc: rpc) } })
+                else { Task { await switchEnvironment(mode) } }
+            }, onSaveRPC: { rpc in Task { await switchEnvironment(development?.environment ?? .mainnet, rpc: rpc) } })
         } destination: { route in
             if route == "wallets" {
                 WalletsView(client: overviewClient, isActive: isActive && navigation.selection != nil,
@@ -68,7 +68,7 @@ struct CardSettingsView: View {
                 Button("Cancel", role: .cancel) {}
                 Button("Use Mainnet") { Task { await switchEnvironment(.mainnet) } }
             } message: {
-                Text("Mainnet uses real SOL and USDC. Payments are irreversible. Mainnet wallets and records stay separate from Offline. Selecting Mainnet does not create a wallet or enable payments.")
+                Text("Mainnet uses real SOL and USDC. Payments are irreversible. Its existing wallet, authority and payment settings stay separate from Devnet and Simulation. Selecting Mainnet does not create a wallet.")
             }
             .onReceive(NotificationCenter.default.publisher(for: .nativeServiceExited)) { _ in
                 guard !switchingEnvironment else { return }
@@ -110,7 +110,8 @@ struct CardSettingsView: View {
         switchingEnvironment = true; state = .loading; actionError = nil
         defer { switchingEnvironment = false }
         let next = PayDevelopmentSelection(version: 1, environment: mode,
-            mainnetRiskAccepted: mode == .mainnet || previous.mainnetRiskAccepted, rpcUrl: rpc ?? previous.rpcUrl)
+            mainnetRiskAccepted: mode == .mainnet || previous.mainnetRiskAccepted, rpcUrl: mode == .mainnet ? rpc ?? previous.rpcUrl : previous.rpcUrl,
+            devnetRpcUrl: mode == .devnet ? rpc ?? previous.devnetRpcUrl : previous.devnetRpcUrl)
         do {
             try await overviewClient.runtime.switchDevelopmentEnvironment(next)
             navigation.show(nil)

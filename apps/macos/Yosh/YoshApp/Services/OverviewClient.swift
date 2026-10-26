@@ -4,6 +4,7 @@ enum OverviewLoadError: Error {
     case configuration
     case resourceConflict, resourceDiscoveryUnavailable, resourcePostApprovalRequired
     case executionBusy
+    case executionRestartRequired, executionUnconfirmed
     case unavailable
     case unauthorized
     case invalidResponse
@@ -28,6 +29,8 @@ enum OverviewLoadError: Error {
         case .resourceConflict: "This API is read-only, removed, or its resource ID is already reserved."
         case .resourceDiscoveryUnavailable: "No supported Mainnet USDC challenge could be safely retrieved."
         case .executionBusy: "Finish pending purchases before changing execution."
+        case .executionRestartRequired: "Changing networks requires a safe restart. Reopen Yosh and try again."
+        case .executionUnconfirmed: "Network change was not confirmed. Check the selected environment and retry."
         case .configuration: "Local service setup unavailable"
         case .unavailable: "Local service unavailable"
         case .unauthorized: "Management access denied"
@@ -67,6 +70,7 @@ extension OverviewLoadError {
         case .defaultMemberRequired: "The default agent can't be revoked."
         case .invalidRequest: "Check the entered values and try again."
         case .executionBusy: "Finish pending purchases before changing execution."
+        case .executionRestartRequired, .executionUnconfirmed: message
         case .writeRejected: "The change wasn't confirmed. Check the current status and try again."
         case .serviceExited: "Yosh stopped unexpectedly. Try again to restore access."
         case .dataDirectoryInUse: "Another copy of Yosh is using your data. Close it, then try again."
@@ -102,8 +106,30 @@ struct OverviewClient {
         return balance
     }
 
-    func setExecution(_ mode: AppOverview.Service.PurchaseMode) async throws {
-        try await write(.setExecution(mode))
+    /// True means the selected store changed; member IDs must be refreshed from its roster.
+    @discardableResult
+    func setExecution(_ mode: AppOverview.Service.PurchaseMode) async throws -> Bool {
+        do {
+            if let previous = try await runtime.developmentEnvironment() {
+                let target: PayDevelopmentMode = switch mode {
+                case .liveMainnet: .mainnet
+                case .liveDevnet: .devnet
+                case .simulated: .simulated
+                }
+                let next = PayDevelopmentSelection(version: previous.version, environment: target,
+                    mainnetRiskAccepted: target == .mainnet || previous.mainnetRiskAccepted, rpcUrl: previous.rpcUrl, devnetRpcUrl: previous.devnetRpcUrl)
+                try await runtime.switchDevelopmentEnvironment(next)
+                let verified = try await read(.execution, as: ExecutionEnvironment.self)
+                guard verified.mode == mode else { throw OverviewLoadError.executionUnconfirmed }
+                return previous.environment != target
+            }
+            try await write(.setExecution(mode))
+            let verified = try await read(.execution, as: ExecutionEnvironment.self)
+            guard verified.mode == mode else { throw OverviewLoadError.executionUnconfirmed }
+            return false
+        } catch let error as ServiceRuntimeError {
+            throw mappedRuntimeError(error)
+        }
     }
 
     func setProductionExecutionEnabled(_ enabled: Bool) async throws {
@@ -236,6 +262,8 @@ struct OverviewClient {
         guard data.count <= 65_536 else { throw OverviewLoadError.writeRejected }
         if response.statusCode == 200 { return }
         if let code = try? JSONDecoder().decode(ManagementErrorResponse.self, from: data).code {
+            if code == "EXECUTION_BUSY" { throw OverviewLoadError.executionBusy }
+            if code == "ENVIRONMENT_RESTART_REQUIRED" { throw OverviewLoadError.executionRestartRequired }
             if code == "RESOURCE_POST_APPROVAL_REQUIRED" { throw OverviewLoadError.resourcePostApprovalRequired }
             if ["RESOURCE_REQUEST_INPUT_REQUIRED", "RESOURCE_REQUEST_INPUT_INVALID", "RESOURCE_REQUEST_INPUT_UNSUPPORTED", "INVALID_REQUEST"].contains(code) { throw OverviewLoadError.invalidRequest }
             if code == "DATA_DIRECTORY_IN_USE" { throw OverviewLoadError.dataDirectoryInUse }
@@ -256,26 +284,30 @@ struct OverviewClient {
         } catch is CancellationError {
             throw CancellationError()
         } catch let error as ServiceRuntimeError {
-            switch error {
-            case .environmentBusy: throw OverviewLoadError.executionBusy
-            case .configuration: throw OverviewLoadError.configuration
-            case .portConflict: throw OverviewLoadError.portConflict
-            case .authenticatedShutdownFailed: throw OverviewLoadError.authenticatedShutdownFailed
-            case .authenticatedShutdownTimedOut: throw OverviewLoadError.authenticatedShutdownTimedOut
-            case .authenticationFailed: throw OverviewLoadError.unauthorized
-            case .credentialUnavailable: throw OverviewLoadError.startupFailed
-            case .requestTimedOut: throw OverviewLoadError.requestTimedOut
-            case .responseTooLarge: throw OverviewLoadError.invalidResponse
-            case .cannotStart: throw OverviewLoadError.startupFailed
-            case .notReady: throw OverviewLoadError.readinessTimedOut
-            case .processExited: throw OverviewLoadError.serviceExited
-            case .dataDirectoryInUse: throw OverviewLoadError.dataDirectoryInUse
-            case .restartLimitReached: throw OverviewLoadError.startupFailed
-            case .unavailable: throw OverviewLoadError.unavailable
-            }
+            throw mappedRuntimeError(error)
         } catch {
             throw OverviewLoadError.unavailable
         }
+    }
+
+    private func mappedRuntimeError(_ error: ServiceRuntimeError) -> OverviewLoadError {
+            switch error {
+            case .environmentBusy: .executionBusy
+            case .configuration: .configuration
+            case .portConflict: .portConflict
+            case .authenticatedShutdownFailed: .authenticatedShutdownFailed
+            case .authenticatedShutdownTimedOut: .authenticatedShutdownTimedOut
+            case .authenticationFailed: .unauthorized
+            case .credentialUnavailable: .startupFailed
+            case .requestTimedOut: .requestTimedOut
+            case .responseTooLarge: .invalidResponse
+            case .cannotStart: .startupFailed
+            case .notReady: .readinessTimedOut
+            case .processExited: .serviceExited
+            case .dataDirectoryInUse: .dataDirectoryInUse
+            case .restartLimitReached: .startupFailed
+            case .unavailable: .unavailable
+            }
     }
 }
 

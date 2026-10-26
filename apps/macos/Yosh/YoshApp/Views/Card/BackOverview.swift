@@ -556,7 +556,14 @@ struct BackOverview: View {
         do {
             switch change {
             case .execution(let mode):
-                try await overviewClient.setExecution(mode)
+                let restarted = try await overviewClient.setExecution(mode)
+                if restarted {
+                    // Each profile owns a different roster; do not query the new
+                    // backend using the previous profile's member UUID.
+                    await onMemberChanged()
+                    writeState = .idle
+                    return
+                }
                 success = "Execution environment saved"
             case .productionExecution(let enabled):
                 try await overviewClient.setProductionExecutionEnabled(enabled)

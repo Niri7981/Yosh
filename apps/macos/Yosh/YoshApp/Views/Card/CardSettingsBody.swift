@@ -19,13 +19,35 @@ struct CardSettingsBody: View {
     var onSaveRPC: (String) -> Void = { _ in }
     @State private var rpcDraft = ""
 
+    private var selectedRPC: String {
+        development?.environment == .devnet ? development?.devnetRPC ?? "https://api.devnet.solana.com"
+            : development?.rpcUrl ?? PayDevelopmentSelection.offline.rpcUrl
+    }
+    private var environmentDescription: String {
+        switch development?.environment {
+        case .mainnet: "Real SOL and USDC. Payments require separate authorization."
+        case .devnet: "Solana Devnet. Test assets only."
+        case .simulated: "Simulation. No signing or blockchain transactions."
+        case .offline: "Local offline testing. No real funds."
+        case nil: "Checking environment…"
+        }
+    }
+    private var environmentSubtitle: String {
+        switch development?.environment {
+        case .mainnet: "Mainnet · Real funds"
+        case .devnet: "Devnet · Test assets"
+        case .simulated: "Simulation · No signing"
+        case .offline: "Offline · No real funds"
+        case nil: "Checking…"
+        }
+    }
     private var unavailableValue: String { isLoading ? "Checking…" : "Unavailable" }
     private let rule = YoshShellPalette.rule
 
     var body: some View {
         VStack(alignment: .leading, spacing: CardPageHeader.Layout.firstSectionSpacing) {
             CardPageHeader(title: "Settings", style: .collection(subtitle: YoshPayDevelopment.isEnabled()
-                ? "\(development?.environment == .mainnet ? "Mainnet · Real funds" : "Offline · No real funds")" : "Manage Yosh on this Mac."))
+                ? environmentSubtitle : "Manage Yosh on this Mac."))
                 .foregroundStyle(YoshShellPalette.ink)
             ScrollView(.vertical) {
                 VStack(alignment: .leading, spacing: 28) {
@@ -35,26 +57,28 @@ struct CardSettingsBody: View {
                                 Text("Current environment")
                                 Spacer()
                                 Menu(development?.environment.title ?? "Checking…") {
-                                    Button("Offline") { onSelectEnvironment(.offline) }
+                                    Button("Simulation") { onSelectEnvironment(.simulated) }
+                                    Button("Solana Devnet") { onSelectEnvironment(.devnet) }
+                                    if development?.environment == .offline {
+                                        Button("Offline") { onSelectEnvironment(.offline) }
+                                    }
                                     Button("Solana Mainnet…") { onSelectEnvironment(.mainnet) }
                                 }
                                 .disabled(isSwitchingEnvironment || development == nil)
                                 .accessibilityIdentifier("settings.environment")
                             }.font(.system(size: 13)).padding(.vertical, 10)
-                            Text(isSwitchingEnvironment ? "Safely restarting the backend…" : development?.environment == .mainnet
-                                ? "Real SOL and USDC. Payments require separate authorization."
-                                : "Local simulation. No real funds.")
+                            Text(isSwitchingEnvironment ? "Safely restarting the backend…" : environmentDescription)
                                 .font(.system(size: 11)).foregroundStyle(YoshShellPalette.secondaryInk)
                             Text("Reconnect Pay MCP in Codex after changing environment.")
                                 .font(.system(size: 11)).foregroundStyle(YoshShellPalette.secondaryInk)
-                            if development?.environment == .mainnet {
+                            if development?.environment == .mainnet || development?.environment == .devnet {
                                 separator
-                                TextField("Mainnet RPC URL", text: $rpcDraft)
+                                TextField(development?.environment == .devnet ? "Devnet RPC URL" : "Mainnet RPC URL", text: $rpcDraft)
                                     .textFieldStyle(.roundedBorder)
                                     .accessibilityIdentifier("settings.mainnet-rpc")
                                 Button("Save RPC and reconnect") { onSaveRPC(rpcDraft) }
-                                    .disabled(isSwitchingEnvironment || rpcDraft == development?.rpcUrl)
-                                Text("Wallets, budgets and purchase records are separate from Offline.")
+                                    .disabled(isSwitchingEnvironment || rpcDraft == selectedRPC)
+                                Text("Wallets, budgets and purchase records stay separate between environments.")
                                     .font(.system(size: 11)).foregroundStyle(YoshShellPalette.secondaryInk)
                             }
                         }
@@ -107,7 +131,8 @@ struct CardSettingsBody: View {
                             separator
                         }
                         SettingsRow(title: "Key storage", value: YoshPayDevelopment.isEnabled()
-                            ? development?.environment == .mainnet ? "macOS Keychain" : "Offline test key" : "macOS Keychain")
+                            ? development?.environment == .offline ? "Offline test key"
+                                : development?.environment == .simulated ? "No signing" : "macOS Keychain" : "macOS Keychain")
                         separator
                         SettingsRow(title: "Local management", value: information == nil ? unavailableValue : "Protected")
                     }
@@ -145,8 +170,8 @@ struct CardSettingsBody: View {
         .padding(.top, CardPageHeader.Layout.topSpacing)
         .padding(.bottom, 12)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .onAppear { rpcDraft = development?.rpcUrl ?? PayDevelopmentSelection.offline.rpcUrl }
-        .onChange(of: development?.rpcUrl) { _, value in rpcDraft = value ?? PayDevelopmentSelection.offline.rpcUrl }
+        .onAppear { rpcDraft = selectedRPC }
+        .onChange(of: development) { _, _ in rpcDraft = selectedRPC }
     }
 
     private var separator: some View {

@@ -26,7 +26,7 @@ struct ExecutionDetailViewTest {
         precondition(body == ["mode": "live_mainnet"], "Selection transport must not carry authority or wallet fields")
         func page(_ value: ExecutionEnvironment?, saving: Bool = false) -> some View {
             ExecutionDetail(environment: value, isSaving: saving, message: nil, messageFailed: false,
-                onBack: { backs += 1 }, onSelect: { selections.append($0) })
+                onBack: { backs += 1 }, onSelect: { selections.append($0) }, onProductionExecution: { _ in })
                 .frame(width: 420, height: 526)
                 .background(Color(red: 0.95, green: 0.97, blue: 0.985))
                 .environment(\.colorScheme, .light)
