@@ -11,6 +11,7 @@ import { SolanaPublicKeySchema, X402ChallengeSchema, type X402Challenge } from '
 import { runPaymentPreflight } from './payment-preflight';
 import { assertUnsignedPaymentBindings } from './original-payment-evidence';
 import { readPaymentJson } from './read-payment-json';
+import { fetchRpcRead } from './rpc-read-transport';
 import { safeResourceFetch } from '../resources/safe-resource-fetch';
 
 export const MARKET_RESOURCE = "/api/paid/market-snapshot?asset=SOL";
@@ -46,8 +47,10 @@ export async function solanaRpc<T>(config: Pick<PaymentConfig, "rpcUrl"> & Parti
     signal: AbortSignal.timeout(15_000),
     redirect: 'error',
   };
-  const response = config.mode === 'live_mainnet' && process.env.YOSH_PAY_MCP_MAINNET === '1'
-    ? await safeResourceFetch(new URL(config.rpcUrl).href, init) : await fetch(config.rpcUrl, init);
+  const fetcher: typeof fetch = (config.mode === 'live_mainnet' && process.env.YOSH_PAY_MCP_MAINNET === '1')
+    || (config.mode === 'live_devnet' && process.env.YOSH_PAY_MCP_DEVNET === '1')
+    ? (input, options) => safeResourceFetch(new URL(input instanceof Request ? input.url : String(input)).href, options ?? {}) : fetch;
+  const response = await fetchRpcRead(config.mode, method, fetcher, config.rpcUrl, init);
   if (!response.ok) throw new Error(`RPC ${method} returned HTTP ${response.status}`);
   const body = await readPaymentJson(response);
   if (typeof body !== 'object' || body === null || !('result' in body) || ('error' in body && body.error)) throw new Error(`RPC ${method} failed`);

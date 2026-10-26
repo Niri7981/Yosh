@@ -1,6 +1,6 @@
 import { dirname, resolve as resolveRuntimePath } from 'node:path';
 import { isPayDevelopmentDirectory } from '../pay-dev/isolation';
-import { assertDevelopmentStorage, isMainnetDevelopment } from '../pay-dev/environment';
+import { admitDevnetDevelopment, admitSimulatedDevelopment, isDevnetDevelopment, isSimulatedDevelopment, assertDevelopmentStorage, isMainnetDevelopment } from '../pay-dev/environment';
 import { readPayTrace } from '../payment/pay-execution-trace';
 import { join } from 'node:path';
 import { authoritySurface, type AuthorityWalletState } from './authority-surface';
@@ -13,7 +13,7 @@ import { PurchaseLedger } from '../purchases/purchase-ledger';
 import { executeApprovedPayment, paymentEndpointForIntent, recoverApprovedPayment, reconcileApprovedPayment } from '../purchases/approved-payment';
 import type { PaymentExecutor } from '../payment/payment-execution-contract';
 import { assertIsolatedPaymentDirectory } from '../payment/isolated-pay-execution';
-import { createMainnetPayExecution } from '../payment/mainnet-pay-execution';
+import { createPayExecution } from '../payment/mainnet-pay-execution';
 import { createPayAuthorityAdapter } from '../payment/pay-authority-adapter';
 import { admitPayMainnetRuntime, writePayMainnetDescriptor } from '../payment/pay-mainnet-control';
 import { existsSync } from 'node:fs';
@@ -30,8 +30,8 @@ import { PAID_RESOURCE_SCOPE_ID } from '../resources/paid-resources';
 import { DEVNET_NETWORK } from '../payment/payment-config';
 import { requestPaidResourcePurchase, type PurchaseRequestResult } from '../purchases/request-paid-resource-purchase';
 import { loadRegisteredResources, registeredResourceSummary } from '../resources/registered-resources';
-import { discoverResource } from '../resources/mainnet-resource-discovery';
-import { resourceEntrySummary } from '../resources/runtime-resource-registry';
+import { discoverResource, prepareDiscovery } from '../resources/mainnet-resource-discovery';
+import { RuntimeResourceSchema, resourceEntrySummary } from '../resources/runtime-resource-registry';
 import { ResourceRequestInputSchema, resourceInputNames, authorizedRequestInstance } from '../resources/http-resource';
 import { assertGrantPostScope, assertPostRequestApproval, postRequestPolicyHash, postRequestReview } from '../resources/post-request-authorization';
 import { fetchResourceChallenge } from '../payment/resource-challenge';
@@ -72,6 +72,11 @@ export class AppRuntime {
   private accepting = true;
   private readonly payDevelopment: boolean;
   private readonly devMainnet: boolean;
+  private readonly devDevnet: boolean;
+  private readonly devSimulated: boolean;
+  private readonly payDevnet = process.env.YOSH_PAY_MCP_DEVNET === '1';
+  private get controlledPay() { return this.payMainnet || this.payDevnet; }
+  private get registeredLive() { return this.environment.mode === 'live_mainnet' || this.devDevnet; }
   private walletProvisioning?: Promise<{ address: string; reused: boolean }>;
   private readonly payMainnet = process.env.YOSH_PAY_MCP_MAINNET === '1';
   private payAuthority?: ReturnType<typeof createPayAuthorityAdapter>;
@@ -103,6 +108,11 @@ export class AppRuntime {
     resolveYoshConfiguration();
     this.payDevelopment = isPayDevelopmentDirectory(directory);
     this.devMainnet = isMainnetDevelopment(directory);
+    this.devDevnet = isDevnetDevelopment(directory);
+    this.devSimulated = isSimulatedDevelopment(directory);
+    if (this.devDevnet) admitDevnetDevelopment(directory);
+    if (this.devSimulated) admitSimulatedDevelopment(directory);
+    if (this.payDevnet && (!this.devDevnet || this.payMainnet)) throw new Error('PAY_DEVNET_CONFIGURATION_REQUIRED');
     if (this.devMainnet) assertDevelopmentStorage(directory);
     if (!this.payMainnet && existsSync(join(directory, 'pay-mainnet-cutover.json'))) throw new Error('PAY_MAINNET_PROFILE_REQUIRED');
     // This seam cannot select pay for an installed/user runtime. Production
@@ -117,36 +127,37 @@ export class AppRuntime {
       if (selection) this.applyExecutionProfile(selection);
       this.environment = resolvePaymentEnvironment();
       this.purchaseExecutionMode();
-      if (this.payMainnet) {
-        if (this.payDevelopment || this.environment.mode !== 'live_mainnet' || dependencies.paymentExecutor) throw new Error('PAY_MAINNET_CONFIGURATION_REQUIRED');
-        admitPayMainnetRuntime(directory);
-        dependencies.paymentExecutor = createMainnetPayExecution({ takeUnsigned: context => {
+      if (this.controlledPay) {
+        if (this.payMainnet && (this.payDevelopment || this.environment.mode !== 'live_mainnet' || dependencies.paymentExecutor)) throw new Error('PAY_MAINNET_CONFIGURATION_REQUIRED');
+        if (this.payDevnet && (this.environment.mode !== 'live_devnet' || dependencies.paymentExecutor)) throw new Error('PAY_DEVNET_CONFIGURATION_REQUIRED');
+        if (this.payMainnet) admitPayMainnetRuntime(directory);
+        dependencies.paymentExecutor = createPayExecution({ network: this.payMainnet ? 'mainnet' : 'devnet', takeUnsigned: context => {
           if (!this.payAuthority) throw new Error('PAY_AUTHORITY_NOT_READY');
           return this.payAuthority.takeUnsigned(context);
         } });
       }
-      if (dependencies.paymentExecutor && !this.payMainnet && this.environment.mode !== 'live_devnet') throw new Error('PAY_EXECUTOR_PRODUCTION_BLOCKED');
+      if (dependencies.paymentExecutor && !this.controlledPay && this.environment.mode !== 'live_devnet') throw new Error('PAY_EXECUTOR_PRODUCTION_BLOCKED');
       ledger = new PurchaseLedger(join(directory, 'app-ledger.sqlite'), { managed: true, requireRegisteredResource: true, requireSpendGrant: true, mode: this.purchaseExecutionMode(), timeZone: dependencies.timeZone ?? localTimeZone, now: dependencies.now });
       this.ledger = ledger;
-      if (this.payMainnet) ledger.executionSafety.enable(Date.now());
+      if (this.controlledPay) ledger.executionSafety.enable(Date.now());
       dependencies.paymentExecutor?.bindRuntime?.(directory, ledger);
       // Import installation configuration once; subsequent reads use durable product data.
-      if (!ledger.resources.list().length) ledger.resources.initialize(loadRegisteredResources(process.env, resolvePaymentEnvironment({ YOSH_EXECUTION_MODE: 'live_mainnet' })));
-      else ledger.resources.initialize([]);
+      if (!ledger.resources.list().length) ledger.resources.initialize(loadRegisteredResources(process.env, this.devDevnet || this.devSimulated ? this.environment : resolvePaymentEnvironment({ YOSH_EXECUTION_MODE: 'live_mainnet' })), (this.devDevnet || this.devSimulated) ? this.environment.network : resolvePaymentEnvironment({ YOSH_EXECUTION_MODE: 'live_mainnet' }).network);
+      else ledger.resources.initialize([], (this.devDevnet || this.devSimulated) ? this.environment.network : resolvePaymentEnvironment({ YOSH_EXECUTION_MODE: 'live_mainnet' }).network);
       const defaultMemberId = this.ledger.defaultCardMember().id;
       for (const member of this.ledger.cardMembers()) {
         this.memberConnections.set(member.id, new AgentConnection(directory, member.id, id => this.ledger.isCardMemberActive(id), member.id !== defaultMemberId, dependencies.now));
       }
       this.agentConnection = this.memberConnections.get(defaultMemberId)!;
-      if (this.payMainnet) {
+      if (this.controlledPay) {
         const origin = `http://127.0.0.1:${resolveYoshConfiguration().port ?? '3049'}`;
         this.payAuthority = createPayAuthorityAdapter({ directory, runtime: () => this, config: () => this.paymentConfiguration(),
-          executor: dependencies.paymentExecutor!, origin, rpcUrl: this.environment.rpcUrl, mainnet: true });
-        writePayMainnetDescriptor(directory, origin, defaultMemberId);
+          executor: dependencies.paymentExecutor!, origin, rpcUrl: this.environment.rpcUrl, ...(this.payMainnet ? { mainnet: true } : { devnet: true }) });
+        if (this.payMainnet) writePayMainnetDescriptor(directory, origin, defaultMemberId);
       }
       this.codexIntegration = new CodexIntegration(directory, defaultMemberId, dependencies.codex);
-      this.agentConnection.setIntegration(this.payDevelopment || this.devMainnet ? this.agentConnection.status().enabled : this.codexIntegration.configured,
-        this.payDevelopment || this.devMainnet ? 'yosh-pay-dev' : this.codexIntegration.serverName);
+      this.agentConnection.setIntegration(this.payDevelopment || this.devMainnet || this.devDevnet || this.devSimulated ? this.agentConnection.status().enabled : this.codexIntegration.configured,
+        this.payDevelopment || this.devMainnet || this.devDevnet || this.devSimulated ? 'yosh-pay-dev' : this.codexIntegration.serverName);
       // A verified persisted connection survives a service restart. Host-session
       // liveness is still reset by AgentConnection, and purchase checks remain server-side.
     } catch (error) {
@@ -174,18 +185,18 @@ export class AppRuntime {
     this.purchaseExecutionMode();
     const defaultMemberId = this.ledger.defaultCardMember().id;
     const readiness = this.authority(defaultMemberId).readiness;
-    const resources = this.environment.isProduction ? this.activeResourceDefinitions().map(resource => resource.resourceId) : [undefined];
+    const resources = this.registeredLive ? this.activeResourceDefinitions().map(resource => resource.resourceId) : [undefined];
     const anyEligibleMember = this.ledger.cardMembers().some(member => resources.some(resourceId =>
       this.authority(member.id, resourceId).readiness.transactionExecution.eligible));
     return { mode: this.environment.mode, cluster: this.environment.cluster, network: this.environment.network,
       asset: this.environment.asset, productionExecutionEnabled: this.environment.productionExecutionEnabled,
       spendingAuthorized: anyEligibleMember,
       configurationReady: this.environment.mode === 'simulated' || readiness.paymentConfiguration.ready,
-      transactionExecutionEligible: anyEligibleMember, quotePreflightRequired: this.environment.mode === 'live_mainnet',
+      transactionExecutionEligible: anyEligibleMember, quotePreflightRequired: this.registeredLive,
       readinessCardMemberId: defaultMemberId, readiness };
   }
   private paymentConfiguration(defaultMode: PurchaseExecutionMode = 'live_devnet') {
-    if (this.environment.mode === 'live_mainnet' && this.authorityWalletStatus !== 'available') throw new Error('Mainnet wallet unavailable');
+    if (this.registeredLive && this.authorityWalletStatus !== 'available') throw new Error('Wallet unavailable');
     return loadPaymentConfig(this.resourceConfiguration(), defaultMode, this.walletAddress);
   }
   private paymentConfigurationSnapshot() {
@@ -194,18 +205,18 @@ export class AppRuntime {
     catch (error) {
       if (error instanceof PaymentConfigurationError || error instanceof PaymentEnvironmentError) return { config: undefined, code: error.code };
       const message = error instanceof Error ? error.message : '';
-      const code = message === 'Mainnet wallet unavailable' || message === 'DEMO_BUYER_PUBLIC_KEY is required'
+      const code = message === 'Mainnet wallet unavailable' || message === 'Wallet unavailable' || message === 'DEMO_BUYER_PUBLIC_KEY is required'
         ? 'WALLET_UNAVAILABLE'
         : message === 'DEMO_MERCHANT_PUBLIC_KEY is required' ? 'TEST_MERCHANT_CONFIGURATION_REQUIRED'
-          : message === 'MAINNET_RESOURCE_REGISTRATION_REQUIRED' ? 'REGISTERED_RESOURCE_REQUIRED'
-            : message === 'MAINNET_RESOURCE_REGISTRATION_INVALID' ? 'REGISTERED_RESOURCE_INVALID'
+          : (message === 'MAINNET_RESOURCE_REGISTRATION_REQUIRED' || message === 'REGISTERED_RESOURCE_REQUIRED') ? 'REGISTERED_RESOURCE_REQUIRED'
+            : (message === 'MAINNET_RESOURCE_REGISTRATION_INVALID' || message === 'REGISTERED_RESOURCE_INVALID') ? 'REGISTERED_RESOURCE_INVALID'
               : message === 'MAINNET_WALLET_IDENTITY_MISMATCH' || message.startsWith('Mainnet wallet identity')
                 ? 'WALLET_IDENTITY_INVALID' : 'PAYMENT_CONFIGURATION_INVALID';
       return { config: undefined, code };
     }
   }
   setExecution(mode: PurchaseExecutionMode) {
-    if (this.devMainnet && mode !== 'live_mainnet') throw new ManagementApiError('ENVIRONMENT_RESTART_REQUIRED', 409, 'Change the Dev environment in Settings.');
+    if ((this.devMainnet || this.devDevnet || this.devSimulated) && mode !== this.environment.mode) throw new ManagementApiError('ENVIRONMENT_RESTART_REQUIRED', 409, 'Change the Dev environment in Settings.');
     if (this.payDevelopment && mode !== 'live_devnet') throw new ManagementApiError('PAY_DEVELOPMENT_ONLY', 409, '此开发版只使用离线测试环境。');
     this.purchaseExecutionMode();
     if (!this.accepting) throw new ManagementApiError('SERVICE_STOPPING', 503, 'Yosh is stopping.');
@@ -305,7 +316,8 @@ export class AppRuntime {
         this.mainnetIdentity = wallet.address;
         this.authorityWalletStatus = 'available';
         this.walletRetryAfter = 0;
-      } else process.env.DEMO_BUYER_PUBLIC_KEY = wallet.address;
+      } else if (!this.devDevnet) process.env.DEMO_BUYER_PUBLIC_KEY = wallet.address;
+      this.authorityWalletStatus = 'available';
       process.env.YOSH_USE_PRODUCT_WALLET = '1';
       if (process.env.APP2049_USE_PRODUCT_WALLET !== undefined) process.env.APP2049_USE_PRODUCT_WALLET = '1';
       // Cache only the verified public identity for status reads. Payment signing
@@ -329,7 +341,7 @@ export class AppRuntime {
     return this.track(operation());
   }
   async payMcpRecovery(raw: unknown, principal: SpendPrincipal, origin: string) {
-    if (!this.payMainnet || !this.payAuthority) throw new Error('PAY_MAINNET_NOT_ENABLED');
+    if (!this.controlledPay || !this.payAuthority) throw new Error('PAY_CONTROLLED_EXECUTION_NOT_ENABLED');
     const { operationId } = z.object({ operationId: z.string().regex(/^[a-zA-Z0-9_.:-]{1,128}$/) }).strict().parse(raw);
     await this.start(origin); await this.initializeWallet();
     if (!this.accepting) throw new Error('SERVICE_STOPPING');
@@ -337,7 +349,7 @@ export class AppRuntime {
       resolveRuntimePath(dirname(process.execPath), '../Resources/Runtime/pay-mcp'));
   }
   async payMcpOperation(action: 'authorize' | 'plan' | 'execute', raw: unknown, principal: SpendPrincipal, origin: string) {
-    if (!this.payMainnet || !this.payAuthority) throw new Error('PAY_MAINNET_NOT_ENABLED');
+    if (!this.controlledPay || !this.payAuthority) throw new Error('PAY_CONTROLLED_EXECUTION_NOT_ENABLED');
     await this.start(origin);
     if (!this.accepting) throw new Error('SERVICE_STOPPING');
     await this.initializeWallet();
@@ -456,7 +468,7 @@ export class AppRuntime {
     await Promise.allSettled([...this.active]);
   }
   async prepareEnvironmentSwitch() {
-    if (!this.payDevelopment && !this.devMainnet) throw new ManagementApiError('PAY_DEVELOPMENT_ONLY', 409, 'Development environment required.');
+    if (!this.payDevelopment && !this.devMainnet && !this.devDevnet && !this.devSimulated) throw new ManagementApiError('PAY_DEVELOPMENT_ONLY', 409, 'Development environment required.');
     // Check and fence without an intervening await: no purchase can enter after
     // the idle check. Unknown/reservations block switching, not just signing.
     this.assertExecutionChangeIdle();
@@ -471,7 +483,7 @@ export class AppRuntime {
     const facilitator = inspectFacilitatorConfiguration(this.resourceConfiguration(), this.environment);
     return authoritySurface(this.ledger, this.environment, memberId,
       { address, status: !address ? 'unavailable' : mainnet ? this.authorityWalletStatus : 'available', balance: this.authorityWalletBalance },
-      configuration.config, this.dependencies.now?.() ?? Date.now(), { facilitator, resourceId,
+      configuration.config, this.dependencies.now?.() ?? Date.now(), { facilitator, resourceId, registeredLive: this.registeredLive,
         connectionEnabled: this.connectionFor(memberId).principal('request_purchase') !== undefined,
         serviceAccepting: this.accepting, configurationCode: configuration.code });
   }
@@ -496,28 +508,31 @@ export class AppRuntime {
     return this.track(this.readPaidResourceQuotes(origin, memberId));
   }
   prepareRegisteredResource(resourceId: string, sample: unknown) {
-    if (this.purchaseExecutionMode() !== 'live_mainnet') throw new Error('UNSUPPORTED_PURCHASE_NETWORK');
+    this.purchaseExecutionMode();
+    if (!this.registeredLive) throw new Error('UNSUPPORTED_PURCHASE_NETWORK');
     const resource = this.activeResourceDefinitions().find(item => item.resourceId === resourceId);
     if (!resource) throw new Error('MAINNET_REGISTERED_RESOURCE_REQUIRED');
     return postRequestReview(authorizedRequestInstance(resource, sample), resource);
   }
   async quoteRegisteredResource(resourceId: string, sample: unknown, memberId: string) {
     this.ledger.assertCardMemberActive(memberId);
-    if (this.purchaseExecutionMode() !== 'live_mainnet') throw new Error('UNSUPPORTED_PURCHASE_NETWORK');
+    this.purchaseExecutionMode();
+    if (!this.registeredLive) throw new Error('UNSUPPORTED_PURCHASE_NETWORK');
     const resource = this.activeResourceDefinitions().find(item => item.resourceId === resourceId);
     if (!resource) throw new Error('MAINNET_REGISTERED_RESOURCE_REQUIRED');
     const instance = authorizedRequestInstance(resource, sample);
-    assertGrantPostScope(resource, this.ledger.activeSpendGrant(this.dependencies.now?.() ?? Date.now(), memberId, 'live_mainnet', resourceId));
+    assertGrantPostScope(resource, this.ledger.activeSpendGrant(this.dependencies.now?.() ?? Date.now(), memberId, this.environment.mode, resourceId));
     const { quote } = await fetchResourceChallenge({ ...resource, request: instance }, this.environment, this.dependencies.fetcher);
     const preflight = await this.inspectQuotedPayment(resourceId, quote, memberId);
     return { resourceId, request: { url: instance.url, method: instance.method }, network: quote.network,
       assetId: quote.asset, assetDecimals: resource.decimals, amount: quote.amount,
-      display: displayAmount(quote.amount).replace('test USDC', 'USDC'), payTo: quote.payTo,
+      display: this.environment.isProduction ? displayAmount(quote.amount).replace('test USDC', 'USDC') : displayAmount(quote.amount), payTo: quote.payTo,
       maxTimeoutSeconds: quote.maxTimeoutSeconds, preflight, paymentSent: false,
       notice: 'This is an unpaid snapshot. Every purchase obtains and validates a fresh quote.' };
   }
   private async readPaidResourceQuotes(origin: string, memberId: string) {
-    if (this.purchaseExecutionMode() === 'live_mainnet') {
+    this.purchaseExecutionMode();
+    if (this.registeredLive) {
       await this.performAuthorityBalanceRead();
       const registeredResources = this.registeredResources();
       const resources = await Promise.all(this.activeResourceDefinitions().map(async resource => {
@@ -528,20 +543,20 @@ export class AppRuntime {
               field: resourceInputNames(resource.requestInputs?.query)[0] ?? 'jsonBody' } };
         }
         try {
-          assertGrantPostScope(resource, this.ledger.activeSpendGrant(this.dependencies.now?.() ?? Date.now(), memberId, 'live_mainnet', resource.resourceId));
+          assertGrantPostScope(resource, this.ledger.activeSpendGrant(this.dependencies.now?.() ?? Date.now(), memberId, this.environment.mode, resource.resourceId));
           const { quote } = await fetchResourceChallenge(resource, this.environment, this.dependencies.fetcher);
           const preflight = await this.inspectQuotedPayment(resource.resourceId, quote, memberId);
           const requestInput = { ready: true, code: null, field: null };
           return { resourceId: resource.resourceId, name: resource.displayName ?? resource.resourceId, resourceUrl: resource.request.url,
             method: resource.request.method, amount: quote.amount, decimals: resource.decimals,
-            display: displayAmount(quote.amount).replace('test USDC', 'USDC'),
+            display: this.environment.isProduction ? displayAmount(quote.amount).replace('test USDC', 'USDC') : displayAmount(quote.amount),
             asset: quote.asset, network: quote.network, payTo: quote.payTo, quoteStatus: 'available' as const, preflight, requestInput };
         } catch {
           return { resourceId: resource.resourceId, name: resource.displayName ?? resource.resourceId,
             resourceUrl: resource.request.url, quoteStatus: 'unavailable' as const, code: 'RESOURCE_QUOTE_UNAVAILABLE' };
         }
       }));
-      return { registeredResources, resources, testEnvironment: false };
+      return { registeredResources, resources, testEnvironment: !this.environment.isProduction };
     }
     const wallet = await this.initializeWallet();
     const config = this.paymentConfiguration('simulated');
@@ -552,7 +567,7 @@ export class AppRuntime {
     const authority = this.authority(memberId, resourceId);
     const local = authority.readiness.transactionExecution;
     if (!local.eligible) return { ready: false, code: local.code };
-    const grant = this.ledger.spendGrantSummary(this.dependencies.now?.() ?? Date.now(), 'live_mainnet', memberId, resourceId);
+    const grant = this.ledger.spendGrantSummary(this.dependencies.now?.() ?? Date.now(), this.environment.mode, memberId, resourceId);
     if (!grant || grant.resourceId !== resourceId) return { ready: false, code: 'SPEND_GRANT_SCOPE_MISMATCH' };
     if (grant.payTo !== quote.payTo || grant.network !== quote.network || grant.assetId !== quote.asset
       || grant.paymentScheme !== quote.scheme) return { ready: false, code: 'SPEND_GRANT_SCOPE_MISMATCH' };
@@ -579,11 +594,13 @@ export class AppRuntime {
   private resourceConfiguration() {
     return { ...process.env, YOSH_MAINNET_RESOURCES: JSON.stringify(this.activeResourceDefinitions()) };
   }
-  listRegisteredResources() { return this.ledger.resources.list().map(resourceEntrySummary); }
+  listRegisteredResources() { return this.ledger.resources.list().filter(entry => entry.definition.network === this.environment.network).map(resourceEntrySummary); }
+  prepareResourceDiscovery(raw: unknown) { return prepareDiscovery(raw, this.environment).review; }
+  discoverResource(raw: unknown, approvedHash?: string) { return this.track(discoverResource(raw, undefined, approvedHash, this.environment)); }
   inspectRegisteredResource(id: string) { return resourceEntrySummary(this.ledger.resources.inspect(id)); }
   async discoverAgentResource(raw: unknown, principal: SpendPrincipal) {
     if (!this.accepting) throw new Error('SERVICE_STOPPING');
-    const result = await this.track(discoverResource(raw));
+    const result = await this.track(discoverResource(raw, undefined, undefined, this.environment));
     if (!this.accepting) throw new Error('SERVICE_STOPPING');
     return this.ledger.resources.recordDiscovery(result, principal);
   }
@@ -595,14 +612,17 @@ export class AppRuntime {
   }
   addRegisteredResource(raw: unknown) {
     if (!this.accepting) throw new ManagementApiError('SERVICE_STOPPING', 503, 'Yosh is stopping.');
-    return resourceEntrySummary(this.ledger.resources.add(raw));
+    const resource = RuntimeResourceSchema.parse(raw);
+    if (resource.network !== this.environment.network || resource.mint !== this.environment.asset.mint) throw new Error('RESOURCE_NETWORK_MISMATCH');
+    return resourceEntrySummary(this.ledger.resources.add(resource));
   }
   disableRegisteredResource(id: string, state: 'DISABLED' | 'REMOVED') {
     if (!this.accepting) throw new ManagementApiError('SERVICE_STOPPING', 503, 'Yosh is stopping.');
     return resourceEntrySummary(this.ledger.resources.setState(id, state));
   }
   registeredResources() {
-    if (this.purchaseExecutionMode() !== 'live_mainnet') return [];
+    this.purchaseExecutionMode();
+    if (!this.registeredLive) return [];
     return this.activeResourceDefinitions().map(resource => {
       const entry = this.ledger.resources.inspect(resource.resourceId);
       return { ...registeredResourceSummary(resource), source: entry.source,
@@ -611,21 +631,23 @@ export class AppRuntime {
   }
   overview() { return this.track(this.readOverview()); }
   async refreshMainnetWallet() {
-    if (this.purchaseExecutionMode() !== 'live_mainnet') return;
+    this.purchaseExecutionMode();
+    if (!this.registeredLive) return;
     try { await this.initializeWallet(); } catch { /* Identity failure is recorded in the shared snapshot. */ }
   }
   walletLibrary() { return this.ledger.walletLibrary.list(); }
   createDevelopmentPaymentWallet() {
-    if (!this.devMainnet || !this.payMainnet) throw new ManagementApiError('PAY_DEVELOPMENT_ONLY', 409, 'Select Dev Mainnet before creating its payment wallet.');
+    if (!((this.devMainnet && this.payMainnet) || (this.devDevnet && this.payDevnet))) throw new ManagementApiError('PAY_DEVELOPMENT_ONLY', 409, 'Select a live development environment before creating its payment wallet.');
     if (!this.accepting) throw new ManagementApiError('SERVICE_STOPPING', 503, 'Yosh is stopping.');
     this.walletProvisioning ??= this.track((async () => {
       this.walletInventory = undefined; this.walletInventoryExpiresAt = 0;
       const inventory = await this.readWalletInventory();
-      const slot = inventory.find(wallet => wallet.id === 'mainnet');
+      const slotId = this.environment.mode === 'live_mainnet' ? 'mainnet' : 'devnet';
+      const slot = inventory.find(wallet => wallet.id === slotId);
       if (!slot || !['absent_fresh', 'existing'].includes(slot.provisioningState))
         throw new ManagementApiError('WALLET_RESTORE_REQUIRED', 409, 'Existing wallet evidence must be restored; no new wallet was created.');
       const wallet = await initializeEnvironmentWallet(this.environment);
-      this.ledger.walletAccounts.assertIdentity('mainnet', wallet.address, process.env.YOSH_MAINNET_WALLET_PUBLIC_KEY);
+      this.ledger.walletAccounts.assertIdentity(slotId, wallet.address, slotId === 'mainnet' ? process.env.YOSH_MAINNET_WALLET_PUBLIC_KEY : undefined);
       this.walletInventory = undefined; this.walletInventoryExpiresAt = 0;
       this.wallet = undefined; this.walletAddress = undefined; this.walletRetryAfter = 0;
       await this.initializeWallet();
@@ -681,7 +703,7 @@ export class AppRuntime {
       { status: this.accepting ? 'running' : 'stopping', recoveryStatus: this.recoveryStatus },
       this.dependencies.now?.() ?? Date.now(), mode, this.ledger.defaultCardMember().id);
     return { ...overview, purchases: this.visiblePurchases(), authority: this.authority(), service: { ...overview.service, execution: this.execution(), paymentEnabled: mode === 'live_devnet' || (mode === 'live_mainnet' && this.environment.productionExecutionEnabled),
-      registeredResources: this.registeredResources() } };
+      registeredResources: this.registeredResources(), registeredResourceRequired: this.registeredLive } };
   }
   private connectionFor(memberId: string) {
     const connection = this.memberConnections.get(memberId);
@@ -757,7 +779,7 @@ export class AppRuntime {
   }
   /** Default member is the existing Codex identity; labels never select providers. */
   setMemberConnection(enabled: boolean, origin: string, memberId: string) {
-    if (this.payDevelopment || this.devMainnet) {
+    if (this.payDevelopment || this.devMainnet || this.devDevnet || this.devSimulated) {
       // Enable only the existing member capability. The user explicitly starts
       // a separate Codex configuration; this App never edits their host config.
       const connection = this.connectionFor(memberId);
@@ -795,8 +817,8 @@ export class AppRuntime {
     const mode = this.purchaseExecutionMode();
     const request = SpendGrantInputSchema.extend({ resourceId: z.string().min(1).max(200).optional(), sample: ResourceRequestInputSchema.optional(), postApprovalHash: z.string().regex(/^[a-f0-9]{64}$/).optional() }).strict().parse(raw);
     const { resourceId, sample, postApprovalHash, ...input } = request;
-    const resource = mode === 'live_mainnet' ? this.activeResourceDefinitions().find(resource => resource.resourceId === resourceId) : undefined;
-    if (mode === 'live_mainnet' && !resource) throw new Error('MAINNET_REGISTERED_RESOURCE_REQUIRED');
+    const resource = this.registeredLive ? this.activeResourceDefinitions().find(resource => resource.resourceId === resourceId) : undefined;
+    if (this.registeredLive && !resource) throw new Error('MAINNET_REGISTERED_RESOURCE_REQUIRED');
     const instance = resource ? authorizedRequestInstance(resource, sample ?? {}) : undefined;
     if (resource && instance) assertPostRequestApproval(instance, postApprovalHash, resource);
     const now = this.dependencies.now?.() ?? Date.now();
@@ -808,8 +830,8 @@ export class AppRuntime {
       if (resource && hash(this.activeResourceDefinitions().find(item => item.resourceId === resourceId) ?? null) !== hash(resource)) {
         throw new Error('RESOURCE_REGISTRATION_CHANGED');
       }
-      if (mode === 'live_mainnet' && (this.authorityWalletStatus !== 'available' || !(livePayTo ?? resource?.recipient))) throw new Error('Mainnet wallet or recipient unavailable');
-      if (mode === 'live_mainnet' && (livePayTo ?? resource?.recipient) === this.walletAddress) throw new Error('MAINNET_RESOURCE_REGISTRATION_INVALID');
+      if (this.registeredLive && (this.authorityWalletStatus !== 'available' || !(livePayTo ?? resource?.recipient))) throw new Error('Mainnet wallet or recipient unavailable');
+      if (this.registeredLive && (livePayTo ?? resource?.recipient) === this.walletAddress) throw new Error('MAINNET_RESOURCE_REGISTRATION_INVALID');
       const connection = this.connectionFor(memberId);
       // A Grant changes spending authority, not Agent identity. Keep the
       // installed MCP credential/session stable; purchases bind to this
@@ -856,7 +878,7 @@ export class AppRuntime {
     return this.ledger.spendAuthority(current, PAID_RESOURCE_PURCHASE_OPERATION, this.dependencies.now?.() ?? Date.now(), this.purchaseExecutionMode());
   }
   requestPurchase(input: unknown, origin: string, principal: SpendPrincipal): Promise<PurchaseRequestResult> {
-    if (this.payDevelopment || this.payMainnet) return Promise.reject(new ManagementApiError('PAY_MCP_REQUIRED', 409, '请通过 Pay MCP 购买。'));
+    if (this.payDevelopment || this.controlledPay || this.devSimulated) return Promise.reject(new ManagementApiError('PAY_MCP_REQUIRED', 409, '请通过 Pay MCP 购买。'));
     if (!this.accepting) return Promise.reject(new Error('服务正在退出，不能创建购买请求。'));
     return this.track(this.performPurchaseRequest(input, origin, principal));
   }
@@ -876,7 +898,7 @@ export class AppRuntime {
       ...(executor ? { pay: (target, approvalId, paymentConfig, endpoint, trace) => executeApprovedPayment(target, approvalId, paymentConfig, endpoint, trace, executor) } : {}) });
   }
   createTestPurchase(id: string, origin: string): Promise<TestPurchaseResult> {
-    if (this.payDevelopment || this.payMainnet) return Promise.reject(new ManagementApiError('PAY_MCP_REQUIRED', 409, '请通过 Pay MCP 购买。'));
+    if (this.payDevelopment || this.controlledPay || this.devSimulated) return Promise.reject(new ManagementApiError('PAY_MCP_REQUIRED', 409, '请通过 Pay MCP 购买。'));
     if (!this.accepting) return Promise.reject(new Error('服务正在退出，不能开始新付款。'));
     return this.track(this.performTestPurchase(id, origin));
   }

@@ -16,7 +16,8 @@ import { assertPayControlledExtensions } from './resource-challenge';
 import { payMainnetConsentDecision } from './pay-authorization-outcome';
 import { assertPayMainnetAcceptance } from './pay-mainnet-control';
 import { preparePayUnsigned } from './pay-unsigned-preflight';
-import { readPayMainnetLifetime } from './mainnet-pay-execution';
+import { readPayLifetime } from './mainnet-pay-execution';
+import { isDevnetDevelopment } from '../pay-dev/environment';
 
 /** Shared deterministic lookup; never creates or reserves a purchase. */
 export const payOperationPurchaseId = (caller: string, operation: string) => `pay_${hash([caller, operation]).slice(0,60)}`;
@@ -33,8 +34,12 @@ type Attempt = { facts: Facts; digest: string; generation: number; purchaseId: s
  * reconciliation own the decision. Mainnet additionally requires the stopped
  * upgrade profile, explicit production enablement and one exact operator receipt. */
 export function createPayAuthorityAdapter(options: { directory: string; runtime: () => AppRuntime; config: () => PaymentConfig;
-  executor: PaymentExecutor; origin: string; rpcUrl: string; mainnet?: true }) {
-  if (!options.mainnet) assertIsolatedPaymentDirectory(options.directory);
+  executor: PaymentExecutor; origin: string; rpcUrl: string; mainnet?: true; devnet?: true }) {
+  if (options.mainnet && options.devnet) throw new Error('PAY_NETWORK_CONFIGURATION_CONFLICT');
+  if (options.devnet) {
+    if (process.env.YOSH_PAY_MCP_DEVNET !== '1' || !isDevnetDevelopment(options.directory)) throw new Error('PAY_DEVNET_CONFIGURATION_REQUIRED');
+  } else if (!options.mainnet) assertIsolatedPaymentDirectory(options.directory);
+  const liveNetwork = options.mainnet || options.devnet;
   options.runtime().ledger.executionSafety.enable(Date.now());
   const attempts = new Map<string, Attempt>();
   const pending = new Map<string, string>();
@@ -50,13 +55,15 @@ export function createPayAuthorityAdapter(options: { directory: string; runtime:
     if (facts.request.headers.some(([name, value]) => name !== 'accept' || value !== 'application/json')
       || new Set(facts.request.headers.map(([name]) => name)).size !== facts.request.headers.length) throw new Error('PAY_REQUEST_HEADERS_REJECTED');
     const config = options.config();
+    if (options.devnet && (process.env.YOSH_PAY_MCP_DEVNET !== '1' || !isDevnetDevelopment(options.directory)))
+      throw new Error('PAY_DEVNET_CONFIGURATION_REQUIRED');
     if (options.mainnet ? process.env.YOSH_PAY_MCP_MAINNET !== '1' || config.mode !== 'live_mainnet' || !config.productionExecutionEnabled
       || !config.isProduction || config.network !== MAINNET_NETWORK || config.mint !== MAINNET_USDC_MINT || facts.execution_network !== 'mainnet'
       : config.isProduction || config.mode !== 'live_devnet' || config.network !== DEVNET_NETWORK || config.mint !== DEVNET_USDC_MINT || facts.execution_network !== 'devnet')
       throw new Error('PAY_PRODUCTION_BLOCKED');
     if (facts.asset !== config.mint || facts.network !== config.network) throw new Error('PAY_ECONOMIC_FACTS_MISMATCH');
     let requestInput: { query: Record<string,string> } | undefined;
-    const candidates = options.mainnet ? (config.registeredResources ?? []).filter(resource => {
+    const candidates = liveNetwork ? (config.registeredResources ?? []).filter(resource => {
       try {
         const target = new URL(facts.request.url);
         const names = resourceInputNames(resource.requestInputs?.query);
@@ -69,7 +76,7 @@ export function createPayAuthorityAdapter(options: { directory: string; runtime:
         requestInput = { query }; return true;
       } catch { return false; }
     }) : [];
-    const resourceId = options.mainnet ? candidates.length === 1 ? candidates[0].resourceId : undefined
+    const resourceId = liveNetwork ? candidates.length === 1 ? candidates[0].resourceId : undefined
       : (['market-snapshot', 'market-analysis', 'token-risk-report'] as const).find(id => new URL(paidResource(id).path, options.origin).href === facts.request.url);
     // Pay preserves the SDK-selected source envelope. Reconstructing it from
     // request.url + accepted would discard route metadata and extensions.
@@ -109,7 +116,7 @@ export function createPayAuthorityAdapter(options: { directory: string; runtime:
   return {
     purchaseId,
     async recoverOperation(operationId: string, principal: SpendPrincipal, binary: string) {
-      if (!options.mainnet) throw new Error('PAY_PREPAYMENT_RECOVERY_UNAVAILABLE');
+      if (!liveNetwork) throw new Error('PAY_PREPAYMENT_RECOVERY_UNAVAILABLE');
       if (recovering.has(operationId)) throw new Error('PAY_RECOVERY_IN_PROGRESS');
       recovering.add(operationId);
       try {
@@ -129,12 +136,12 @@ export function createPayAuthorityAdapter(options: { directory: string; runtime:
           if (!request) throw new Error('PAY_IMMUTABLE_REQUEST_MISMATCH');
           const facts = Facts.parse({ caller_id: row.caller_id, operation_id: row.operation_id, attempt_id: row.attempt_id,
             request: { method: request.method, url: request.url, headers: Object.entries(request.headers).sort(), body: request.body ?? null },
-            execution_network: 'mainnet', network: record.quote.network, asset: record.quote.asset,
+            execution_network: options.mainnet ? 'mainnet' : 'devnet', network: record.quote.network, asset: record.quote.asset,
             recipient: record.quote.payTo, amount_atomic: record.quote.amount, accepted: record.quote,
             payment_required: record.intent.x402Challenge });
           const { config, resourceId } = parse(facts, principal);
           if (!resourceId || hash(facts) !== row.facts_hash) throw new Error('PAY_RECOVERY_FACTS_MISMATCH');
-          assertPayMainnetAcceptance(options.directory, config, facts, { resourceId,
+          if (options.mainnet) assertPayMainnetAcceptance(options.directory, config, facts, { resourceId,
             providerId: record.intent.providerId, resourceUrl: facts.request.url });
           options.executor.assertEligibility(config, ledger);
           // Renew atomically against the original reservation, never authorize/reserve again.
@@ -160,19 +167,24 @@ export function createPayAuthorityAdapter(options: { directory: string; runtime:
       if (spend.caller_id !== principal.cardMemberId) throw new Error('PAY_CALLER_MISMATCH');
       options.runtime().ledger.assertCardMemberActive(principal.cardMemberId);
       const config = options.config();
+      if (options.devnet) {
+        options.executor.assertEligibility(config, options.runtime().ledger);
+        if (spend.execution_network !== 'devnet' || spend.network !== config.network || spend.asset !== config.mint)
+          throw new Error('PAY_ECONOMIC_FACTS_MISMATCH');
+      }
       const id = purchaseId(principal.cardMemberId, spend.operation_id);
       const existing = options.runtime().ledger.getOwned(id, principal.cardMemberId);
       if (!existing && options.runtime().ledger.executionSafety.hasExternalAuthorityClaim(principal.cardMemberId, spend.operation_id))
         throw new Error('PAY_ORIGINAL_OUTCOME_UNRESOLVED');
-      if (!existing && options.mainnet) {
+      if (!existing && liveNetwork) {
         const resources = (config.registeredResources ?? []).filter(resource => {
           try { assertAuthorizedRequestInstance({ ...resource, request: { ...resource.request, headers: { ...resource.request.headers, accept: resource.request.headers.accept ?? 'application/json' } } }, { method: spend.request.method, url: spend.request.url,
             headers: Object.fromEntries(spend.request.headers), access: 'https' }); return true; } catch { return false; }
         });
         if (resources.length !== 1) throw new Error('PAY_RESOURCE_NOT_REGISTERED');
         const resource = resources[0];
-        const rejection = payMainnetConsentDecision(() => assertPayMainnetAcceptance(options.directory, config, spend, {
-          resourceId: resource.resourceId, providerId: resource.providerId, resourceUrl: spend.request.url }));
+        const rejection = options.mainnet ? payMainnetConsentDecision(() => assertPayMainnetAcceptance(options.directory, config, spend, {
+          resourceId: resource.resourceId, providerId: resource.providerId, resourceUrl: spend.request.url })) : undefined;
         if (rejection) return rejection;
       }
       if (existing?.status === 'APPROVED') throw new Error('PAY_DURABLE_RECOVERY_REQUIRED');
@@ -221,10 +233,10 @@ export function createPayAuthorityAdapter(options: { directory: string; runtime:
           resourceId, providerId: config.registeredResources!.find(resource => resource.resourceId === resourceId)!.providerId,
           resourceUrl: facts.request.url });
         const result = await requestPaidResourcePurchase({ requestId: id, resourceId, reason: 'Pay MCP API purchase',
-          ...(options.mainnet ? { request: requestInput } : {}) }, {
+          ...(liveNetwork ? { request: requestInput } : {}) }, {
           config, ledger, origin: options.origin, principal, execute: true, deferExecution: true,
           externalSelectedQuote: facts.accepted,
-          ...(options.mainnet ? { externalQuote: challenge, externalRequest: { method: facts.request.method, url: facts.request.url,
+          ...(liveNetwork ? { externalQuote: challenge, externalRequest: { method: facts.request.method, url: facts.request.url,
             headers: Object.fromEntries(facts.request.headers), access: 'https' as const } } : {}),
           externalExecution: {callerId: principal.cardMemberId, operationId: facts.operation_id, attemptId: facts.attempt_id,
             factsHash: hash(facts), requestHash: hash(facts.request), quoteHash: hash(facts.accepted)},
@@ -248,7 +260,7 @@ export function createPayAuthorityAdapter(options: { directory: string; runtime:
       if (attempt.phase === 'replay') return { action: 'replay', response: response(attempt, principal) };
       if (attempt.phase !== 'authorized' || record.status !== 'APPROVED') throw new Error('PAY_OPERATION_ALREADY_STARTED');
       options.executor.assertEligibility(config, options.runtime().ledger);
-      const lifetimePromise = options.mainnet ? readPayMainnetLifetime(config) : solanaRpc<unknown>(config, 'getLatestBlockhash', [{ commitment: 'confirmed' }]).then(raw => {
+      const lifetimePromise = liveNetwork ? readPayLifetime(config, options.mainnet ? 'mainnet' : 'devnet') : solanaRpc<unknown>(config, 'getLatestBlockhash', [{ commitment: 'confirmed' }]).then(raw => {
         const value = z.object({ value: z.object({ blockhash: z.string(), lastValidBlockHeight: z.number().int().safe().positive() }) }).parse(raw).value;
         return { recentBlockhash: value.blockhash, lastValidBlockHeight: String(value.lastValidBlockHeight) };
       });
@@ -264,7 +276,7 @@ export function createPayAuthorityAdapter(options: { directory: string; runtime:
         const { attempt, record, config } = get(raw, principal);
         if (attempt.phase !== 'authorized' || record.status !== 'APPROVED') throw new Error('PAY_OPERATION_ALREADY_STARTED');
         const value = parseControllerInput(PreparedSchema, { ok: true, ...parseControllerInput(z.object({ transaction: z.string(), recentBlockhash: z.string(), lastValidBlockHeight: z.string() }).strict(), prepared, 'execute_unsigned') }, 'execute_unsigned');
-        if (options.mainnet && (!attempt.lifetime || value.recentBlockhash !== attempt.lifetime.recentBlockhash
+        if (liveNetwork && (!attempt.lifetime || value.recentBlockhash !== attempt.lifetime.recentBlockhash
           || value.lastValidBlockHeight !== attempt.lifetime.lastValidBlockHeight)) throw new Error('PAY_BLOCKHASH_BINDING_MISMATCH');
         attempt.phase = 'executing';
         unsigned.set(record.approvalId, value);

@@ -9,6 +9,7 @@ export type AuthorityWalletState = 'unavailable' | 'unverified' | 'available';
 type Check = { ready: boolean; code: string | null };
 export type AuthorityReadinessContext = {
   resourceId?: string;
+  registeredLive?: boolean;
   facilitator?: { ready: boolean; code: FacilitatorConfigurationCode | null; mode: 'merchant_quote' | 'configured_endpoint' };
   connectionEnabled?: boolean;
   serviceAccepting?: boolean;
@@ -26,6 +27,7 @@ function registeredForEnvironment(ledger: PurchaseLedger, environment: PaymentEn
 export function authoritySurface(ledger: PurchaseLedger, environment: PaymentEnvironment, memberId: string,
   wallet: { address: string; status: AuthorityWalletState; balance: string | null }, config: PaymentConfig | undefined, now: number,
   context: AuthorityReadinessContext = {}) {
+  const registeredLive = environment.isProduction || context.registeredLive === true;
   const budget = ledger.managedSummary(now, environment.mode);
   const grant = ledger.spendGrantSummary(now, environment.mode, memberId, context.resourceId);
   const assetLabel = environment.isProduction ? environment.asset.symbol : `Test ${environment.asset.symbol}`;
@@ -42,7 +44,7 @@ export function authoritySurface(ledger: PurchaseLedger, environment: PaymentEnv
   const resource = resources.find(item => item.resourceId === grant?.resourceId);
   const scopeMatches = grant !== null && grant.network === environment.network && grant.assetId === environment.asset.mint
     && grant.assetDecimals === environment.asset.decimals;
-  const grantScopeMatches = scopeMatches && (!environment.isProduction || (resource !== undefined
+  const grantScopeMatches = scopeMatches && (!registeredLive || (resource !== undefined
     && resource.providerId === grant.providerId && (resource.recipientSource === 'live_challenge' || resource.recipient === grant.payTo)
     && grant.operation === PAID_RESOURCE_PURCHASE_OPERATION && grant.paymentScheme === 'exact'));
   const environmentCheck = check(environment.mode === 'simulated' ? 'SIMULATED_EXECUTION_DISABLED'
@@ -52,17 +54,17 @@ export function authoritySurface(ledger: PurchaseLedger, environment: PaymentEnv
   const facilitatorCheck = check(facilitator.ready ? null : facilitator.code ?? 'FACILITATOR_CONFIGURATION_INVALID');
   const walletCheck = check(wallet.status === 'unavailable' ? 'WALLET_UNAVAILABLE'
     : wallet.status === 'unverified' ? 'WALLET_UNVERIFIED'
-      : environment.isProduction && wallet.balance === null ? 'USDC_BALANCE_UNVERIFIED'
-        : environment.isProduction && BigInt(wallet.balance ?? '0') === 0n ? 'INSUFFICIENT_USDC' : null);
+      : registeredLive && wallet.balance === null ? 'USDC_BALANCE_UNVERIFIED'
+        : registeredLive && BigInt(wallet.balance ?? '0') === 0n ? 'INSUFFICIENT_USDC' : null);
   const dailyCheck = check(dailyState === 'required' ? 'DAILY_AUTHORITY_REQUIRED'
     : dailyState === 'paused' ? 'PAYMENTS_PAUSED'
       : dailyState === 'insufficient' ? 'DAILY_AUTHORITY_INSUFFICIENT' : null);
-  const resourceCheck = check(!environment.isProduction ? null : resources.length === 0 ? 'REGISTERED_RESOURCE_REQUIRED'
+  const resourceCheck = check(!registeredLive ? null : resources.length === 0 ? 'REGISTERED_RESOURCE_REQUIRED'
     : grant && !resource ? 'GRANT_RESOURCE_UNREGISTERED' : null);
   const grantCheck = check(!grant ? 'SPEND_GRANT_REQUIRED'
     : grant.status === 'EXPIRED' || grant.expiresAt <= now ? 'SPEND_GRANT_EXPIRED'
       : grant.status === 'REVOKED' ? 'SPEND_GRANT_REVOKED'
-        : !scopeMatches || (environment.isProduction && resource && !grantScopeMatches) ? 'SPEND_GRANT_SCOPE_MISMATCH'
+        : !scopeMatches || (registeredLive && resource && !grantScopeMatches) ? 'SPEND_GRANT_SCOPE_MISMATCH'
           : BigInt(grant.remaining) === 0n ? 'SPEND_GRANT_EXHAUSTED' : null);
   const connectionCheck = check(context.connectionEnabled === false ? 'AGENT_CONNECTION_REQUIRED' : null);
   const serviceCheck = check(context.serviceAccepting === false ? 'SERVICE_STOPPING' : null);

@@ -4,12 +4,14 @@ import { signedManagementRequest } from '../helpers/management-request';
 import { POST as prepare } from '../../src/app/api/app/resources/prepare/route';
 import { POST as discover } from '../../src/app/api/app/resources/discover/route';
 import { POST as agentDiscover } from '../../src/app/api/agent/discovery/route';
-import { discoverResource } from '../../src/modules/resources/mainnet-resource-discovery';
+import { discoverResource, prepareDiscovery } from '../../src/modules/resources/mainnet-resource-discovery';
 import { MAINNET_NETWORK, MAINNET_USDC_MINT } from '../../src/modules/payment/payment-environment';
 
 const state = vi.hoisted(() => ({ fetch: vi.fn(), discover: vi.fn() }));
 vi.mock('../../src/modules/resources/safe-resource-fetch', () => ({ safeResourceFetch: state.fetch }));
-vi.mock('../../src/modules/app/app-runtime', () => ({ appRuntime: () => ({ authenticateAgent: () => ({ cardMemberId: 'fixture' }), discoverAgentResource: state.discover }) }));
+vi.mock('../../src/modules/app/app-runtime', () => ({ appRuntime: () => ({ authenticateAgent: () => ({ cardMemberId: 'fixture' }), discoverAgentResource: state.discover,
+  prepareResourceDiscovery: (raw: unknown) => prepareDiscovery(raw).review,
+  discoverResource: (raw: unknown, approval?: string) => discoverResource(raw, undefined, approval) }) }));
 const origin = 'http://127.0.0.1:3049', secret = 'fixture-post-discovery-management-secret';
 const input = { url: 'https://unknown.example/compute', method: 'POST',
   body: '{"mode":"fixed"}', requestInputs: { jsonBody: { prompt: { type: 'string', required: true, maxLength: 20 } } },

@@ -73,6 +73,16 @@ describe("Payment network and wallet configuration", () => {
 });
 
 describe("Payment read-only preflight", () => {
+  it("uses the bound Devnet quote sponsor without inventing a facilitator URL", async () => {
+    const test = fixture();
+    const config = { ...loadPaymentConfig(env), facilitatorUrl: null };
+    await expect(runPaymentPreflight(config, { fetch: test.fetcher, amount: '5000', feePayer: FEE_PAYER }))
+      .resolves.toMatchObject({ network: DEVNET_NETWORK, paymentAmount: '5000', facilitator: { feePayer: FEE_PAYER } });
+    expect(test.fetcher.mock.calls.every(([url]) => String(url) === config.rpcUrl)).toBe(true);
+    await expect(runPaymentPreflight(config, { fetch: test.fetcher, amount: '5000' }))
+      .rejects.toThrow('bound');
+  });
+
   it("uses the bound Mainnet quote sponsor without a merchant facilitator URL", async () => {
     const resource = { resourceId: 'registered', providerId: 'provider', request: {
       url: 'https://provider.example/data', method: 'GET', access: 'https', headers: {} },

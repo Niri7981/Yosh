@@ -194,7 +194,8 @@ impl PayContext for Bridge {
             approval: Arc::new(NoSigner),
             payment_permissions: None,
             body_files: false,
-            outbound_policy: if std::env::var("YOSH_PAY_MCP_MAINNET").as_deref() == Ok("1") {
+            outbound_policy: if std::env::var("YOSH_PAY_MCP_MAINNET").as_deref() == Ok("1")
+                || std::env::var("YOSH_PAY_MCP_DEVNET").as_deref() == Ok("1") {
                 pay_core::client::fetch::OutboundPolicy::PublicInternetOnly
             } else {
                 pay_core::client::fetch::OutboundPolicy::Unrestricted
@@ -256,6 +257,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::var("NODE_ENV").as_deref() != Ok("test")
         && !development
         && std::env::var("YOSH_PAY_MCP_MAINNET").as_deref() != Ok("1")
+        && std::env::var("YOSH_PAY_MCP_DEVNET").as_deref() != Ok("1")
     {
         return Err("ISOLATED_TEST_ONLY".into());
     }

@@ -134,6 +134,13 @@ function settlement(raw: unknown) { return new Response(null, { headers: { 'PAYM
 it('decodes an exact Solana settlement receipt through the SDK and validates authoritative bindings', () => {
   expect(readSettlementResponse(settlement(receipt), { network: mainnet.network, payer: buyer, amount: '10000', transaction: receipt.transaction })).toEqual(receipt);
 });
+it('accepts identical documented transaction aliases without weakening economic bindings', () => {
+  expect(readSettlementResponse(settlement({ ...receipt, transactionId: receipt.transaction, signature: receipt.transaction }),
+    { network: mainnet.network, payer: buyer, amount: '10000', transaction: receipt.transaction })).toEqual(receipt);
+  for (const field of ['transactionId', 'signature']) {
+    expect(() => readSettlementResponse(settlement({ ...receipt, [field]: '1'.repeat(88) }))).toThrow();
+  }
+});
 it.each([{ success: 'true' }, { payer: undefined }, { transaction: 'not-a-signature' }, { amount: 10000 },
   { amount: '0.01' }, { amount: '9223372036854775808' }, { network: 'eip155:8453' }, { errorReason: 'failure' }, { unknown: true }])('rejects malformed/unsupported settlement receipt %j', change => {
   expect(() => readSettlementResponse(settlement({ ...receipt, ...change }))).toThrow();

@@ -4,7 +4,7 @@ import { managementRoute } from '@/modules/app/management-auth';
 import { resourceManagement } from '@/modules/app/resource-management';
 import { smallJson } from '@/modules/http/local-request';
 import { MAX_RESOURCE_ENTRY_BYTES } from '@/modules/http/request-size-limits';
-import { DiscoveryInput, prepareDiscovery } from '@/modules/resources/mainnet-resource-discovery';
+import { DiscoveryInput } from '@/modules/resources/mainnet-resource-discovery';
 import { ResourceRequestInputSchema } from '@/modules/resources/http-resource';
 
 export const runtime = 'nodejs';
@@ -17,7 +17,7 @@ const Input = z.discriminatedUnion('kind', [
 export async function POST(request: Request) {
   return managementRoute(request, true, async verified => resourceManagement(() => (async () => {
     const input = Input.parse(await smallJson(verified, MAX_RESOURCE_ENTRY_BYTES));
-    const review = input.kind === 'discovery' ? prepareDiscovery(input.discovery).review
+    const review = input.kind === 'discovery' ? appRuntime().prepareResourceDiscovery(input.discovery)
       : appRuntime().prepareRegisteredResource(input.resourceId, input.sample ?? {});
     return Response.json(review, { headers: { 'cache-control': 'no-store' } });
   })()), MAX_RESOURCE_ENTRY_BYTES);
