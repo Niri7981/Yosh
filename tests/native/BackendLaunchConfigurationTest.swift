@@ -163,6 +163,41 @@ struct BackendLaunchConfigurationTest {
         check(try development.sandboxProfile()?.lastPathComponent == "pay-dev-mainnet.sb")
         let mainnetToken = try development.managementToken()
         check(mainnetToken != offlineToken, "environments do not share management credentials")
+        let mainnetSettings = developmentDirectory.appending(path: "Mainnet/product-configuration.json")
+        try Data(#"{"YOSH_ENABLE_MAINNET_EXECUTION":"1"}"#.utf8).write(to: mainnetSettings)
+        try manager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: mainnetSettings.path)
+        var newTokens: [String] = []
+        for mode in [PayDevelopmentMode.devnet, .simulated] {
+            let selection = PayDevelopmentSelection(version: 1, environment: mode,
+                mainnetRiskAccepted: mainnet.mainnetRiskAccepted, rpcUrl: mainnet.rpcUrl)
+            let encoded = try JSONEncoder().encode(selection)
+            let object = try JSONSerialization.jsonObject(with: encoded) as! [String: Any]
+            check(Set(object.keys) == ["version", "environment", "mainnetRiskAccepted", "rpcUrl"],
+                "new selections keep the existing four-field version-1 wire format")
+            try YoshPayDevelopment.saveSelection(selection, directory: developmentDirectory)
+            try Data("(version 1)".utf8).write(to: runtime.appending(path: mode == .devnet ? "pay-dev-devnet.sb" : "pay-dev-simulated.sb"))
+            let values = try development.childEnvironment(token: developmentToken)
+            check(values["YOSH_PAY_MCP_DEVNET"] == (mode == .devnet ? "1" : nil))
+            let name = mode == .devnet ? "Devnet" : "Simulated"
+            check(try development.dataDirectory().path == developmentDirectory.appending(path: name).path)
+            check(values["HOME"] == developmentDirectory.appending(path: "\(name)/home").path)
+            check(values["YOSH_PAY_DEV_ENV"] == mode.rawValue)
+            check(values["YOSH_EXECUTION_MODE"] == (mode == .devnet ? "live_devnet" : "simulated"))
+            check(values["SOLANA_RPC_URL"] == "https://api.devnet.solana.com")
+            check(values["SOLANA_MAINNET_RPC_URL"] == nil && values["YOSH_PAY_MCP_MAINNET"] == nil)
+            check(values["YOSH_ENABLE_MAINNET_EXECUTION"] == "0" && values["APP2049_ENABLE_MAINNET_EXECUTION"] == "0",
+                "test profiles never import the Mainnet operator flag")
+            check(try development.sandboxProfile()?.lastPathComponent == (mode == .devnet ? "pay-dev-devnet.sb" : "pay-dev-simulated.sb"))
+            let selectedToken = try development.managementToken()
+            check(selectedToken != offlineToken && selectedToken != mainnetToken && !newTokens.contains(selectedToken))
+            newTokens.append(selectedToken)
+            check(try YoshPayDevelopment.selection(directory: developmentDirectory).rpcUrl == mainnet.rpcUrl,
+                "test selection preserves the saved Mainnet RPC")
+        }
+        try YoshPayDevelopment.saveSelection(mainnet, directory: developmentDirectory)
+        check(try development.managementToken() == mainnetToken)
+        check(try development.childEnvironment(token: developmentToken)["YOSH_ENABLE_MAINNET_EXECUTION"] == "1",
+            "returning to Mainnet restores only its original persisted operator policy")
         try YoshPayDevelopment.saveSelection(.offline, directory: developmentDirectory)
         check(try development.dataDirectory() == developmentDirectory && development.managementToken() == offlineToken)
         check(try development.childEnvironment(token: developmentToken)["YOSH_PAY_MCP_MAINNET"] == nil)
@@ -170,6 +205,28 @@ struct BackendLaunchConfigurationTest {
         check(offlineChild["PORT"] == "13449" && offlineChild["YOSH_DATA_DIR"] == developmentDirectory.path)
         check(offlineChild["HOME"] == developmentDirectory.appending(path: "home").path,
               "backend session, runtime and configuration state remain inside the candidate root")
+        let customDevnet = PayDevelopmentSelection(version: 1, environment: .devnet,
+            mainnetRiskAccepted: true, rpcUrl: mainnet.rpcUrl,
+            devnetRpcUrl: "https://devnet-rpc.example/public")
+        try YoshPayDevelopment.saveSelection(customDevnet, directory: developmentDirectory)
+        check(try YoshPayDevelopment.selection(directory: developmentDirectory) == customDevnet)
+        let devnetEnvironment = try development.childEnvironment(token: developmentToken)
+        check(devnetEnvironment["SOLANA_RPC_URL"] == customDevnet.devnetRpcUrl)
+        check(customDevnet.rpcUrl == mainnet.rpcUrl, "Devnet RPC never replaces the Mainnet endpoint")
+        var alternatePort = development
+        alternatePort.developmentServicePortOverride = 45431
+        check(try alternatePort.servicePort() == 45431)
+        check(try alternatePort.childEnvironment(token: developmentToken)["PORT"] == "45431")
+        var realHomeOverride = alternatePort
+        realHomeOverride.developmentHome = FileManager.default.homeDirectoryForCurrentUser
+        try rejectsConfiguration { _ = try realHomeOverride.servicePort() }
+        var ordinaryOverride = installed
+        ordinaryOverride.developmentServicePortOverride = 45431
+        try rejectsConfiguration { _ = try ordinaryOverride.servicePort() }
+        for invalidPort in [0, 80, 65536] {
+            alternatePort.developmentServicePortOverride = invalidPort
+            try rejectsConfiguration { _ = try alternatePort.servicePort() }
+        }
         let profile = developmentDirectory.appending(path: "development-environment.json")
         try manager.setAttributes([.posixPermissions: 0o644], ofItemAtPath: profile.path)
         try rejectsConfiguration { _ = try development.childEnvironment(token: developmentToken) }
@@ -178,7 +235,7 @@ struct BackendLaunchConfigurationTest {
         check(ServiceEndpoint.prepareEnvironmentSwitch.isMutation)
         print("Single Dev environment selection, explicit risk, separate directory/token, safe RPC and default-disabled Mainnet passed")
         print("Development identity, fixed isolated port, persistent private token and symlink rejection passed")
-        for port in YoshPayDevelopment.servicePorts {
+        for port in CommandLine.arguments.contains("--skip-fixed-port-tests") ? [] : YoshPayDevelopment.servicePorts {
             let listener = try occupiedPort(port)
             defer { Darwin.close(listener) }
             do {
@@ -199,7 +256,9 @@ struct BackendLaunchConfigurationTest {
             check(await runtimeWithConflict.shutdown(), "a rejected startup owns no process to stop")
             check(Darwin.fcntl(listener, F_GETFD) != -1, "the occupying listener must remain owned by its caller")
         }
-        print("Every candidate port conflict rejects startup before credentials or state; owned-child observation remains available")
+        print(CommandLine.arguments.contains("--skip-fixed-port-tests")
+            ? "Fixed installation-port probes skipped; isolated fixture-port admission/rejection checks passed"
+            : "Every candidate port conflict rejects startup before credentials or state; owned-child observation remains available")
         try manager.removeItem(at: runtime.appending(path: "backend/server.js"))
         try rejectsConfiguration { _ = try installed.runtimeDirectory() }
         print("Packaged launch paths, isolated data, private product config, sanitized environment and authenticated health identity passed")

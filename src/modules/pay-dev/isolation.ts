@@ -3,7 +3,7 @@ import { lstatSync, readFileSync, realpathSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { z } from 'zod';
 import { DEVNET_NETWORK } from '../payment/payment-config';
-import { isMainnetDevelopment } from './environment';
+import { isDevnetDevelopment, isMainnetDevelopment, isSimulatedDevelopment } from './environment';
 
 const Marker = z.object({ version: z.literal(1), kind: z.literal('yosh-pay-offline-development'),
   buyer: z.string().min(32).max(44), network: z.literal(DEVNET_NETWORK) }).strict();
@@ -12,7 +12,7 @@ const Marker = z.object({ version: z.literal(1), kind: z.literal('yosh-pay-offli
  * Both the native child and Pay run in a loopback-only OS sandbox as well. */
 export function isPayDevelopmentDirectory(directory: string) {
   if (process.env.YOSH_PAY_DEV !== '1') return false;
-  if (isMainnetDevelopment(directory)) return false;
+  if (isMainnetDevelopment(directory) || isDevnetDevelopment(directory) || isSimulatedDevelopment(directory)) return false;
   const info = lstatSync(directory);
   const canonical = realpathSync(directory);
   if (canonical !== directory || basename(canonical) !== PAY_DEVELOPMENT_PROFILE.directoryName || !info.isDirectory() || info.isSymbolicLink()

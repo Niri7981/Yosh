@@ -19,7 +19,7 @@ export type WalletAccount = Readonly<{ accountId: string; slot: WalletSlot; publ
 export type WalletObservationOptions = { mainnetAssertion?: string };
 
 function slotIdentity(slot: WalletSlot) {
-  const item = process.env.YOSH_PAY_DEV === '1' && process.env.YOSH_PAY_DEV_ENV === 'mainnet'
+  const item = process.env.YOSH_PAY_DEV === '1' && ['mainnet', 'devnet'].includes(process.env.YOSH_PAY_DEV_ENV ?? '')
     ? productWalletSlotKeychain(slot) : slot === 'mainnet' ? MAINNET_WALLET_KEYCHAIN : APP_WALLET_KEYCHAIN;
   return slot === 'mainnet' ? { item, walletIdentity: PRODUCT_MAINNET_WALLET_ID, network: MAINNET_NETWORK }
     : { item, walletIdentity: PRODUCT_TEST_WALLET_ID, network: DEVNET_NETWORK };

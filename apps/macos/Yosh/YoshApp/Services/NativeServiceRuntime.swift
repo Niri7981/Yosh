@@ -76,16 +76,20 @@ actor NativeServiceRuntime {
         managementTokenLoader: (@Sendable () throws -> String)? = nil,
         diagnosticsDirectory: URL? = nil,
         developmentHome: URL? = nil,
-        sandboxProfileOverride: URL? = nil
+        sandboxProfileOverride: URL? = nil,
+        developmentServicePortOverride: Int? = nil
     ) {
         self.allowsLaunch = allowsLaunch
         self.sandboxProfileOverride = sandboxProfileOverride
         var launch = BackendLaunchConfiguration(environment: environment, bundleURL: bundleURL)
         if let developmentHome { launch.developmentHome = developmentHome }
+        launch.developmentServicePortOverride = developmentServicePortOverride
         self.launch = launch
         self.managementTokenOverride = managementTokenOverride
         self.managementTokenLoader = managementTokenLoader
         do {
+            // Explicit fixture ports cannot target the user's installation profile.
+            if developmentServicePortOverride != nil { _ = try launch.servicePort() }
             let directory = try diagnosticsDirectory ?? (launch.isPayDevelopment ? launch.dataDirectory().appending(path: "Logs") : nil)
             self.diagnostics = try BackendDiagnostics(directory: directory)
         }
@@ -112,20 +116,44 @@ actor NativeServiceRuntime {
         defer { switchingEnvironment = false }
         try selection.validate()
         let directory = try launch.developmentRoot()
-        if try YoshPayDevelopment.selection(directory: directory) == selection { return }
+        let previous = try YoshPayDevelopment.selection(directory: directory)
+        if previous == selection { return }
         let configuration = try await ready()
         let (_, response) = try await configuration.request(.prepareEnvironmentSwitch)
         guard response.statusCode == 200 else { throw ServiceRuntimeError.environmentBusy }
-        guard await shutdown() else { throw ServiceRuntimeError.authenticatedShutdownFailed }
+        guard await shutdownOwnedBackend() else { throw ServiceRuntimeError.authenticatedShutdownFailed }
         // The old process has drained and exited before selecting a new store.
         // Tokens, liveness and loaded financial UI must never cross environments.
-        readyConfiguration = nil; ownedConfiguration = nil; loadedManagementToken = nil
-        credentialRetryAfter = nil; lastFailure = nil; restartHistory = []
+        await MainActor.run { NotificationCenter.default.post(name: .nativeServiceExited, object: nil) }
+        clearEnvironmentState()
         defer { isShuttingDown = false }
-        do { try YoshPayDevelopment.saveSelection(selection, directory: directory) }
-        catch { isShuttingDown = false; _ = try? await ready(); throw error }
-        isShuttingDown = false
-        _ = try await ready()
+        do {
+            try YoshPayDevelopment.saveSelection(selection, directory: directory)
+            isShuttingDown = false
+            _ = try await ready()
+        } catch {
+            let changeError = error
+            // Never restore the selection while a target process could still own
+            // its port or signer. Failed authentication cannot justify a force kill.
+            guard await shutdownOwnedBackend() else { throw ServiceRuntimeError.authenticatedShutdownFailed }
+            clearEnvironmentState()
+            try YoshPayDevelopment.saveSelection(previous, directory: directory)
+            isShuttingDown = false
+            _ = try await ready()
+            throw changeError
+        }
+    }
+
+    private func clearEnvironmentState() {
+        readyConfiguration = nil
+        ownedConfiguration = nil
+        loadedManagementToken = nil
+        credentialRetryAfter = nil
+        lastFailure = nil
+        restartHistory = []
+        phase = .spawning
+        walletPhase = .walletChecking
+        recoveryPhase = .recoveryPending
     }
 
     func ready(retry: Bool = false) async throws -> ServiceConfiguration {
@@ -178,7 +206,11 @@ actor NativeServiceRuntime {
         if launch.isPayDevelopment {
             // A new candidate never adopts a listener, even if it can authenticate.
             // Readiness retries may retain the child already owned by this actor.
-            try Self.preflightDevelopmentPorts(ownedProcessRunning: process?.isRunning == true)
+            if launch.developmentServicePortOverride != nil {
+                guard process?.isRunning == true || Self.portAvailable(port) else { throw ServiceRuntimeError.portConflict }
+            } else {
+                try Self.preflightDevelopmentPorts(ownedProcessRunning: process?.isRunning == true)
+            }
         }
         let runtime = allowsLaunch ? try launch.runtimeDirectory() : nil
         let root = runtime?.appending(path: "backend", directoryHint: .isDirectory)
@@ -430,6 +462,11 @@ actor NativeServiceRuntime {
 
     /// False keeps the native App alive so it cannot silently abandon an active signer.
     func shutdown() async -> Bool {
+        guard !switchingEnvironment else { return false }
+        return await shutdownOwnedBackend()
+    }
+
+    private func shutdownOwnedBackend() async -> Bool {
         isShuttingDown = true
         monitoring?.cancel()
         monitoring = nil

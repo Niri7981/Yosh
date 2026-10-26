@@ -7,6 +7,7 @@ struct BackendLaunchConfiguration {
     let environment: [String: String]
     let bundleURL: URL
     var developmentHome: URL = FileManager.default.homeDirectoryForCurrentUser
+    var developmentServicePortOverride: Int? = nil
     func developmentRoot() throws -> URL { try YoshPayDevelopment.dataDirectory(home: developmentHome) }
 
     /// Validate every alias before loading credentials or launching a child. Inherited
@@ -39,6 +40,14 @@ struct BackendLaunchConfiguration {
     var isPayDevelopment: Bool { YoshPayDevelopment.isEnabled(bundleURL: bundleURL) }
 
     func servicePort() throws -> Int {
+        if let port = developmentServicePortOverride {
+            guard isPayDevelopment, (1024...65535).contains(port),
+                  developmentHome.resolvingSymlinksInPath().standardizedFileURL
+                    != FileManager.default.homeDirectoryForCurrentUser.resolvingSymlinksInPath().standardizedFileURL else {
+                throw ServiceRuntimeError.configuration
+            }
+            return port
+        }
         if isPayDevelopment { return YoshPayDevelopment.backendPort }
         let raw = try configuredValue("PORT") ?? "3049"
         guard let port = Int(raw), (1024...65535).contains(port), String(port) == raw else {
@@ -85,7 +94,13 @@ struct BackendLaunchConfiguration {
         if isPayDevelopment {
             let root = try developmentRoot()
             let profile = try YoshPayDevelopment.selection(directory: root)
-            let directory = profile.environment == .mainnet ? root.appending(path: "Mainnet", directoryHint: .isDirectory) : root
+            let directory: URL
+            switch profile.environment {
+            case .offline: directory = root
+            case .mainnet: directory = root.appending(path: "Mainnet", directoryHint: .isDirectory)
+            case .devnet: directory = root.appending(path: "Devnet", directoryHint: .isDirectory)
+            case .simulated: directory = root.appending(path: "Simulated", directoryHint: .isDirectory)
+            }
             try YoshPayDevelopment.ensurePrivateDirectory(directory)
             return directory
         }
@@ -119,6 +134,9 @@ struct BackendLaunchConfiguration {
             try YoshPayDevelopment.ensurePrivateDirectory(home)
             childEnvironment["HOME"] = home.path
             childEnvironment["YOSH_PAY_DEV"] = "1"
+            if developmentServicePortOverride != nil {
+                childEnvironment["YOSH_PAY_NATIVE_FIXTURE_PORT"] = String(try servicePort())
+            }
             let profile = try YoshPayDevelopment.selection(directory: developmentRoot())
             childEnvironment["YOSH_PAY_DEV_ENV"] = profile.environment.rawValue
             childEnvironment["YOSH_ENABLE_MAINNET_EXECUTION"] = "0"
@@ -139,6 +157,12 @@ struct BackendLaunchConfiguration {
                     childEnvironment.merge(values) { _, value in value }
                     childEnvironment["APP2049_ENABLE_MAINNET_EXECUTION"] = childEnvironment["YOSH_ENABLE_MAINNET_EXECUTION"]
                 }
+                childEnvironment["NODE_USE_ENV_PROXY"] = "1"
+                addSystemProxyIfNeeded(to: &childEnvironment)
+            } else if profile.environment == .devnet || profile.environment == .simulated {
+                if profile.environment == .devnet { childEnvironment["YOSH_PAY_MCP_DEVNET"] = "1" }
+                childEnvironment["YOSH_EXECUTION_MODE"] = profile.environment == .devnet ? "live_devnet" : "simulated"
+                childEnvironment["SOLANA_RPC_URL"] = profile.environment == .devnet ? profile.devnetRPC : "https://api.devnet.solana.com"
                 childEnvironment["NODE_USE_ENV_PROXY"] = "1"
                 addSystemProxyIfNeeded(to: &childEnvironment)
             }
@@ -174,7 +198,14 @@ struct BackendLaunchConfiguration {
     func sandboxProfile() throws -> URL? {
         guard isPayDevelopment else { return nil }
         let mode = try YoshPayDevelopment.selection(directory: developmentRoot()).environment
-        let profile = try runtimeDirectory().appending(path: mode == .mainnet ? "pay-dev-mainnet.sb" : "pay-dev.sb")
+        let filename: String
+        switch mode {
+        case .offline: filename = "pay-dev.sb"
+        case .mainnet: filename = "pay-dev-mainnet.sb"
+        case .devnet: filename = "pay-dev-devnet.sb"
+        case .simulated: filename = "pay-dev-simulated.sb"
+        }
+        let profile = try runtimeDirectory().appending(path: filename)
         guard FileManager.default.fileExists(atPath: profile.path) else { throw ServiceRuntimeError.configuration }
         return profile
     }
@@ -283,7 +314,8 @@ enum YoshPayDevelopment {
               ((info[.size] as? NSNumber)?.intValue ?? 4097) <= 4096 else { throw ServiceRuntimeError.configuration }
         let data = try Data(contentsOf: file)
         guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              Set(object.keys) == ["version", "environment", "mainnetRiskAccepted", "rpcUrl"] else { throw ServiceRuntimeError.configuration }
+              Set(object.keys).isSuperset(of: ["version", "environment", "mainnetRiskAccepted", "rpcUrl"]),
+              Set(object.keys).isSubset(of: ["version", "environment", "mainnetRiskAccepted", "rpcUrl", "devnetRpcUrl"]) else { throw ServiceRuntimeError.configuration }
         let selection = try JSONDecoder().decode(PayDevelopmentSelection.self, from: data)
         try selection.validate()
         return selection
@@ -357,8 +389,15 @@ enum YoshPayDevelopment {
 }
 
 enum PayDevelopmentMode: String, Codable, Sendable {
-    case offline, mainnet
-    var title: String { self == .mainnet ? "Solana Mainnet" : "Offline" }
+    case offline, mainnet, devnet, simulated
+    var title: String {
+        switch self {
+        case .offline: "Offline"
+        case .mainnet: "Solana Mainnet"
+        case .devnet: "Solana Devnet"
+        case .simulated: "Simulation"
+        }
+    }
 }
 
 struct PayDevelopmentSelection: Codable, Equatable, Sendable {
@@ -366,10 +405,19 @@ struct PayDevelopmentSelection: Codable, Equatable, Sendable {
     let environment: PayDevelopmentMode
     let mainnetRiskAccepted: Bool
     let rpcUrl: String
+    var devnetRpcUrl: String? = nil
+    var devnetRPC: String { devnetRpcUrl ?? "https://api.devnet.solana.com" }
     static let offline = PayDevelopmentSelection(version: 1, environment: .offline, mainnetRiskAccepted: false,
         rpcUrl: "https://solana-rpc.publicnode.com")
 
+    private func validateRPC(_ raw: String) throws {
+        guard raw.utf8.count <= 2048, let url = URLComponents(string: raw),
+              url.scheme == "https", let host = url.host, !host.isEmpty,
+              url.user == nil, url.password == nil, url.query == nil, url.fragment == nil,
+              url.port == nil || url.port == 443 else { throw ServiceRuntimeError.configuration }
+    }
     func validate() throws {
+        if let devnetRpcUrl { try validateRPC(devnetRpcUrl) }
         guard version == 1, environment != .mainnet || mainnetRiskAccepted,
               rpcUrl.utf8.count <= 2048, let url = URLComponents(string: rpcUrl),
               url.scheme == "https", let host = url.host, !host.isEmpty,

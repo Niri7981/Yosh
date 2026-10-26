@@ -3,7 +3,7 @@ import { PAY_DEVELOPMENT_PROFILE } from '../pay-dev/profile';
 import { spawn } from "node:child_process";
 import { address } from "@solana/kit";
 import { validatePaymentEnvironment, type PaymentEnvironment } from './payment-environment';
-import { isMainnetDevelopment } from '../pay-dev/environment';
+import { isDevnetDevelopment, isMainnetDevelopment } from '../pay-dev/environment';
 import { userInfo } from 'node:os';
 
 class KeychainCommandError extends Error {
@@ -18,6 +18,7 @@ export class WalletKeychainError extends Error {
 }
 
 function validateItem(service: string, account: string) {
+  if (process.env.YOSH_PAY_DEV === '1') throw new Error('PAY_DEVELOPMENT_KEYCHAIN_FORBIDDEN');
   if (!/^com\.2049\.day4\.[a-f0-9]{16}$/.test(service)) throw new Error("Invalid Demo keychain service");
   address(account);
   if (process.platform !== "darwin") throw new Error("Demo keychain signing requires macOS");
@@ -28,7 +29,7 @@ function security(args: string[], input?: string): Promise<string> {
   // Keychain. Restore the OS account home only for this narrowly scoped tool;
   // fixed Dev service/account names still select the isolated credentials.
   const development = process.env.YOSH_PAY_DEV === '1';
-  if (development && !isMainnetDevelopment()) throw new Error('PAY_DEVELOPMENT_KEYCHAIN_FORBIDDEN');
+  if (development && !isMainnetDevelopment() && !isDevnetDevelopment()) throw new Error('PAY_DEVELOPMENT_KEYCHAIN_FORBIDDEN');
   const environment = development ? { HOME: userInfo().homedir, PATH: '/usr/bin:/bin', NODE_ENV: process.env.NODE_ENV ?? 'production' } : undefined;
   return new Promise((resolve, reject) => {
     const child = spawn("/usr/bin/security", args, { stdio: ["pipe", "pipe", "pipe"], ...(environment ? { env: environment } : {}) });
@@ -51,11 +52,16 @@ function security(args: string[], input?: string): Promise<string> {
 export const APP_WALLET_KEYCHAIN = Object.freeze({ service: 'com.2049.wallet.v1', account: 'consumer-wallet-v1' });
 export const MAINNET_WALLET_KEYCHAIN = Object.freeze({ service: 'com.yosh.wallet.mainnet.v1', account: 'consumer-wallet-mainnet-v1' });
 export const DEV_MAINNET_WALLET_KEYCHAIN = Object.freeze({ service: `${PAY_DEVELOPMENT_PROFILE.keychainNamespace}.wallet.mainnet.v1`, account: 'consumer-wallet-mainnet-v1' });
+export const DEV_DEVNET_WALLET_KEYCHAIN = Object.freeze({ service: `${PAY_DEVELOPMENT_PROFILE.keychainNamespace}.wallet.devnet.v1`, account: 'consumer-wallet-devnet-v1' });
 const DEV_OFFLINE_WALLET_KEYCHAIN = Object.freeze({ service: `${PAY_DEVELOPMENT_PROFILE.keychainNamespace}.wallet.offline.v1`, account: 'consumer-wallet-offline-v1' });
 
 function scopedWalletItem(item: Readonly<{ service: string; account: string }>) {
   if (process.env.YOSH_PAY_DEV !== '1') return item;
   // Fail closed before any Keychain command; HOME does not isolate macOS Keychain.
+  if (isDevnetDevelopment()) {
+    if (item === APP_WALLET_KEYCHAIN) return DEV_DEVNET_WALLET_KEYCHAIN;
+    throw new Error('PAY_DEVELOPMENT_KEYCHAIN_FORBIDDEN');
+  }
   if (!isMainnetDevelopment()) throw new Error('PAY_DEVELOPMENT_KEYCHAIN_FORBIDDEN');
   if (item === MAINNET_WALLET_KEYCHAIN) return legacyMainnetSignerSelected() ? { service: LEGACY_PAY_DEV_MAINNET.service, account: LEGACY_PAY_DEV_MAINNET.account } : DEV_MAINNET_WALLET_KEYCHAIN;
   if (item === APP_WALLET_KEYCHAIN) return DEV_OFFLINE_WALLET_KEYCHAIN;
