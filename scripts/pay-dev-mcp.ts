@@ -15,7 +15,7 @@ import { ResourceRequestInputSchema } from '../src/modules/resources/http-resour
 import { AgentRegistrationErrorCodes } from '../src/modules/mcp/server';
 
 const ManifestSchema = z.object({
-  version: z.literal(1), profile: z.enum(['isolated-pay-dev','pay-mcp-mainnet']),
+  version: z.literal(1), profile: z.enum(['isolated-pay-dev','pay-mcp-simulated','pay-mcp-devnet','pay-mcp-mainnet']),
   origin: ConnectionSchema.shape.origin, memberId: z.string().uuid(),
   merchantUrl: z.url().optional(),
 }).strict();
@@ -37,13 +37,20 @@ async function main() {
     throw new Error('PAY_DEV_DIRECTORY_REQUIRED');
   const development = basename(directory) === PAY_DEVELOPMENT_PROFILE.directoryName ? readDevelopmentEnvironment(directory) : undefined;
   const mainnet = development ? development.environment === 'mainnet' : process.env.YOSH_PAY_MCP_MAINNET === '1';
+  const devnet = development?.environment === 'devnet';
+  const simulated = development?.environment === 'simulated';
+  const live = mainnet || devnet;
   if (development?.environment === 'mainnet') directory = join(directory, 'Mainnet');
-  const manifest = ManifestSchema.parse(privateJson(join(directory, mainnet ? 'pay-mainnet-runtime.json' : 'pay-dev-runtime.json')));
+  else if (devnet) directory = join(directory, 'Devnet');
+  else if (simulated) directory = join(directory, 'Simulated');
+  const manifest = ManifestSchema.parse(privateJson(join(directory, mainnet ? 'pay-mainnet-runtime.json'
+    : devnet ? 'pay-devnet-runtime.json' : simulated ? 'pay-simulated-runtime.json' : 'pay-dev-runtime.json')));
   assertDevelopmentOrigin(manifest.origin);
-  if (manifest.profile !== (mainnet ? 'pay-mcp-mainnet' : 'isolated-pay-dev')) throw new Error('PAY_PROFILE_MISMATCH');
-  if (mainnet && process.env.YOSH_CARD_MEMBER_ID && process.env.APP2049_CARD_MEMBER_ID
+  if (manifest.profile !== (mainnet ? 'pay-mcp-mainnet' : devnet ? 'pay-mcp-devnet' : simulated ? 'pay-mcp-simulated' : 'isolated-pay-dev'))
+    throw new Error('PAY_PROFILE_MISMATCH');
+  if (live && process.env.YOSH_CARD_MEMBER_ID && process.env.APP2049_CARD_MEMBER_ID
     && process.env.YOSH_CARD_MEMBER_ID !== process.env.APP2049_CARD_MEMBER_ID) throw new Error('PAY_CALLER_CONFIGURATION_CONFLICT');
-  const callerId = mainnet ? z.string().uuid().parse(process.env.YOSH_CARD_MEMBER_ID ?? process.env.APP2049_CARD_MEMBER_ID ?? manifest.memberId) : manifest.memberId;
+  const callerId = live ? z.string().uuid().parse(process.env.YOSH_CARD_MEMBER_ID ?? process.env.APP2049_CARD_MEMBER_ID ?? manifest.memberId) : manifest.memberId;
   let descriptor: unknown;
   try { descriptor = privateJson(connectionFile(directory, callerId)); }
   catch (error) {
@@ -61,7 +68,8 @@ async function main() {
     caller: connection.cardMemberId, timeout_ms: 5_000 }), { mode: 0o600, flag: 'wx' });
   const child = spawn(binary, [hostFile], {
     cwd: directory, stdio: ['pipe', 'pipe', 'pipe'],
-    env: { PATH: '/usr/bin:/bin', HOME: directory, NODE_ENV: 'production', ...(mainnet ? { YOSH_PAY_MCP_MAINNET: '1' } : { YOSH_PAY_DEV: '1' }) },
+    env: { PATH: '/usr/bin:/bin', HOME: directory, NODE_ENV: 'production', ...(mainnet ? { YOSH_PAY_MCP_MAINNET: '1' }
+      : devnet ? { YOSH_PAY_MCP_DEVNET: '1' } : { YOSH_PAY_DEV: '1' }) },
   });
   let sessionId = randomUUID();
   let sequence = 0;
@@ -88,13 +96,16 @@ async function main() {
   const listRequests = new Set<string | number>();
   const statusTool = {
     name: 'get_spending_status',
-    description: mainnet ? 'Read Yosh Mainnet wallet, budget, Grant, Pause and original purchase state. Read only; no payment permission.' : 'Read the active Yosh Pay Dev Offline wallet balance, shared daily budget, reserved/paid amounts, Agent Spend Grant and Pause readiness. No payment or management action.',
+    description: mainnet ? 'Read Yosh Mainnet wallet, budget, Grant, Pause and original purchase state. Read only; no payment permission.'
+      : devnet ? 'Read Yosh Solana Devnet test wallet, budget, Grant, Pause and original purchase state. Read only; no payment permission.'
+        : simulated ? 'Read Yosh Simulation state. Simulation cannot sign or submit payments.'
+          : 'Read the active Yosh Pay Dev Offline wallet balance, shared daily budget, reserved/paid amounts, Agent Spend Grant and Pause readiness. No payment or management action.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
   };
   // Yosh-only resource lifecycle. Payment calls continue byte-for-byte to Pay;
   // these tools hold only the captured Agent capability, never management access.
-  const resourceTools = mainnet ? [
+  const resourceTools = live ? [
     { name: 'discover_x402_resource', path: '/api/agent/discovery', schema: DiscoveryInput,
       description: 'Inspect a candidate public HTTPS x402 API without payment using Yosh discovery. Returns an Agent-bound discoveryId and immutable registration proposal. Unknown POST requires separate approval in Yosh. Does not register, authorize spending or pay.' },
     { name: 'register_x402_resource', path: '/api/agent/resources', schema: AgentResourceRegistrationInput,
@@ -253,7 +264,12 @@ async function main() {
       }
       if (request.data.method === 'tools/call') {
         const call = z.object({ name: z.string() }).passthrough().safeParse(request.data.params);
-        if (mainnet && call.success && call.data.name === 'recover_payment') { void recoverPayment(request.data.id, request.data.params); return; }
+        if (simulated) {
+          process.stdout.write(`${JSON.stringify({ jsonrpc: '2.0', id: request.data.id, result: { isError: true,
+            content: [{ type: 'text', text: 'SIMULATED_EXECUTION_DISABLED: Simulation cannot sign, submit or recover payments.' }] } })}\n`);
+          return;
+        }
+        if (live && call.success && call.data.name === 'recover_payment') { void recoverPayment(request.data.id, request.data.params); return; }
         if (call.success && resourceTools.some(tool => tool.name === call.data.name)) {
           void callResource(request.data.id, request.data.params); return;
         }
@@ -266,8 +282,9 @@ async function main() {
     if (closed) return;
     const response = z.object({ id: z.union([z.string(), z.number()]), result: z.object({ tools: z.array(z.unknown()) }).passthrough() }).passthrough().safeParse(JSON.parse(line));
     if (response.success && listRequests.delete(response.data.id)) {
+      if (simulated) response.data.result.tools = [];
       response.data.result.tools.push(statusTool);
-      if (mainnet) response.data.result.tools.push(recoveryTool);
+      if (live) response.data.result.tools.push(recoveryTool);
       for (const tool of resourceTools) response.data.result.tools.push({ name: tool.name, description: tool.description,
         inputSchema: z.toJSONSchema(tool.schema), annotations: { readOnlyHint: tool.name === 'quote_x402_resource',
           destructiveHint: tool.name === 'discover_x402_resource', openWorldHint: tool.name !== 'register_x402_resource' } });

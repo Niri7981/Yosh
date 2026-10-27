@@ -47,6 +47,7 @@ struct AppOverview: Decodable {
         let network: String
         var paymentEnabled: Bool? = nil
         var registeredResources: [RegisteredResource]? = nil
+        var registeredResourceRequired: Bool? = nil
         var execution: ExecutionEnvironment? = nil
 
         struct RegisteredResource: Decodable, Identifiable {

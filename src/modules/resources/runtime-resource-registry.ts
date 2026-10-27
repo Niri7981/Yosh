@@ -9,7 +9,7 @@ import { z } from 'zod';
 import { X402ResourceSchema, DeclarativeResourceRequestInputsSchema, assertResourceInputDefinition, resourceInputNames, type X402Resource } from './http-resource';
 import { assertSupportedMainnetResourceRequest } from './supported-resource-request';
 import { validateDeliveryCapability } from './delivery-capability';
-import { MAINNET_NETWORK, MAINNET_USDC_MINT } from '../payment/payment-environment';
+import { DEVNET_NETWORK, DEVNET_USDC_MINT, MAINNET_NETWORK, MAINNET_USDC_MINT } from '../payment/payment-environment';
 import { PositiveAtomicAmountSchema } from '../authority/atomic-money';
 import { registeredResourceSummary } from './registered-resources';
 
@@ -19,9 +19,11 @@ export const RuntimeResourceSchema = X402ResourceSchema.safeExtend({
   resourceId: z.string().regex(/^[a-z0-9][a-z0-9._-]{0,119}$/),
   displayName: z.string().trim().min(1).max(120), providerId: z.string().trim().min(1).max(200),
   recipientSource: z.literal('live_challenge'), recipient: z.never().optional(), amount: z.never().optional(),
-  network: z.literal(MAINNET_NETWORK), mint: z.literal(MAINNET_USDC_MINT),
+  network: z.enum([MAINNET_NETWORK, DEVNET_NETWORK]), mint: z.enum([MAINNET_USDC_MINT, DEVNET_USDC_MINT]),
   maximumAmount: z.string().regex(/^[1-9]\d{0,18}$/).refine(value => PositiveAtomicAmountSchema.safeParse(value).success), baseAmount: z.string().regex(/^[1-9]\d{0,18}$/).refine(value => PositiveAtomicAmountSchema.safeParse(value).success).optional(),
 }).superRefine((resource, ctx) => {
+  if (resource.mint !== (resource.network === MAINNET_NETWORK ? MAINNET_USDC_MINT : DEVNET_USDC_MINT))
+    ctx.addIssue({ code: 'custom', message: 'RESOURCE_NETWORK_ASSET_MISMATCH' });
   if (resource.request.access !== 'https') ctx.addIssue({ code: 'custom', message: 'RESOURCE_PUBLIC_HTTPS_REQUIRED' });
   try { assertSupportedMainnetResourceRequest(resource.request, resourceInputNames(resource.requestInputs?.jsonBody).length > 0); }
   catch (error) { ctx.addIssue({ code: 'custom', message: error instanceof Error ? error.message : 'RESOURCE_BODY_POLICY_INVALID' }); }
@@ -81,7 +83,7 @@ export class RuntimeResourceRegistry {
     try { const result = operation(); this.db.exec('COMMIT'); return result; }
     catch (error) { this.db.exec('ROLLBACK'); throw error; }
   }
-  initialize(legacy: readonly X402Resource[]) {
+  initialize(legacy: readonly X402Resource[], network = MAINNET_NETWORK) {
     this.atomic(() => {
       if (!this.db.prepare("SELECT id FROM resource_registry_migrations WHERE id='legacy_import'").get()) {
         for (const resource of legacy) this.insert(X402ResourceSchema.parse(resource), 'built_in');
@@ -106,7 +108,7 @@ export class RuntimeResourceRegistry {
         this.db.prepare("INSERT INTO resource_registry_migrations VALUES ('012_builtin_request_policy',?)").run(this.now());
       }
       // An existing curated ID keeps its original policy, including older grants.
-      for (const resource of builtInResources) if (!this.db.prepare('SELECT resource_id FROM resource_registry WHERE resource_id=?').get(resource.resourceId)) this.insert(resource, 'built_in');
+      for (const resource of builtInResources.filter(resource => resource.network === network)) if (!this.db.prepare('SELECT resource_id FROM resource_registry WHERE resource_id=?').get(resource.resourceId)) this.insert(resource, 'built_in');
     });
   }
   private insert(definition: X402Resource, source: RegisteredResourceEntry['source']) {

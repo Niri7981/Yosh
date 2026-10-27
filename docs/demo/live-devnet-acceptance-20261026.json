@@ -1,0 +1,87 @@
+{
+  "version": 1,
+  "acceptanceDate": "2026-10-26",
+  "host": "MCP SDK client driving the real Yosh Pay wrapper and locked Pay binary; not Codex Desktop",
+  "repeatedPaidTestInPrPreparation": false,
+  "firstPurchase": {
+    "checkedAt": "2026-10-26T12:05:20.679Z",
+    "purchaseId": "pay_d43b5003cdfafd1e161b5e7b1754f1a769df27425d6cb49ab192e31eadda",
+    "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+    "asset": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+    "amountAtomic": "10000",
+    "status": "PAID",
+    "receipt": "INVALID",
+    "delivery": "UNSUPPORTED",
+    "signature": "2JFPDPb2LFT4jcddJ3CJiYPSTs8AuvfjsREEbaWxib3r8EbGiLdp6EuyYaUmKxGpPRrPpBaBHDbgtH3fGiQw8KDh",
+    "mainnetPayments": false
+  },
+  "successfulPurchase": {
+    "checkedAt": "2026-10-26T12:16:56.596Z",
+    "purchaseId": "pay_246824510992e70d9799e51441e71085363041bc23bb70eb174d79fbddc1",
+    "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+    "asset": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+    "amountAtomic": "10000",
+    "status": "PAID",
+    "receipt": "CONFIRMED",
+    "delivery": "COMPLETE",
+    "signature": "28dKHRBMMCXZdedrFzpL5oZi7sd5Tr27V3JsDr6F7eFuQhiWCnHcuzPGEhYPuVozK679QHDjWDWdf8D8boYn36nW",
+    "mainnetPayments": false
+  },
+  "independentChainAudit": [
+    {
+      "signature": "2JFPDPb2LFT4jcddJ3CJiYPSTs8AuvfjsREEbaWxib3r8EbGiLdp6EuyYaUmKxGpPRrPpBaBHDbgtH3fGiQw8KDh",
+      "slot": 515325372,
+      "finalized": true,
+      "error": null,
+      "wallet": "8qTWAR1H5woXt8JyJrKVnyWaLvBTNEMqVFBL7bdK7q43",
+      "mint": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+      "amountAtomic": "10000",
+      "payerTokenBefore": "20000000",
+      "payerTokenAfter": "19990000",
+      "delivery": "UNSUPPORTED"
+    },
+    {
+      "signature": "28dKHRBMMCXZdedrFzpL5oZi7sd5Tr27V3JsDr6F7eFuQhiWCnHcuzPGEhYPuVozK679QHDjWDWdf8D8boYn36nW",
+      "slot": 515328256,
+      "finalized": true,
+      "error": null,
+      "wallet": "8qTWAR1H5woXt8JyJrKVnyWaLvBTNEMqVFBL7bdK7q43",
+      "mint": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+      "amountAtomic": "10000",
+      "payerTokenBefore": "20000000",
+      "payerTokenAfter": "19990000",
+      "delivery": "COMPLETE"
+    }
+  ],
+  "pausedRestartReplay": {
+    "checkedAt": "2026-10-26T12:21:09.674Z",
+    "realMcpReplay": true,
+    "paused": true,
+    "resultError": false,
+    "purchaseCountUnchanged": true,
+    "originalEvidenceUnchanged": true,
+    "signatureUnchanged": true,
+    "paidBefore": "20000",
+    "paidAfter": "20000",
+    "reserved": "0",
+    "status": "PAID",
+    "delivery": "COMPLETE"
+  },
+  "accounting": {
+    "dailyLimit": "20000",
+    "paid": "20000",
+    "reserved": "0",
+    "remaining": "0"
+  },
+  "limitations": [
+    "Stable application was not replaced",
+    "Interactive Codex Desktop reconnection remains unverified",
+    "Public Devnet RPC availability/rate limits vary"
+  ],
+  "sourceEvidenceSha256": {
+    "live-result.json": "808fa0ff44cfa4331659a6b3a6262a4c5ae8f4ea826956eab3251481186ceea4",
+    "receipt-compatible-live-result.json": "0164d0fe3274f3e06b50552c6dc95642d60fb46d95a062b552afde429e5c6155",
+    "chain-audit.json": "e10dfe56689a63ede1235d4bde7e4891483805bb6e7b66efe2a0538a2574fd1d",
+    "replay-result.json": "0c31ba3afc5bf5bf6d55bfff3e1413c516d4f79dd4d4dc1feffb04a77d964edd"
+  }
+}

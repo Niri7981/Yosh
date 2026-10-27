@@ -38,6 +38,7 @@ export function paymentSignatureHeaders(payload: PaymentPayload): Record<string,
 
 const receiptFields = {
   network: z.templateLiteral(['solana:', z.string().min(1).max(193)]),
+  transactionId: TransactionSignatureSchema.optional(), signature: TransactionSignatureSchema.optional(),
   amount: z.string().refine(value => PositiveAtomicAmountSchema.safeParse(value).success).optional(), extensions: z.record(z.string(), z.json()).optional(),
   extensionResponses: z.record(z.string(), z.json()).optional(),
   extra: z.record(z.string(), z.json()).optional(),
@@ -52,7 +53,13 @@ export const SettlementReceiptSchema = z.discriminatedUnion('success', [
 export type SettlementReceiptBinding = { network: string; payer: string; amount: string; transaction?: string };
 
 export function validateSettlementReceipt(raw: unknown, expected?: SettlementReceiptBinding): SettleResponse {
-  const receipt = SettlementReceiptSchema.parse(raw);
+  const parsed = SettlementReceiptSchema.parse(raw);
+  // Some V2 merchants include client compatibility aliases. They can repeat
+  // only the same public signature; they never supply alternative evidence.
+  if ((parsed.transactionId !== undefined && parsed.transactionId !== parsed.transaction)
+    || (parsed.signature !== undefined && parsed.signature !== parsed.transaction)) throw new Error('SETTLEMENT_RECEIPT_BINDING_MISMATCH');
+  const { transactionId: _id, signature: _signature, ...receipt } = parsed;
+  void _id; void _signature;
   if (expected && (receipt.network !== expected.network || receipt.payer !== expected.payer
     || (receipt.amount !== undefined && receipt.amount !== expected.amount)
     || (expected.transaction !== undefined && receipt.transaction !== expected.transaction))) throw new Error('SETTLEMENT_RECEIPT_BINDING_MISMATCH');

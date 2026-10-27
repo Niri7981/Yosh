@@ -10,6 +10,7 @@ struct ExecutionDetail: View {
     let onProductionExecution: (Bool) async -> Void
 
     @State private var showingEnableConfirmation = false
+    @State private var showingMainnetSelection = false
 
     private let ink = YoshShellPalette.ink
     private let secondaryInk = YoshShellPalette.secondaryInk
@@ -45,7 +46,8 @@ struct ExecutionDetail: View {
                     hairline
                     Button {
                         guard environment?.mode != mode else { return }
-                        Task { await onSelect(mode) }
+                        if mode == .liveMainnet { showingMainnetSelection = true }
+                        else { Task { await onSelect(mode) } }
                     } label: {
                         HStack(alignment: .firstTextBaseline, spacing: 12) {
                             VStack(alignment: .leading, spacing: 6) {
@@ -130,6 +132,14 @@ struct ExecutionDetail: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .foregroundStyle(ink)
+        .confirmationDialog("Use Solana Mainnet?", isPresented: $showingMainnetSelection, titleVisibility: .visible) {
+            Button("Use Mainnet") { Task { await onSelect(.liveMainnet) } }
+                .accessibilityIdentifier("execution-select-mainnet-confirm")
+            Button("Cancel", role: .cancel) { }
+                .accessibilityIdentifier("execution-select-mainnet-cancel")
+        } message: {
+            Text("Mainnet uses real SOL and USDC. Its existing wallet, authority and payment settings stay separate from Devnet and Simulation.")
+        }
         .confirmationDialog("Enable real Mainnet payments?", isPresented: $showingEnableConfirmation,
             titleVisibility: .visible) {
             Button("Enable Mainnet execution") { Task { await onProductionExecution(true) } }

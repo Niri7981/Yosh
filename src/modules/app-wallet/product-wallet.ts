@@ -3,6 +3,7 @@ import { randomBytes } from 'node:crypto';
 import { createKeyPairSignerFromBytes, createKeyPairSignerFromPrivateKeyBytes, getBase58Decoder, getBase58Encoder } from '@solana/kit';
 import { createAppWalletKeychain, readAppWalletKeychain, createMainnetWalletKeychain, readMainnetWalletKeychain, WalletKeychainError } from '../payment/keychain';
 import { resolvePaymentEnvironment, validatePaymentEnvironment, type PaymentEnvironment } from '../payment/payment-environment';
+import { isDevnetDevelopment, isSimulatedDevelopment } from '../pay-dev/environment';
 
 export type WalletSecretStore = { read(): Promise<string | undefined>; create(secret: string): Promise<void> };
 export const macOSWalletSecretStore: WalletSecretStore = { read: readAppWalletKeychain, create: createAppWalletKeychain };
@@ -15,7 +16,10 @@ const macOSWalletStores: ProductWalletStores = {
 export async function readExistingProductWallets(
   stores: Readonly<{ test: Pick<WalletSecretStore, 'read'>; mainnet: Pick<WalletSecretStore, 'read'> }> = macOSWalletStores,
 ) {
-  const identities = [
+  // Simulation never opens a signing credential. Devnet reads its own fixed
+  // slot only; a status request must not touch Mainnet or legacy Offline keys.
+  if (isSimulatedDevelopment()) return [];
+  const identities = isDevnetDevelopment() ? [{ id: 'devnet', label: 'Devnet · Test', store: stores.test }] : [
     { id: 'mainnet', label: 'Mainnet', store: stores.mainnet },
     { id: 'devnet', label: 'Devnet · Test', store: stores.test },
   ];

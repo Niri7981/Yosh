@@ -2,14 +2,21 @@ import { PAY_DEVELOPMENT_PROFILE } from './profile';
 import { closeSync, existsSync, fsyncSync, lstatSync, openSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { z } from 'zod';
+import { DEVNET_GENESIS, DEVNET_NETWORK, DEVNET_USDC_MINT, resolvePaymentEnvironment } from '../payment/payment-environment';
 
-export const DevelopmentEnvironment = z.object({ version: z.literal(1), environment: z.enum(['offline', 'mainnet']),
+const RpcEndpoint = z.url().max(2048).refine(value => {
+  const url = new URL(value);
+  return url.protocol === 'https:' && !url.username && !url.password && !url.search && !url.hash
+    && (!url.port || url.port === '443');
+});
+export const DevelopmentEnvironment = z.object({ devnetRpcUrl: RpcEndpoint.optional(), version: z.literal(1), environment: z.enum(['offline', 'simulated', 'devnet', 'mainnet']),
   mainnetRiskAccepted: z.boolean(), rpcUrl: z.url().max(2048).refine(value => {
     const url = new URL(value);
     return url.protocol === 'https:' && !url.username && !url.password && !url.search && !url.hash
       && (!url.port || url.port === '443');
   }) }).strict().refine(value => value.environment !== 'mainnet' || value.mainnetRiskAccepted);
 export const DEFAULT_DEV_RPC = 'https://solana-rpc.publicnode.com';
+export const DEFAULT_DEVNET_RPC = 'https://api.devnet.solana.com';
 export function assertDevelopmentOrigin(origin: string) {
   if (PAY_DEVELOPMENT_PROFILE.bundleIdentifier === 'com.yosh.pay-development.v011rc5'
     && origin !== `http://127.0.0.1:${PAY_DEVELOPMENT_PROFILE.backendPort}`)
@@ -46,6 +53,28 @@ export function isMainnetDevelopment(directory = process.env.YOSH_DATA_DIR ?? ''
   return true;
 }
 
+function isTestDevelopment(profile: 'devnet' | 'simulated', directory: string) {
+  if (process.env.YOSH_PAY_DEV !== '1' || process.env.YOSH_PAY_DEV_ENV !== profile) return false;
+  assertDevelopmentDirectory(directory, profile === 'devnet' ? 'Devnet' : 'Simulated');
+  const selection = readDevelopmentEnvironment(dirname(directory));
+  const environment = resolvePaymentEnvironment();
+  if (selection.environment !== profile || process.env.YOSH_DATA_DIR !== directory
+    || process.env.YOSH_PAY_MCP_MAINNET === '1' || environment.mode !== (profile === 'devnet' ? 'live_devnet' : 'simulated')
+    || environment.isProduction || environment.productionExecutionEnabled || environment.cluster !== 'devnet'
+    || environment.rpcUrl !== (profile === 'devnet' ? selection.devnetRpcUrl ?? DEFAULT_DEVNET_RPC : DEFAULT_DEVNET_RPC) || environment.genesisHash !== DEVNET_GENESIS
+    || environment.network !== DEVNET_NETWORK || environment.asset.mint !== DEVNET_USDC_MINT)
+    throw new Error('PAY_DEVELOPMENT_ENVIRONMENT_REJECTED');
+  return true;
+}
+
+export function isDevnetDevelopment(directory = process.env.YOSH_DATA_DIR ?? '') {
+  return isTestDevelopment('devnet', directory);
+}
+
+export function isSimulatedDevelopment(directory = process.env.YOSH_DATA_DIR ?? '') {
+  return isTestDevelopment('simulated', directory);
+}
+
 export function assertDevelopmentStorage(directory: string) {
   for (const file of ['app-ledger.sqlite', 'backend-owner.sqlite', 'app-ledger.sqlite.writer-lock']) {
     for (const suffix of ['', '-wal', '-shm', '-journal']) {
@@ -74,3 +103,24 @@ export function admitMainnetDevelopment(directory: string) {
   if (!stat.isFile() || stat.isSymbolicLink() || stat.uid !== process.getuid?.() || (stat.mode & 0o777) !== 0o600
     || JSON.stringify(JSON.parse(readFileSync(path, 'utf8'))) !== JSON.stringify(marker)) throw new Error('PAY_DEVELOPMENT_MARKER_REQUIRED');
 }
+
+function admitTestDevelopment(directory: string, profile: 'devnet' | 'simulated') {
+  if (!(profile === 'devnet' ? isDevnetDevelopment(directory) : isSimulatedDevelopment(directory)))
+    throw new Error('PAY_DEVELOPMENT_ENVIRONMENT_REJECTED');
+  assertDevelopmentStorage(directory);
+  const path = join(directory, `pay-development-${profile}.json`);
+  const marker = { version: 1, kind: `yosh-pay-${profile}-development`, directory };
+  if (!existsSync(path)) {
+    if (['app-ledger.sqlite', 'app-ledger.sqlite-wal', 'app-ledger.sqlite-journal'].some(file => existsSync(join(directory, file))))
+      throw new Error('PAY_DEVELOPMENT_EXISTING_LEDGER_REJECTED');
+    writeFileSync(path, JSON.stringify(marker), { flag: 'wx', mode: 0o600, flush: true });
+    const folder = openSync(directory, 'r');
+    try { fsyncSync(folder); } finally { closeSync(folder); }
+  }
+  const stat = lstatSync(path);
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.uid !== process.getuid?.() || (stat.mode & 0o777) !== 0o600
+    || JSON.stringify(JSON.parse(readFileSync(path, 'utf8'))) !== JSON.stringify(marker)) throw new Error('PAY_DEVELOPMENT_MARKER_REQUIRED');
+}
+
+export function admitDevnetDevelopment(directory: string) { admitTestDevelopment(directory, 'devnet'); }
+export function admitSimulatedDevelopment(directory: string) { admitTestDevelopment(directory, 'simulated'); }

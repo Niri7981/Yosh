@@ -1,3 +1,4 @@
+import { fetchRpcRead } from './rpc-read-transport';
 import { address, getAddressEncoder, getProgramDerivedAddress } from "@solana/kit";
 import { assertPaymentConfigExecutionEnabled, DEVNET_GENESIS, PAYMENT_AMOUNT, TOKEN_PROGRAM, type PaymentConfig } from "./payment-config";
 import { readPaymentJson } from './read-payment-json';
@@ -39,7 +40,7 @@ export function classifyPaymentPreflightError(error: unknown): string {
   if (message.startsWith('Buyer associated token account has less')) return 'INSUFFICIENT_USDC';
   if (message.startsWith('Facilitator fee payer must have SOL')) return 'FEE_PAYER_SOL_INSUFFICIENT';
   if (message.startsWith('Facilitator does not support')) return 'FACILITATOR_QUOTE_MISMATCH';
-  if (message.startsWith('Facilitator supported') || message.startsWith('A bound Mainnet quote fee payer')
+  if (message.startsWith('Facilitator supported') || message.startsWith('A bound Mainnet quote fee payer') || message.startsWith('A bound Devnet quote fee payer')
     || message.startsWith('Mainnet requires sponsored') || message.startsWith('Facilitator supported response')) return 'FACILITATOR_QUOTE_INVALID';
   if (message.startsWith('RPC genesis hash')) return 'RPC_NETWORK_MISMATCH';
   if (message.startsWith('RPC ') || message.startsWith('Payment mint')) return 'RPC_PAYMENT_ASSET_UNVERIFIED';
@@ -56,11 +57,13 @@ export async function runPaymentPreflight(
   assertPaymentConfigExecutionEnabled(config);
   const amount = dependencies.amount ?? PAYMENT_AMOUNT;
   if (!/^[1-9]\d*$/.test(amount)) throw new Error("Invalid payment amount");
-  const fetcher = dependencies.fetch || (config.mode === 'live_mainnet' && process.env.YOSH_PAY_MCP_MAINNET === '1'
+  const fetcher = dependencies.fetch || ((config.mode === 'live_mainnet' && process.env.YOSH_PAY_MCP_MAINNET === '1')
+    || (config.mode === 'live_devnet' && process.env.YOSH_PAY_MCP_DEVNET === '1')
     ? (input: string | URL | Request, init?: RequestInit) => safeResourceFetch(new URL(input instanceof Request ? input.url : String(input)).href, init ?? {}) : fetch);
-  async function json(url: string, label: string, init: RequestInit = {}): Promise<JsonObject> {
+  async function json(url: string, label: string, init: RequestInit = {}, rpcMethod?: string): Promise<JsonObject> {
     try {
-      const response = await fetcher(url, { ...init, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS), redirect: "error" });
+      const request: RequestInit = { ...init, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS), redirect: "error" };
+      const response = rpcMethod ? await fetchRpcRead(config.mode, rpcMethod, fetcher, url, request) : await fetcher(url, request);
       if (!response.ok) throw new Error();
       return object(await readPaymentJson(response));
     } catch {
@@ -71,7 +74,7 @@ export async function runPaymentPreflight(
     const response = await json(config.rpcUrl, `RPC ${method}`, {
       method: "POST", headers: { "content-type": "application/json" },
       body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
-    });
+    }, method);
     if (response.error || !("result" in response)) throw new Error(`RPC ${method} returned an error`);
     return response.result;
   }
@@ -101,8 +104,8 @@ export async function runPaymentPreflight(
     );
     if (!kind) throw new Error("Facilitator does not support x402 v2 exact payments on the configured network");
     rawFeePayer = object(kind.extra).feePayer;
-  } else if (config.mode !== 'live_mainnet' || dependencies.feePayer === undefined) {
-    throw new Error('A bound Mainnet quote fee payer is required');
+  } else if (!(config.mode === 'live_mainnet' || (config.mode === 'live_devnet' && config.cluster === 'devnet')) || dependencies.feePayer === undefined) {
+    throw new Error(config.mode === 'live_devnet' ? 'A bound Devnet quote fee payer is required' : 'A bound Mainnet quote fee payer is required');
   }
   let feePayer: string;
   try {

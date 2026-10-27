@@ -3,7 +3,7 @@ import { HttpResourceRequestSchema, ResourceRequestInputSchema, DeclarativeResou
 import { safeResourceFetch } from './safe-resource-fetch';
 import { readPaymentRequiredHeader } from '../payment/x402-client';
 import { validateResourceChallenge } from '../payment/resource-challenge';
-import { resolvePaymentEnvironment } from '../payment/payment-environment';
+import { type PaymentEnvironment, resolvePaymentEnvironment } from '../payment/payment-environment';
 import { MAX_ATOMIC_AMOUNT } from '../authority/atomic-money';
 import { registeredResourceSummary } from './registered-resources';
 import { assertPostRequestApproval, postRequestReview } from './post-request-authorization';
@@ -32,7 +32,7 @@ export async function unpaidChallengeHeaders(url: string, method: 'GET' | 'POST'
 }
 
 /** Prepare the same concrete instance that will be transmitted, without external I/O. */
-export function prepareDiscovery(raw: unknown) {
+export function prepareDiscovery(raw: unknown, environment: PaymentEnvironment = resolvePaymentEnvironment({ YOSH_EXECUTION_MODE: 'live_mainnet' })) {
   const input = DiscoveryInput.parse(raw);
   const request = HttpResourceRequestSchema.parse({ url: input.url, method: input.method, access: 'https',
     headers: input.headers ?? (input.method === 'POST' ? { accept: 'application/json', 'content-type': 'application/json' } : { accept: 'application/json' }),
@@ -47,7 +47,6 @@ export function prepareDiscovery(raw: unknown) {
   validateDeliveryCapability(input.deliveryRecovery ?? { kind: 'none' }, request);
   if (input.deliveryRecovery && input.deliveryRecovery.kind !== 'none' && !input.documentation?.urls.length)
     throw new ResourceRegistryError('RESOURCE_RECOVERY_DOCUMENTATION_REQUIRED');
-  const environment = resolvePaymentEnvironment({ YOSH_EXECUTION_MODE: 'live_mainnet' });
   const policy = { resourceId: 'discovery', providerId: 'discovery', request,
     ...(input.requestInputs ? { requestInputs: input.requestInputs } : {}),
     network: environment.network, mint: environment.asset.mint, decimals: 6 as const,
@@ -57,8 +56,8 @@ export function prepareDiscovery(raw: unknown) {
 }
 
 /** Approval is a separate trusted management argument, never an Agent input field. */
-export async function discoverResource(raw: unknown, readHeaders: typeof unpaidChallengeHeaders = unpaidChallengeHeaders, approvedHash?: string) {
-  const { input, request, environment, policy, instance } = prepareDiscovery(raw);
+export async function discoverResource(raw: unknown, readHeaders: typeof unpaidChallengeHeaders = unpaidChallengeHeaders, approvedHash?: string, selectedEnvironment?: PaymentEnvironment) {
+  const { input, request, environment, policy, instance } = prepareDiscovery(raw, selectedEnvironment);
   assertPostRequestApproval(instance, approvedHash);
   try {
     const headers = readHeaders !== unpaidChallengeHeaders && instance.method === 'GET' && instance.body === undefined

@@ -37,16 +37,16 @@ export type PurchaseRequestResult = {
 };
 
 function result(record: SpendReservation, reused: boolean, executionMode: PurchaseExecutionMode): PurchaseRequestResult {
-  const mainnet = executionMode === 'live_mainnet';
-  const id = mainnet ? record.intent.resourceId : PaidResourceIdSchema.parse(record.intent.resourceId);
+  const registered = record.intent.resourcePath === undefined;
+  const id = registered ? record.intent.resourceId : PaidResourceIdSchema.parse(record.intent.resourceId);
   const authority = record.intent.authority;
   if (!authority && (record.decision.decision !== 'DENIED' || record.decision.reason !== 'SPEND_GRANT_REQUIRED')) throw new Error('SPEND_GRANT_REQUIRED');
   const resource = record.status === 'PAID' && record.deliveryStatus === 'COMPLETE'
-    ? mainnet ? record.data : parsePaidResourceDelivery(PaidResourceIdSchema.parse(id), record.data) : undefined;
+    ? registered ? record.data : parsePaidResourceDelivery(PaidResourceIdSchema.parse(id), record.data) : undefined;
   const encoded = resource === undefined ? undefined : Buffer.from(JSON.stringify(resource));
   return { purchaseId: record.intent.idempotencyKey, resourceId: id, amount: String(record.intent.amount),
-    display: displayAmount(String(record.intent.amount)).replace('test USDC', mainnet ? 'USDC' : 'test USDC'), status: record.status, decision: record.decision,
-    quote: { resourceId: id, resourceUrl: mainnet ? record.intent.httpRequest!.url : paidResource(PaidResourceIdSchema.parse(id)).path, providerId: record.intent.providerId, network: record.intent.network,
+    display: displayAmount(String(record.intent.amount)).replace('test USDC', executionMode === 'live_mainnet' ? 'USDC' : 'test USDC'), status: record.status, decision: record.decision,
+    quote: { resourceId: id, resourceUrl: registered ? record.intent.httpRequest!.url : paidResource(PaidResourceIdSchema.parse(id)).path, providerId: record.intent.providerId, network: record.intent.network,
       assetId: record.intent.assetId, assetDecimals: record.intent.assetDecimals, payTo: record.intent.payTo,
       amount: String(record.intent.amount), expiresAt: record.intent.expiresAt, fingerprint: record.intent.quoteFingerprint },
     grant: authority ? { id: authority.grantId, version: authority.grantVersion } : null,
@@ -69,11 +69,11 @@ export async function requestPaidResourcePurchase(raw: unknown, options: {
   externalRequest?: import('../resources/http-resource').HttpResourceRequest;
   pay?: typeof executeApprovedPayment; recover?: typeof recoverApprovedPayment;
 }): Promise<PurchaseRequestResult> {
-  if (options.config.mode === 'live_mainnet') {
+  if (options.config.mode === 'live_mainnet' || (options.config.mode === 'live_devnet' && options.config.registeredResources !== undefined)) {
     const input = PurchaseRequestInputSchema.parse(raw);
     const reused = Boolean(options.ledger.getOwned(input.requestId, options.principal.cardMemberId));
     const record = await requestRegisteredResourcePurchase(input, options);
-    return result(record, reused, 'live_mainnet');
+    return result(record, reused, options.config.mode);
   }
   if (options.execute === true) assertPaymentConfigExecutionEnabled(options.config);
   const input = PurchaseRequestInputSchema.extend({ resourceId: PaidResourceIdSchema }).parse(raw);

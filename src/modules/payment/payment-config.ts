@@ -33,7 +33,7 @@ export function resolveFacilitatorConfiguration(env: Record<string, string | und
     throw new PaymentConfigurationError('FACILITATOR_CONFIGURATION_REQUIRED',
       'X402_FACILITATOR_URL is required for localnet');
   }
-  if (raw === undefined && environment.mode === 'live_mainnet') return null;
+  if (raw === undefined && (environment.mode === 'live_mainnet' || env.YOSH_PAY_MCP_DEVNET === '1')) return null;
   const selected = raw === undefined ? 'https://x402.org/facilitator' : raw;
   let url: URL;
   try {
@@ -71,13 +71,13 @@ function publicKey(value: string | undefined, name: string): string {
 
 /** Resolve identity before touching wallet configuration. Mainnet has no Demo fallback. */
 export function loadPaymentConfig(env: Record<string, string | undefined> = process.env,
-  defaultMode: PurchaseExecutionMode = 'live_devnet', mainnetIdentity?: string): PaymentConfig {
+  defaultMode: PurchaseExecutionMode = 'live_devnet', walletIdentity?: string): PaymentConfig {
   const environment = resolvePaymentEnvironment(env, defaultMode);
   if (environment.mode === 'live_mainnet') {
     if (Object.keys(env).some(key => key.startsWith('DEMO_'))) {
       throw new Error('MAINNET_WALLET_ISOLATION: Demo configuration is forbidden');
     }
-    const buyer = publicKey(mainnetIdentity, 'Mainnet wallet identity');
+    const buyer = publicKey(walletIdentity, 'Mainnet wallet identity');
     if (env.YOSH_MAINNET_WALLET_PUBLIC_KEY !== undefined && env.YOSH_MAINNET_WALLET_PUBLIC_KEY !== buyer) {
       throw new Error('MAINNET_WALLET_IDENTITY_MISMATCH');
     }
@@ -88,6 +88,16 @@ export function loadPaymentConfig(env: Record<string, string | undefined> = proc
     // Parsed registration and the selected environment are captured for this service.
     return Object.freeze({ ...environment, mint: environment.asset.mint, buyer, merchant: registeredResources[0].recipient ?? '',
       facilitatorUrl, registeredResources: Object.freeze(registeredResources) });
+  }
+  if (env.YOSH_PAY_MCP_DEVNET === '1') {
+    if (environment.mode !== 'live_devnet' || environment.cluster !== 'devnet'
+      || Object.keys(env).some(key => key.startsWith('DEMO_'))) throw new Error('PAY_DEVNET_CONFIGURATION_REQUIRED');
+    const buyer = publicKey(walletIdentity, 'Devnet wallet identity');
+    const registeredResources = loadRegisteredResources(env, environment);
+    if (!registeredResources.length) throw new Error('REGISTERED_RESOURCE_REQUIRED');
+    if (registeredResources.some(resource => resource.recipient === buyer)) throw new Error('REGISTERED_RESOURCE_INVALID');
+    return Object.freeze({ ...environment, mint: environment.asset.mint, buyer, merchant: registeredResources[0].recipient ?? '',
+      facilitatorUrl: resolveFacilitatorConfiguration(env, environment), registeredResources: Object.freeze(registeredResources) });
   }
   const buyer = publicKey(env.DEMO_BUYER_PUBLIC_KEY, "DEMO_BUYER_PUBLIC_KEY");
   const merchant = publicKey(env.DEMO_MERCHANT_PUBLIC_KEY, "DEMO_MERCHANT_PUBLIC_KEY");
