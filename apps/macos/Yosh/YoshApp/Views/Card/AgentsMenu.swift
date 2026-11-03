@@ -25,6 +25,7 @@ struct AgentsMenu: View {
         .menuStyle(.button)
         .buttonStyle(.plain)
         .menuIndicator(.hidden)
+        .accessibilityIdentifier("agents.selector")
         .accessibilityHint("Current agent: \(session.selectedMember?.label ?? "none")")
     }
 

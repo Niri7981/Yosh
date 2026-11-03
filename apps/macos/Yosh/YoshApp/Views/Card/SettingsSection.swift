@@ -4,6 +4,7 @@ struct SettingsSection<Content: View>: View {
     let title: String
     let symbol: String
     var action: (() -> Void)? = nil
+    var symbolSize: CGFloat = 15
     @ViewBuilder let content: Content
 
     var body: some View {
@@ -24,7 +25,8 @@ struct SettingsSection<Content: View>: View {
 
     private var heading: some View {
         HStack(spacing: 12) {
-            Image(systemName: symbol).font(.system(size: 15)).frame(width: 20, height: 20)
+            Image(systemName: symbol).font(.system(size: symbolSize))
+                .frame(width: symbolSize + 5, height: symbolSize + 5)
                 .accessibilityHidden(true)
             Text(title).font(.system(size: 10, weight: .semibold)).tracking(1.8)
                 .accessibilityAddTraits(.isHeader)

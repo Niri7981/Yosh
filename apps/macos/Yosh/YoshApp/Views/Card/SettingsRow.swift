@@ -7,6 +7,7 @@ struct SettingsRow: View {
     var showsChevron = false
     var actionLabel: String? = nil
     var action: (() -> Void)? = nil
+    var symbolSize: CGFloat = 14
 
     var body: some View {
         Group {
@@ -35,7 +36,7 @@ struct SettingsRow: View {
             }
             if let symbol {
                 Image(systemName: symbol)
-                    .font(.system(size: 14, weight: .regular))
+                    .font(.system(size: symbolSize, weight: .regular))
                     .foregroundStyle(YoshShellPalette.secondaryInk)
                     .accessibilityHidden(true)
             }

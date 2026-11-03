@@ -70,7 +70,10 @@ struct AgentCardBack: View {
                     }
                     YoshTabPage(section: .settings, selection: selectedSection) {
                         if visitedSections.contains(.settings) {
-                            CardSettingsView(overviewClient: overviewClient, isActive: selectedSection == .settings)
+                            CardSettingsView(overviewClient: overviewClient, isActive: selectedSection == .settings,
+                                hostName: memberSession.selectedMember?.label ?? "Codex",
+                                hostStatus: settingsHostStatus,
+                                onOpenConnection: { selectSection(.connection) })
                         }
                     }
                 }
@@ -121,6 +124,15 @@ struct AgentCardBack: View {
         .padding(.horizontal, CardPageHeader.Layout.contentInset)
         .padding(.top, CardPageHeader.Layout.topSpacing)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private var settingsHostStatus: String {
+        guard memberSession.loadError == nil,
+              let member = memberSession.members.first(where: { $0.member.id == memberSession.selectedMemberID }) else {
+            return "Unavailable"
+        }
+        if member.connection.hasLiveMCPSession { return "Connected" }
+        return member.connection.enabled ? "Waiting for host" : "Not connected"
     }
 
     private var showsOverview: Bool {

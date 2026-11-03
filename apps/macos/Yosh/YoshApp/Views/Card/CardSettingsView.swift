@@ -4,6 +4,9 @@ import SwiftUI
 struct CardSettingsView: View {
     let overviewClient: OverviewClient
     var isActive = true
+    var hostName = "Codex"
+    var hostStatus = "Checking…"
+    var onOpenConnection: () -> Void = {}
 
     @Environment(YoshAppLock.self) private var appLock: YoshAppLock?
 
@@ -43,19 +46,11 @@ struct CardSettingsView: View {
 
     var body: some View {
         YoshDetailStack(navigation: navigation, reduceMotion: reduceMotion) {
-        CardSettingsBody(information: information, appVersion: appVersion, isLoading: isLoading, error: error,
-            onCopyWallet: copyWallet, onOpenDataFolder: openDataFolder, onOpenRepository: openRepository,
-            onReload: { Task { await reload(retry: true) } }, appLock: appLock,
-            onOpenWallets: { navigation.show("wallets") },
-            onOpenResources: { navigation.show("resources") }, development: development,
-            isSwitchingEnvironment: switchingEnvironment,
-            onSelectEnvironment: { mode in
-                guard mode != development?.environment else { return }
-                if mode == .mainnet { confirmMainnet = true }
-                else { Task { await switchEnvironment(mode) } }
-            }, onSaveRPC: { rpc in Task { await switchEnvironment(development?.environment ?? .mainnet, rpc: rpc) } })
+        settingsBody(advanced: false)
         } destination: { route in
-            if route == "wallets" {
+            if route == "advanced" {
+                settingsBody(advanced: true)
+            } else if route == "wallets" {
                 WalletsView(client: overviewClient, isActive: isActive && navigation.selection != nil,
                     onBack: { navigation.show(nil) }, onChanged: { Task { await reload() } })
             } else {
@@ -78,6 +73,23 @@ struct CardSettingsView: View {
             .onReceive(NotificationCenter.default.publisher(for: .nativeServiceReady)) { _ in
                 if isActive { Task { await reload() } }
             }
+    }
+
+    private func settingsBody(advanced: Bool) -> some View {
+        CardSettingsBody(information: information, appVersion: appVersion, isLoading: isLoading, error: error,
+            onCopyWallet: copyWallet, onOpenDataFolder: openDataFolder, onOpenRepository: openRepository,
+            onReload: { Task { await reload(retry: true) } }, appLock: appLock,
+            onOpenWallets: { navigation.show("wallets") },
+            onOpenResources: { navigation.show("resources") }, development: development,
+            isSwitchingEnvironment: switchingEnvironment,
+            onSelectEnvironment: { mode in
+                guard mode != development?.environment else { return }
+                if mode == .mainnet { confirmMainnet = true }
+                else { Task { await switchEnvironment(mode) } }
+            }, onSaveRPC: { rpc in Task { await switchEnvironment(development?.environment ?? .mainnet, rpc: rpc) } },
+            showsAdvanced: advanced, onBack: { navigation.show(nil) },
+            onOpenAdvanced: { navigation.show("advanced") }, hostName: hostName, hostStatus: hostStatus,
+            onOpenConnection: onOpenConnection)
     }
 
     private func copyWallet(_ address: String) {
