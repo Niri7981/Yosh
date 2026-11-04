@@ -93,9 +93,35 @@ def verify_bundle(app):
     rc.verify_packaged_isolation(app)
     subprocess.run(['codesign', '--verify', '--deep', '--strict', app], check=True)
     provenance = json.loads((app / 'Contents/Resources/Runtime/stable-source-manifest.json').read_text())
-    if provenance['canonicalBase'] != BASE or provenance['product'] != verify_metadata() or not provenance['paymentCoreUnchanged']:
+    if provenance['canonicalBase'] != BASE or provenance['product'] != verify_metadata():
         raise ValueError('Stable source provenance mismatch')
+    if provenance.get('paymentCoreUnchanged') is not True:
+        verify_grant_authorization_update(app, provenance)
     return info
+
+
+def verify_grant_authorization_update(app, provenance):
+    """Recognize the explicitly authorized product-Grant fix, not arbitrary core overlays.
+
+    The frozen promotion builder remains unchanged. Installation additionally
+    checks the current backend hash and both source changes against their
+    recorded installed baseline; verify_artifact still locks every bundle byte.
+    """
+    update = provenance.get('grantAuthorizationUpdate')
+    paths = {'src/modules/payment/pay-authority-adapter.ts', 'src/modules/payment/mainnet-pay-execution.ts'}
+    if not isinstance(update, dict) or set(update) != {'version', 'kind', 'baseBackendSha256', 'backendSha256', 'files'}:
+        raise ValueError('Grant authorization update provenance required')
+    if update['version'] != 1 or update['kind'] != 'product-spend-grant-v1' or not isinstance(update['files'], dict) or set(update['files']) != paths:
+        raise ValueError('Grant authorization update scope mismatch')
+    if update['backendSha256'] != rc.digest(app / 'Contents/Resources/Runtime/backend/server.js') \
+            or update['baseBackendSha256'] != provenance.get('notificationReadOnlyOverlay', {}).get('updatedBackendSha256'):
+        raise ValueError('Grant authorization backend identity mismatch')
+    baseline = provenance.get('sources', {}).get('yosh', {}).get('files', {})
+    for path, source in update['files'].items():
+        if not isinstance(source, dict) or set(source) != {'baseSha256', 'sha256'} \
+                or source['baseSha256'] != baseline.get(path) \
+                or any(not isinstance(value, str) or re.fullmatch(r'[a-f0-9]{64}', value) is None for value in source.values()):
+            raise ValueError('Grant authorization source identity mismatch')
 
 
 def verify_artifact(output):
