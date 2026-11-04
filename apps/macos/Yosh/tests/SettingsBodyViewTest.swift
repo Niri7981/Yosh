@@ -18,13 +18,13 @@ struct SettingsBodyViewTest {
         let network = PayDevelopmentSelection(version: 1, environment: .mainnet,
             mainnetRiskAccepted: true, rpcUrl: "https://fixture.invalid")
         var copied: [String] = [], opened: [URL] = []
-        var advanced = 0, wallets = 0, hosts = 0, repositories = 0, reloads = 0
+        var advanced = 0, wallets = 0, hosts = 0, resources = 0, repositories = 0, reloads = 0
         func body(_ detail: Bool, _ info: CardSettingsPresentation?) -> some View {
             CardSettingsBody(information: info, appVersion: "Fixture 0.1.1", isLoading: false, error: nil,
                 onCopyWallet: { copied.append($0) }, onOpenDataFolder: { opened.append($0) },
                 onOpenRepository: { repositories += 1 }, onReload: { reloads += 1 },
-                onOpenWallets: { wallets += 1 }, development: network,
-                showsAdvanced: detail, onOpenAdvanced: { advanced += 1 }, hostStatus: "Connected",
+                onOpenWallets: { wallets += 1 }, onOpenResources: { resources += 1 }, development: network,
+                showsAdvanced: detail, showsEnvironment: true, onOpenAdvanced: { advanced += 1 }, hostStatus: "Connected",
                 onOpenConnection: { hosts += 1 })
                 .frame(width: 420, height: 526)
                 .background(YoshShellPalette.surface).environment(\.colorScheme, .dark)
@@ -78,8 +78,11 @@ struct SettingsBodyViewTest {
         press("settings.wallet.mainnet.copy", host, window)
         press("settings.wallets.open", host, window)
         press("settings.host.open", host, window)
+        precondition(element("settings.general", host) != nil, "General belongs on the Settings home page")
+        press("settings.resources", host, window)
+        try render(host, suffix: "home-general")
         press("settings.advanced.open", host, window)
-        precondition(copied == [address] && wallets == 1 && hosts == 1 && advanced == 1)
+        precondition(copied == [address] && wallets == 1 && hosts == 1 && resources == 1 && advanced == 1)
         precondition(opened.isEmpty && repositories == 0 && reloads == 0)
         window.close()
 
@@ -87,20 +90,43 @@ struct SettingsBodyViewTest {
         let detailWindow = fixtureWindow(detail)
         guard let advancedScroll = scrollView(in: detail), let advancedDocument = advancedScroll.documentView else { fatalError("Missing advanced scroll") }
         precondition(advancedDocument.bounds.height > advancedScroll.contentView.bounds.height)
-        press("settings.wallet.devnet.copy", detail, detailWindow)
-        precondition(copied == [address, "DevnetFixturePublicAddress"], "Advanced retains separate wallet copy actions")
+        for identifier in ["settings.wallets.open", "settings.wallet.devnet.copy", "settings.resources", "settings.general"] {
+            precondition(element(identifier, detail) == nil, "Advanced must not duplicate home sections")
+        }
+        try render(detail, suffix: "advanced-top")
         press("settings.data-folder", detail, detailWindow)
         press("settings.github", detail, detailWindow)
         precondition(opened == [directory] && repositories == 1 && reloads == 0)
         try render(detail, suffix: "advanced")
         detailWindow.close()
 
+        var savedRPCs: [String] = []
+        let environment = NSHostingView(rootView: SettingsEnvironmentSection(development: network,
+            isSwitching: false, onSelect: { _ in fatalError("Viewing settings must not change the environment") },
+            onSaveRPC: { savedRPCs.append($0) })
+            .padding(26).frame(width: 420, height: 420, alignment: .topLeading).background(YoshShellPalette.surface).environment(\.colorScheme, .dark))
+        let environmentWindow = fixtureWindow(environment)
+        precondition(element("settings.mainnet-rpc", environment) == nil, "RPC details start collapsed")
+        try render(environment, suffix: "environment")
+        guard let disclosure = nodes(environment).first(where: {
+            $0.responds(to: NSSelectorFromString("accessibilityRole"))
+                && $0.value(forKey: "accessibilityRole") as? String == "AXDisclosureTriangle"
+        }) else { fatalError("Missing native disclosure") }
+        let control: AnyObject = disclosure
+        precondition(control.accessibilityPerformPress?() == true, "Native RPC disclosure remains accessible")
+        settle(environment)
+        try render(environment, suffix: "environment-expanded")
+        precondition(element("settings.mainnet-rpc", environment) != nil, "RPC remains available on demand")
+        precondition(element("settings.rpc.save", environment) != nil)
+        precondition(savedRPCs.isEmpty, "Expanding connection details must not save or reconnect")
+        environmentWindow.close()
+
         let missing = CardSettingsPresentation(wallets: [.init(id: "mainnet", label: "Mainnet", address: nil, status: .missing)])
         let unavailable = NSHostingView(rootView: body(false, missing))
         let missingWindow = fixtureWindow(unavailable)
         precondition(element("settings.wallet.mainnet.copy", unavailable) == nil, "Missing wallets cannot be copied")
         missingWindow.close()
-        print("Settings native UI passed: top agent selector on every tab, primary home entries visible, Advanced reachable by scrolling, current wallet only, exact public-address copy, host/Advanced routing, retained Advanced actions and missing-wallet state")
+        print("Settings native UI passed: top agent selector on every tab, primary home entries visible, Advanced reachable by scrolling, APIs and General on home, no duplicate Advanced sections, collapsed RPC details, exact public-address copy and retained actions")
     }
 
     @MainActor private static func fixtureWindow(_ host: NSView, visible: Bool = false) -> NSWindow {

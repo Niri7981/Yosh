@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		D84900000000000000000001 /* SettingsEnvironmentSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = D84900000000000000000002 /* SettingsEnvironmentSection.swift */; };
 		C84900000000000000000063 /* PurchaseDetailDisclosureStyle.swift in Sources */ = {isa = PBXBuildFile; fileRef = C84900000000000000000064 /* PurchaseDetailDisclosureStyle.swift */; };
 		C84900000000000000000061 /* HostNetworkIcon.swift in Sources */ = {isa = PBXBuildFile; fileRef = C84900000000000000000062 /* HostNetworkIcon.swift */; };
 		B84900000000000000000055 /* PostRequestApprovalView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B84900000000000000000054 /* PostRequestApprovalView.swift */; };
@@ -92,6 +93,7 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		D84900000000000000000002 /* SettingsEnvironmentSection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsEnvironmentSection.swift; sourceTree = "<group>"; };
 		C84900000000000000000064 /* PurchaseDetailDisclosureStyle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PurchaseDetailDisclosureStyle.swift; sourceTree = "<group>"; };
 		C84900000000000000000062 /* HostNetworkIcon.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostNetworkIcon.swift; sourceTree = "<group>"; };
 		B84900000000000000000054 /* PostRequestApprovalView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PostRequestApprovalView.swift; sourceTree = "<group>"; };
@@ -326,6 +328,7 @@
 				B84900000000000000000054 /* PostRequestApprovalView.swift */,
 				A00000000000000000000071 /* CardSettingsBody.swift */,
 				A00000000000000000000073 /* SettingsSection.swift */,
+				D84900000000000000000002 /* SettingsEnvironmentSection.swift */,
 				A00000000000000000000075 /* SettingsRow.swift */,
 				A00000000000000000000038 /* AgentsMenu.swift */,
 				A0000000000000000000003A /* BackFlipButton.swift */,
@@ -465,6 +468,7 @@
 				C84900000000000000000002 /* WalletsView.swift in Sources */,
 				A00000000000000000000072 /* CardSettingsBody.swift in Sources */,
 				A00000000000000000000074 /* SettingsSection.swift in Sources */,
+				D84900000000000000000001 /* SettingsEnvironmentSection.swift in Sources */,
 				A00000000000000000000076 /* SettingsRow.swift in Sources */,
 				A00000000000000000000078 /* DailyAuthorityPresentation.swift in Sources */,
 				A0000000000000000000007A /* DailyAuthorityContent.swift in Sources */,

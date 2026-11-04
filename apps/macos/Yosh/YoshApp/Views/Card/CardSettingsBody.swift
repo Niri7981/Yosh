@@ -18,17 +18,12 @@ struct CardSettingsBody: View {
     var onSelectEnvironment: (PayDevelopmentMode) -> Void = { _ in }
     var onSaveRPC: (String) -> Void = { _ in }
     var showsAdvanced = false
+    var showsEnvironment = YoshPayDevelopment.isEnabled()
     var onBack: () -> Void = {}
     var onOpenAdvanced: () -> Void = {}
     var hostName = "Codex"
     var hostStatus = "Checking…"
     var onOpenConnection: () -> Void = {}
-    @State private var rpcDraft = ""
-
-    private var selectedRPC: String {
-        development?.environment == .devnet ? development?.devnetRPC ?? "https://api.devnet.solana.com"
-            : development?.rpcUrl ?? PayDevelopmentSelection.offline.rpcUrl
-    }
     private var unavailableValue: String { isLoading ? "Checking…" : "Unavailable" }
     private let rule = YoshShellPalette.rule
 
@@ -64,72 +59,13 @@ struct CardSettingsBody: View {
         .padding(.top, showsAdvanced ? 16 : CardPageHeader.Layout.topSpacing)
         .padding(.bottom, 12)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .onAppear { rpcDraft = selectedRPC }
-        .onChange(of: development) { _, _ in rpcDraft = selectedRPC }
     }
 
     @ViewBuilder
     private var advancedContent: some View {
-        if YoshPayDevelopment.isEnabled() {
-            SettingsSection(title: "ENVIRONMENT", symbol: "globe", symbolSize: 22) {
-                HStack {
-                    Text("Current environment")
-                    Spacer()
-                    Menu(development?.environment.title ?? "Checking…") {
-                        Button("Simulation") { onSelectEnvironment(.simulated) }
-                        Button("Solana Devnet") { onSelectEnvironment(.devnet) }
-                        if development?.environment == .offline {
-                            Button("Offline") { onSelectEnvironment(.offline) }
-                        }
-                        Button("Solana Mainnet…") { onSelectEnvironment(.mainnet) }
-                    }
-                    .disabled(isSwitchingEnvironment || development == nil)
-                    .accessibilityIdentifier("settings.environment")
-                }.font(.system(size: 13)).padding(.vertical, 10)
-                Text(isSwitchingEnvironment ? "Safely restarting the backend…" : environmentDescription)
-                    .font(.system(size: 11)).foregroundStyle(YoshShellPalette.secondaryInk)
-                Text("Reconnect Pay MCP in Codex after changing environment.")
-                    .font(.system(size: 11)).foregroundStyle(YoshShellPalette.secondaryInk)
-                if development?.environment == .mainnet || development?.environment == .devnet {
-                    separator
-                    TextField(development?.environment == .devnet ? "Devnet RPC URL" : "Mainnet RPC URL", text: $rpcDraft)
-                        .textFieldStyle(.roundedBorder)
-                        .accessibilityIdentifier("settings.mainnet-rpc")
-                    Button("Save RPC and reconnect") { onSaveRPC(rpcDraft) }
-                        .disabled(isSwitchingEnvironment || rpcDraft == selectedRPC)
-                    Text("Wallets, budgets and purchase records stay separate between environments.")
-                        .font(.system(size: 11)).foregroundStyle(YoshShellPalette.secondaryInk)
-                }
-            }
-        }
-        SettingsSection(title: "WALLETS", symbol: "wallet.bifold", action: onOpenWallets, symbolSize: 22) {
-            if let information {
-                ForEach(information.wallets) { wallet in
-                    existingWalletRow(wallet)
-                    if wallet.id != information.wallets.last?.id { separator }
-                }
-                if information.wallets.isEmpty { walletRow }
-            } else {
-                SettingsRow(title: "Mainnet", value: unavailableValue)
-                separator
-                SettingsRow(title: "Devnet · Test", value: unavailableValue)
-            }
-            Text("Manage wallets on this Mac.")
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        SettingsSection(title: "APIS", symbol: "network", symbolSize: 22) {
-            SettingsRow(title: "Registered APIs", showsChevron: true, action: onOpenResources)
-                .accessibilityIdentifier("settings.resources")
-        }
-        SettingsSection(title: "GENERAL", symbol: "gearshape", symbolSize: 22) {
-            SettingsRow(title: "Language", value: "English")
-                .help("English is the only language currently implemented.")
-            separator
-            unavailableToggle("Launch at login")
-            separator
-            unavailableToggle("Notifications")
+        if showsEnvironment {
+            SettingsEnvironmentSection(development: development, isSwitching: isSwitchingEnvironment,
+                onSelect: onSelectEnvironment, onSaveRPC: onSaveRPC)
         }
         SettingsSection(title: "APPEARANCE", symbol: "sun.max", symbolSize: 22) {
             Picker("Appearance", selection: $appearance) {
@@ -188,16 +124,6 @@ struct CardSettingsBody: View {
         return information?.wallets.first { $0.id == id }
     }
 
-    private var environmentDescription: String {
-        switch development?.environment {
-        case .mainnet: "Real SOL and USDC. Payments require separate authorization."
-        case .devnet: "Solana Devnet. Test assets only."
-        case .simulated: "Simulation. No signing or blockchain transactions."
-        case .offline: "Local offline testing. No real funds."
-        case nil: "Checking environment…"
-        }
-    }
-
     private var walletTitle: String {
         switch development?.environment {
         case .mainnet: "Mainnet wallet"
@@ -248,6 +174,23 @@ struct CardSettingsBody: View {
             homeSection("Connected host") {
                 homeLink(title: hostName, subtitle: hostStatus, symbol: "desktopcomputer", action: onOpenConnection)
                     .accessibilityIdentifier("settings.host.open")
+            }
+            separator
+            homeSection("APIs") {
+                homeLink(title: "Registered APIs", subtitle: nil, symbol: "network", action: onOpenResources)
+                    .accessibilityIdentifier("settings.resources")
+            }
+            separator
+            homeSection("General") {
+                VStack(spacing: 0) {
+                    SettingsRow(title: "Language", value: "English")
+                        .help("English is the only language currently implemented.")
+                    separator
+                    unavailableToggle("Launch at login")
+                    separator
+                    unavailableToggle("Notifications")
+                }
+                .accessibilityIdentifier("settings.general")
             }
             separator
             homeLink(title: "Advanced", subtitle: nil, symbol: "slider.horizontal.3", action: onOpenAdvanced)
@@ -311,32 +254,6 @@ struct CardSettingsBody: View {
         .font(.system(size: 13))
         .frame(minHeight: 38)
         .help("This feature is not available in Yosh yet.")
-    }
-
-    @ViewBuilder
-    private func existingWalletRow(_ wallet: CardSettingsPresentation.ExistingWallet) -> some View {
-        if wallet.status == .available, let address = wallet.address, !address.isEmpty {
-            SettingsRow(title: wallet.label, value: wallet.display, symbol: "square.on.square",
-                actionLabel: "Copy \(wallet.label) wallet address", action: { onCopyWallet(address) }, symbolSize: 18)
-                .accessibilityValue(address)
-                .accessibilityIdentifier("settings.wallet.\(wallet.id).copy")
-                .help("Copy the full public wallet address")
-        } else {
-            SettingsRow(title: wallet.label, value: wallet.display)
-        }
-    }
-
-    @ViewBuilder
-    private var walletRow: some View {
-        if let information, !information.walletAddress.isEmpty {
-            SettingsRow(title: "Wallet address", value: information.shortWalletAddress, symbol: "square.on.square",
-                actionLabel: "Copy wallet address", action: { onCopyWallet(information.walletAddress) }, symbolSize: 18)
-                .accessibilityValue(information.walletAddress)
-                .accessibilityIdentifier("settings.wallet.copy")
-                .help("Copy the full public wallet address")
-        } else {
-            SettingsRow(title: "Wallet address", value: isLoading ? "Checking…" : "Wallet unavailable")
-        }
     }
 
     @ViewBuilder
