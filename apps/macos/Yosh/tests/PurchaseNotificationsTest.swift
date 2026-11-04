@@ -46,10 +46,10 @@ import Foundation
         try await model.poll(load: load)
         precondition(calls == 0, "Disabled notifications must not read purchases")
         delivery.allowed = false
-        await model.setEnabled(true)
+        await model.setEnabled(true)?.value
         precondition(!model.enabled && model.message != nil, "Denied permission keeps notifications off")
         delivery.allowed = true
-        await model.setEnabled(true)
+        await model.setEnabled(true)?.value
         try await model.poll(load: load)
         precondition(delivery.sent.isEmpty, "Enabling must baseline history")
         events = [event]; cursor = 11
@@ -64,11 +64,11 @@ import Foundation
         await restarted.refreshPermission()
         try await restarted.poll(load: load)
         precondition(delivery.sent.count == 1, "Restart resumes persisted progress")
-        await restarted.setEnabled(false)
+        await restarted.setEnabled(false)?.value
         cursor = 12
         events.append(.init(sequence: 12, purchaseId: "off", agent: "Other Agent", apiName: "API",
             priceDisplay: "1 USDC", quantity: "1", outcome: .unpaid))
-        await restarted.setEnabled(true)
+        await restarted.setEnabled(true)?.value
         try await restarted.poll(load: load)
         precondition(delivery.sent.count == 1, "Re-enabling must skip purchases made while off")
         currentStore = other; cursor = 0; events = []

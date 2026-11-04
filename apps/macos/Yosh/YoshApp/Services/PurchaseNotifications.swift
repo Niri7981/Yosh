@@ -66,25 +66,36 @@ final class PurchaseNotifications {
 
     func refreshPermission() async { allowed = await delivery.isAllowed() }
 
-    func setEnabled(_ value: Bool) async {
-        guard !isChanging else { return }
+    /// SwiftUI bindings require their new value synchronously. Keep the switch On while
+    /// macOS is asking, but do not poll purchases until permission is actually granted.
+    @discardableResult
+    func setEnabled(_ value: Bool) -> Task<Void, Never>? {
+        guard !isChanging else { return nil }
         revision += 1
         if !value {
             enabled = false; defaults.set(false, forKey: enabledKey); message = nil
-            return
+            return nil
         }
         isChanging = true
-        defer { isChanging = false }
-        do {
-            allowed = try await delivery.requestPermission()
-            enabled = allowed
-            defaults.set(enabled, forKey: enabledKey)
-            baselineOnEnable = enabled
-            activeStore = nil
-            message = allowed ? nil : "Allow Yosh in System Settings → Notifications."
-        } catch {
-            enabled = false; defaults.set(false, forKey: enabledKey)
-            message = "Notifications couldn't be enabled. Try again."
+        message = nil
+        return Task {
+            defer { isChanging = false }
+            do {
+                if await delivery.isAllowed() {
+                    allowed = true
+                } else {
+                    allowed = try await delivery.requestPermission()
+                    if !allowed { allowed = await delivery.isAllowed() }
+                }
+                enabled = allowed
+                defaults.set(enabled, forKey: enabledKey)
+                baselineOnEnable = enabled
+                activeStore = nil
+                message = allowed ? nil : "Allow Yosh in System Settings → Notifications."
+            } catch {
+                enabled = false; defaults.set(false, forKey: enabledKey)
+                message = "Notifications couldn't be enabled. Try again."
+            }
         }
     }
 
