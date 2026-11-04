@@ -23,6 +23,11 @@ private final class ResourceMenuSelection: NSObject {
 struct SpendGrantViewTest {
     @MainActor static func main() throws {
         NSApplication.shared.setActivationPolicy(.prohibited)
+        NSApp.accessibilitySetValue(true, forAttribute: .init(rawValue: "AXEnhancedUserInterface"))
+        if CommandLine.arguments.contains("--per-transaction-only") {
+            try perTransactionFixture()
+            return
+        }
         for (input, expected) in [("0.20", "200000"), ("1.000001", "1000001"), (" 2.123456 ", "2123456"), ("0", "0")] {
             precondition(SpendGrantDraft.minorUnits(input) == expected)
         }
@@ -52,43 +57,55 @@ struct SpendGrantViewTest {
         guard let scroll = scrollViews(host).first, let document = scroll.documentView else { fatalError("Missing native page scroll view") }
         precondition(document.bounds.width <= scroll.contentView.bounds.width + 1)
         precondition(abs(scroll.contentView.bounds.origin.y) < 0.5)
+        precondition(element("grant-total", in: host) != nil && element("grant-per-transaction", in: host) == nil,
+            "Spend Grant must show only the total authorized input")
+        precondition(element("grant-current-details", in: host) != nil,
+            "Existing grants must retain a compact details disclosure")
+        precondition(!accessibleText(host).contains("Remaining"),
+            "The previous grant summary must be collapsed while editing a new grant")
         if let prefix = CommandLine.arguments.dropFirst().first { try render(host, to: prefix + "-collapsed.png") }
-        click(window, at: NSPoint(x: 80, y: 490))
+        clickElement("grant-current-details", host: host, window: window)
+        if let prefix = CommandLine.arguments.dropFirst().first { try render(host, to: prefix + "-details.png") }
+        precondition(accessibleText(host).contains("Remaining") && accessibleText(host).contains("Expired"),
+            "The existing grant summary must remain available on expansion")
+        clickElement("grant-current-details", host: host, window: window)
+        precondition(!accessibleText(host).contains("Remaining"),
+            "Collapsing details must restore the compact form")
+        clickElement("grant-back", host: host, window: window)
         precondition(backs == 1 && submissions.isEmpty)
-        click(window, at: NSPoint(x: 85, y: 70))
+        clickElement("grant-connection", host: host, window: window)
         precondition(connections == 1, "Connection required must retain its navigation action")
-        click(window, at: NSPoint(x: 100, y: 35))
+        clickElement("grant-create", host: host, window: window)
         settle(host)
         precondition(submissions.isEmpty, "Disabled connection must prevent grant writes")
-        click(window, at: NSPoint(x: 70, y: 172))
-        guard let editor = window.firstResponder as? NSTextView else { fatalError("Amount must retain a native text editor") }
-        editor.selectAll(nil)
-        editor.insertText("2.123456", replacementRange: editor.selectedRange())
-        settle(host)
+        edit("grant-total", text: "2.123456", host: host, window: window)
         let connected = try overview(enabled: true)
         host.rootView = page(connected)
         settle(host)
-        click(window, at: NSPoint(x: 100, y: 60))
+        clickElement("grant-create", host: host, window: window)
         settle(host)
         precondition(submissions.count == 1 && submissions[0].0 == "2123456" && submissions[0].1 == "200000",
             "Connection refresh must preserve the draft and submit exact amounts")
         precondition(submissions[0].2 > Int64(Date.now.timeIntervalSince1970 * 1000))
         host.rootView = page(connected, saving: true)
         settle(host)
-        click(window, at: NSPoint(x: 80, y: 490))
-        click(window, at: NSPoint(x: 100, y: 60))
+        clickElement("grant-back", host: host, window: window)
+        clickElement("grant-create", host: host, window: window)
         settle(host)
         precondition(backs == 1 && submissions.count == 1, "Saving must block Back and duplicate writes")
         host.rootView = page(connected)
         settle(host)
-        click(window, at: NSPoint(x: 180, y: 111))
+        clickElement("grant-expiry-trigger", host: host, window: window)
         settle(host)
-        precondition(document.bounds.height > scroll.contentView.bounds.height, "Expanded picker must scroll inside the same fixed card")
+        precondition(scrollViews(host).count == 4 && host.frame.size == NSSize(width: 420, height: 526)
+            && document.bounds.width <= scroll.contentView.bounds.width + 1,
+            "Expanded picker must retain three native wheels inside the fixed narrow card")
         if let prefix = CommandLine.arguments.dropFirst().first { try render(host, to: prefix + "-page-expanded.png") }
         try expiryFixture(reduceMotion: false)
         try expiryFixture(reduceMotion: true)
         try postConfirmation()
         try resourceFormFixture()
+        try perTransactionFixture()
         print("Spend Grant: exact submission, connection/saving guards, retained draft, narrow layout, inline wheel selection, keyboard adjustment, collapse/reopen and Reduce Motion passed")
     }
 
@@ -99,14 +116,17 @@ struct SpendGrantViewTest {
         let overview = try overview(enabled: true, mainnet: true)
         var submissions: [(String, String, Int64, String?, ResourceRequestSample?)] = []
         var preparations: [(String, ResourceRequestSample?)] = []
-        func page(saving: Bool = false) -> some View {
+        var otherLimitOpens = 0
+        let form = SpendGrantForm(overview: overview)
+        func page(saving: Bool = false, entry: SpendGrantDetail.Entry = .spendGrant) -> some View {
             SpendGrantDetail(overview: overview, isSaving: saving, writeMessage: nil, writeFailed: false,
                 onBack: {}, onConnection: {},
                 onCreate: { total, single, expiry, resource, sample, _ in submissions.append((total, single, expiry, resource, sample)) },
                 onRevoke: { _ in }, onPreparePost: { resource, sample in
                     preparations.append((resource, sample))
                     throw URLError(.cannotConnectToHost)
-                })
+                }, entry: entry, form: form, onOtherLimit: { otherLimitOpens += 1 })
+                .id(entry == .spendGrant ? "total" : "single")
                 .frame(width: 420, height: 526).environment(\.colorScheme, .light)
         }
         let host = NSHostingView(rootView: page())
@@ -133,7 +153,18 @@ struct SpendGrantViewTest {
         precondition(!textValues(host).contains("Endpoint") && abs(document.bounds.height - collapsedHeight) < 1)
         precondition((element("grant-sample-query", in: host)?.value(forKey: "accessibilityValue") as? String)?.contains("edited query") == true,
             "Disclosure must preserve the edited sample request")
+        precondition(element("grant-total", in: host) != nil && element("grant-per-transaction", in: host) == nil,
+            "The main grant page must not expose a second amount input")
         edit("grant-total", text: "0.20", host: host, window: window)
+        precondition(!isEnabled("grant-create", in: host) && element("grant-other-limit", in: host) != nil,
+            "A new grant cannot submit an invented hidden per-transaction limit")
+        clickElement("grant-other-limit", host: host, window: window)
+        precondition(otherLimitOpens == 1 && submissions.isEmpty, "The missing-limit action must only navigate")
+        host.rootView = page(entry: .perTransaction); settle(host)
+        precondition(element("grant-total", in: host) == nil && element("grant-per-transaction", in: host) != nil
+            && form.draft.total == "0.20"
+            && (element("grant-sample-query", in: host)?.value(forKey: "accessibilityValue") as? String)?.contains("edited query") == true,
+            "The other entry must retain the total, selected API and sample in the shared local form")
         edit("grant-per-transaction", text: "0.30", host: host, window: window)
         clickElement("grant-create", host: host, window: window)
         precondition(submissions.isEmpty && textValues(host).contains("Per transaction must fit within total authorized."))
@@ -146,10 +177,10 @@ struct SpendGrantViewTest {
         precondition(submissions.count == 1 && submissions[0].0 == "200000" && submissions[0].1 == "100000"
             && submissions[0].3 == "fixture-get" && submissions[0].4?.query?["prompt"] == "edited query")
         let expiry = submissions[0].2
-        host.rootView = page(saving: true); settle(host)
+        host.rootView = page(saving: true, entry: .perTransaction); settle(host)
         clickElement("grant-create", host: host, window: window)
         precondition(submissions.count == 1, "Saving must prevent duplicate fixture submissions")
-        host.rootView = page(); settle(host)
+        host.rootView = page(entry: .perTransaction); settle(host)
         clickElement("grant-api-details", host: host, window: window)
         chooseResource(overview.service.registeredResources![1], host: host, window: window)
         precondition(!textValues(host).contains("Endpoint"), "Changing API must collapse its details")
@@ -169,6 +200,73 @@ struct SpendGrantViewTest {
         print("Create Spend Grant native fixture: API selection, default collapse, details/reflow, long names/URLs, GET/POST samples, validation, saving guards and exact callback inputs passed")
     }
 
+    @MainActor private static func perTransactionFixture() throws {
+        let overview = try overview(enabled: true, status: "ACTIVE", mainnet: true, boundGrant: true)
+        let resource = overview.service.registeredResources!.first { $0.resourceId == "fixture-get" }!
+        precondition(overview.service.registeredResources!.first?.resourceId != resource.resourceId,
+            "The fixture must distinguish the bound resource from an arbitrary first API")
+        var submissions: [(String, String, Int64, String?, ResourceRequestSample?)] = []
+        var otherLimitOpens = 0
+        let form = SpendGrantForm(overview: overview)
+        func page(saving: Bool = false, entry: SpendGrantDetail.Entry = .perTransaction) -> some View {
+            SpendGrantDetail(overview: overview, isSaving: saving, writeMessage: nil, writeFailed: false,
+                onBack: {}, onConnection: {},
+                onCreate: { total, single, expiry, resource, sample, _ in submissions.append((total, single, expiry, resource, sample)) },
+                onRevoke: { _ in }, entry: entry, form: form, onOtherLimit: { otherLimitOpens += 1 })
+                .id(entry == .spendGrant ? "total" : "single")
+                .frame(width: 420, height: 526).environment(\.colorScheme, .light)
+        }
+        let host = NSHostingView(rootView: page())
+        let window = makeWindow(host, size: NSSize(width: 420, height: 526))
+        defer { window.close() }
+        settle(host)
+        precondition(accessibleText(host).contains("Per Transaction") && !accessibleText(host).contains("Spend Grant"),
+            "The single-limit entry must have its own secondary page title")
+        precondition(accessibleText(host).contains("Replace Grant") && submissions.isEmpty,
+            "Opening this entry must not create a cap or silently replace the existing API-bound grant")
+        let expectedResourceTitle = (resource.name ?? resource.resourceId) + " · Agent-submitted"
+        precondition(element("grant-resource", in: host)?.value(forKey: "accessibilityValue") as? String == expectedResourceTitle,
+            "Only the registered resource bound to the current grant may be preselected")
+        precondition((element("grant-sample-query", in: host)?.value(forKey: "accessibilityValue") as? String)?.contains("seed") == true,
+            "Preselection must retain the registered sample request")
+        precondition(element("grant-per-transaction", in: host)?.value(forKey: "accessibilityValue") as? String == "0.20"
+            && element("grant-total", in: host) == nil && form.draft.total == "0.20",
+            "Only the single-limit input is visible, while the existing grant total stays intact")
+        if let prefix = CommandLine.arguments.dropFirst().first { try render(host, to: prefix + "-per-transaction-initial.png") }
+        edit("grant-per-transaction", text: "0.30", host: host, window: window)
+        clickElement("grant-create", host: host, window: window)
+        precondition(submissions.isEmpty && textValues(host).contains("Per transaction must fit within total authorized."),
+            "The independent entry must preserve the existing total-bound validation")
+        edit("grant-per-transaction", text: "0.10", host: host, window: window)
+        clickElement("grant-create", host: host, window: window)
+        precondition(submissions.count == 1 && submissions[0].0 == "200000" && submissions[0].1 == "100000"
+            && submissions[0].3 == resource.resourceId && submissions[0].4?.query?["prompt"] == "seed"
+            && abs(submissions[0].2 - overview.scopedGrant!.expiresAt) <= 1,
+            "Editing the single limit must use the same grant callback with total, expiry, resource and sample intact")
+        if let prefix = CommandLine.arguments.dropFirst().first { try render(host, to: prefix + "-per-transaction.png") }
+        host.rootView = page(entry: .spendGrant); settle(host)
+        precondition(element("grant-per-transaction", in: host) == nil
+            && element("grant-total", in: host)?.value(forKey: "accessibilityValue") as? String == "0.20"
+            && form.draft.perTransaction == "0.10",
+            "Switching to Spend Grant must show only total and preserve the edited single limit")
+        edit("grant-total", text: "0.30", host: host, window: window)
+        clickElement("grant-create", host: host, window: window)
+        precondition(submissions.count == 2 && submissions[1].0 == "300000" && submissions[1].1 == "100000"
+            && submissions[1].3 == resource.resourceId && abs(submissions[1].2 - overview.scopedGrant!.expiresAt) <= 1,
+            "Saving either editor must preserve the counterpart, resource and expiry in the same grant callback")
+        host.rootView = page(saving: true); settle(host)
+        clickElement("grant-create", host: host, window: window)
+        precondition(submissions.count == 2, "The independent entry must retain duplicate-submit protection")
+        host.rootView = page(); settle(host)
+        form.draft.total = ""; settle(host)
+        precondition(!isEnabled("grant-create", in: host) && element("grant-other-limit", in: host) != nil,
+            "A missing hidden total must not silently become a default grant allowance")
+        clickElement("grant-other-limit", host: host, window: window)
+        precondition(otherLimitOpens == 1 && submissions.count == 2,
+            "Setting the missing total must navigate without authorizing a grant")
+        print("Separate grant editors: one amount input per page, shared draft/API/sample/expiry, exact callback values and missing-counterpart/save guards passed")
+    }
+
     @MainActor private static func accessibilityNodes(_ object: NSObject) -> [NSObject] {
         guard object.responds(to: NSSelectorFromString("accessibilityChildren")) else { return [object] }
         let children = object.value(forKey: "accessibilityChildren") as? [NSObject] ?? []
@@ -177,10 +275,23 @@ struct SpendGrantViewTest {
     @MainActor private static func element(_ identifier: String, in host: NSView) -> NSObject? {
         let matches = accessibilityNodes(host).filter { $0.responds(to: NSSelectorFromString("accessibilityIdentifier"))
             && $0.value(forKey: "accessibilityIdentifier") as? String == identifier }
-        if identifier == "grant-api-details" {
+        if identifier == "grant-api-details" || identifier == "grant-current-details" {
             return matches.first { $0.value(forKey: "accessibilityRole") as? String == "AXDisclosureTriangle" }
         }
         return matches.first
+    }
+    @MainActor private static func isEnabled(_ identifier: String, in host: NSView) -> Bool {
+        guard let node = element(identifier, in: host), let value = node.value(forKey: "accessibilityEnabled") as? Bool else {
+            fatalError("Missing native enabled state: \(identifier)")
+        }
+        return value
+    }
+    @MainActor private static func accessibleText(_ host: NSView) -> String {
+        accessibilityNodes(host).flatMap { node in
+            ["accessibilityLabel", "accessibilityValue"].compactMap { attribute in
+                node.responds(to: NSSelectorFromString(attribute)) ? node.value(forKey: attribute) as? String : nil
+            }
+        }.joined(separator: " ")
     }
     @MainActor private static func textValues(_ host: NSView) -> [String] {
         accessibilityNodes(host).compactMap { node in
@@ -192,7 +303,7 @@ struct SpendGrantViewTest {
         guard let node = element(identifier, in: host), let value = node.value(forKey: "accessibilityFrame") as? NSValue else {
             fatalError("Missing native control: \(identifier)")
         }
-        if identifier == "grant-api-details" {
+        if identifier == "grant-api-details" || identifier == "grant-current-details" {
             let control: AnyObject = node
             precondition(control.accessibilityPerformPress?() == true, "Native disclosure action must remain accessible")
             settle(host)
@@ -287,7 +398,7 @@ struct SpendGrantViewTest {
         print("Native POST confirmation: no implicit approval, cancel and explicit discovery/Grant buttons passed")
     }
 
-    private static func overview(enabled: Bool, status: String = "EXPIRED", mainnet: Bool = false) throws -> AppOverview {
+    private static func overview(enabled: Bool, status: String = "EXPIRED", mainnet: Bool = false, boundGrant: Bool = false) throws -> AppOverview {
         var payload: [String: Any] = [
             "service": ["status": "running", "purchaseMode": "simulated", "network": "Solana Devnet"],
             "wallet": ["address": "FixturePublicAddress"],
@@ -311,7 +422,29 @@ struct SpendGrantViewTest {
                         "documentation": ["urls": ["https://fixture.example/" + String(repeating: "documentation", count: 50)],
                             "uncertainties": [String(repeating: "Fixture unconfirmed merchant note. ", count: 8)]]]]
             }
-            payload["service"] = ["status": "running", "purchaseMode": "live_mainnet", "network": "Solana Mainnet", "registeredResources": resources]
+            payload["service"] = ["status": "running", "purchaseMode": "live_mainnet", "network": "Solana Mainnet",
+                "registeredResources": boundGrant ? Array(resources.reversed()) : resources]
+            if boundGrant {
+                let network = "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"
+                let asset = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+                guard var grant = payload["grant"] as? [String: Any] else { fatalError("Missing fixture grant") }
+                grant["resourceId"] = "fixture-get"
+                grant["network"] = network
+                grant["assetId"] = asset
+                payload["grant"] = grant
+                payload["grants"] = [grant]
+                payload["authority"] = [
+                    "mode": "live_mainnet", "network": network, "assetId": asset, "assetDecimals": 6, "assetLabel": "USDC",
+                    "dailyLimit": "1000000", "available": "1000000", "reserved": "0", "paid": "0",
+                    "availableDisplay": "1.00", "reservedDisplay": "0.00", "paidDisplay": "0.00",
+                    "dailyLimitDisplay": "of 1.00 USDC daily", "dailyState": "active", "blockers": [],
+                    "wallet": ["address": "FixturePublicAddress", "network": "Solana Mainnet", "status": "available"],
+                    "grant": ["id": "fixture-grant", "resourceId": "fixture-get", "api": resources[0]["url"]!,
+                        "network": network, "assetLabel": "USDC", "totalDisplay": "0.20", "remainingDisplay": "0.17",
+                        "committedDisplay": "0.03", "singleDisplay": "0.20", "status": status,
+                        "expiresAt": grant["expiresAt"]!, "usable": status == "ACTIVE"],
+                ]
+            }
         }
         return try JSONDecoder().decode(AppOverview.self, from: JSONSerialization.data(withJSONObject: payload))
     }

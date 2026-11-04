@@ -11,6 +11,12 @@ struct SpendGrantDetail: View {
     let onCreate: (String, String, Int64, String?, ResourceRequestSample?, String?) async -> Void
     let onRevoke: (String?) async -> Void
     let onPreparePost: (String, ResourceRequestSample?) async throws -> PostRequestReview
+    let entry: Entry
+    let onOtherLimit: () -> Void
+
+    enum Entry {
+        case spendGrant, perTransaction
+    }
 
     @State private var preparingPost = false
     @State private var postReview: PostRequestReview?
@@ -21,11 +27,9 @@ struct SpendGrantDetail: View {
         let resourceID: String
         let sample: ResourceRequestSample?
     }
-    @State private var draft: SpendGrantDraft
-    @State private var selectedResourceID = ""
-    @State private var sampleQuery = ""
-    @State private var sampleBody = ""
+    @State private var form: SpendGrantForm
     @State private var showingAPIDetails = false
+    @State private var showingCurrentGrantDetails = false
     @State private var inputError: String?
     @State private var showingRevokeConfirmation = false
     @FocusState private var focusedAmount: AmountField?
@@ -39,7 +43,9 @@ struct SpendGrantDetail: View {
     init(overview: AppOverview, isSaving: Bool, isRefreshing: Bool = false, writeMessage: String?, writeFailed: Bool,
         onBack: @escaping () -> Void, onConnection: @escaping () -> Void,
         onCreate: @escaping (String, String, Int64, String?, ResourceRequestSample?, String?) async -> Void, onRevoke: @escaping (String?) async -> Void,
-        onPreparePost: @escaping (String, ResourceRequestSample?) async throws -> PostRequestReview = { _, _ in throw URLError(.badURL) }) {
+        onPreparePost: @escaping (String, ResourceRequestSample?) async throws -> PostRequestReview = { _, _ in throw URLError(.badURL) },
+        entry: Entry = .spendGrant, form: SpendGrantForm? = nil,
+        onOtherLimit: @escaping () -> Void = {}) {
         self.overview = overview
         self.isSaving = isSaving
         self.isRefreshing = isRefreshing
@@ -50,7 +56,23 @@ struct SpendGrantDetail: View {
         self.onCreate = onCreate
         self.onRevoke = onRevoke
         self.onPreparePost = onPreparePost
-        _draft = State(initialValue: SpendGrantDraft(grant: overview.scopedGrant))
+        self.entry = entry
+        self.onOtherLimit = onOtherLimit
+        _form = State(initialValue: form ?? SpendGrantForm(overview: overview))
+    }
+
+    private var draft: SpendGrantDraft {
+        get { form.draft }
+        nonmutating set { form.draft = newValue }
+    }
+    private var selectedResourceID: String { form.selectedResourceID }
+    private var sampleQuery: String {
+        get { form.sampleQuery }
+        nonmutating set { form.sampleQuery = newValue }
+    }
+    private var sampleBody: String {
+        get { form.sampleBody }
+        nonmutating set { form.sampleBody = newValue }
     }
 
     var body: some View {
@@ -66,11 +88,34 @@ struct SpendGrantDetail: View {
                 .foregroundStyle(secondaryInk)
                 .disabled(isSaving)
                 .accessibilityLabel("Back to Authority")
+                .accessibilityIdentifier("grant-back")
 
                 titleArea.padding(.top, 10).padding(.bottom, 18)
-                currentGrant.padding(.bottom, 18)
                 hairline
-                createGrant.padding(.top, 16)
+                createGrant.padding(.top, 20)
+                if displayedGrant != nil || !(overview.grants ?? []).isEmpty {
+                    DisclosureGroup(isExpanded: $showingCurrentGrantDetails) {
+                        currentGrant
+                            .padding(.top, 10)
+                            .accessibilityIdentifier("grant-current-details-content")
+                    } label: {
+                        Text("Grant details").font(.system(size: 11)).foregroundStyle(secondaryInk)
+                    }
+                    .tint(secondaryInk)
+                    .accessibilityIdentifier("grant-current-details")
+                    .padding(.top, 20)
+                }
+                if isReplacing {
+                    hairline.padding(.top, 20)
+                    Button("Revoke Grant", role: .destructive) { showingRevokeConfirmation = true }
+                        .buttonStyle(.plain)
+                        .font(.system(size: 11))
+                        .foregroundStyle(YoshShellPalette.negative)
+                        .frame(maxWidth: .infinity, minHeight: 28)
+                        .disabled(isSaving || isRefreshing)
+                        .accessibilityIdentifier("grant-revoke")
+                        .padding(.top, 10)
+                }
             }
             .padding(.horizontal, 26)
             .padding(.top, 24)
@@ -80,7 +125,7 @@ struct SpendGrantDetail: View {
         .disabled(preparingPost)
         .sheet(item: $postReview) { review in
             PostRequestApprovalView(review: review,
-                grantSummary: pendingPostGrant.map { "Resource: \($0.resourceID)\nTotal: \(SpendGrantDraft.decimal(Int64($0.total) ?? 0, decimals: 6)) USDC · Per transaction: \(SpendGrantDraft.decimal(Int64($0.single) ?? 0, decimals: 6)) USDC" },
+                grantSummary: pendingPostGrant.map { "Resource: \($0.resourceID)\nTotal: \(SpendGrantDraft.decimal(Int64($0.total) ?? 0, decimals: 6)) \(currency ?? "Asset unavailable") · Per transaction: \(SpendGrantDraft.decimal(Int64($0.single) ?? 0, decimals: 6)) \(currency ?? "Asset unavailable")" },
                 onApprove: {
                     guard let pending = pendingPostGrant else { return }
                     pendingPostGrant = nil; postReview = nil
@@ -88,11 +133,13 @@ struct SpendGrantDetail: View {
                 }, onCancel: { pendingPostGrant = nil; postReview = nil })
         }
         .foregroundStyle(ink)
+        .task { if entry == .perTransaction { focusedAmount = .perTransaction } }
         .onChange(of: selectedResourceID) { _, id in
             let sample = overview.service.registeredResources?.first(where: { $0.resourceId == id })?.submission?.sample
             sampleQuery = sample?.queryText ?? ""
             sampleBody = sample?.bodyText ?? ""
             showingAPIDetails = false
+            showingCurrentGrantDetails = false
             inputError = nil
         }
         .onChange(of: overview.scopedGrant?.id) { _, _ in
@@ -107,28 +154,22 @@ struct SpendGrantDetail: View {
     }
 
     private var titleArea: some View {
-        HStack(alignment: .center, spacing: 12) {
-            Text("Spend Grant")
-                .font(.system(size: 34, weight: .regular, design: .serif))
-                .tracking(-0.8)
-                .fixedSize(horizontal: true, vertical: false)
-                .accessibilityAddTraits(.isHeader)
-            Spacer(minLength: 0)
-            VStack(alignment: .trailing, spacing: 5) {
-                Text(status)
-                    .foregroundStyle(overview.scopedGrant?.status == .expired
-                        ? YoshShellPalette.negative : secondaryInk)
-                Text("\(overview.service.purchaseMode.title) · \(currency ?? "Asset unavailable")")
-                    .foregroundStyle(secondaryInk)
-            }
-            .font(.system(size: 10))
-            .fixedSize()
-        }
+        Text(entry == .perTransaction ? "Per Transaction" : "Spend Grant")
+            .font(.system(size: 34, weight: .regular, design: .serif))
+            .tracking(-0.8)
+            .accessibilityAddTraits(.isHeader)
     }
 
     private var currentGrant: some View {
         VStack(alignment: .leading, spacing: 0) {
-            eyebrow("SPEND GRANTS")
+            HStack {
+                Text(status)
+                    .foregroundStyle(displayedGrant?.status == .expired ? YoshShellPalette.negative : secondaryInk)
+                Spacer(minLength: 8)
+                Text("\(overview.service.purchaseMode.title) · \(currency ?? "Asset unavailable")")
+                    .foregroundStyle(secondaryInk)
+            }
+            .font(.system(size: 10))
             if let grant = displayedGrant {
                 let scopedGrant = overview.selectedAuthority?.grant?.id == grant.id ? overview.selectedAuthority?.grant : nil
                 if registeredLive, let resourceID = grant.resourceId {
@@ -182,29 +223,31 @@ struct SpendGrantDetail: View {
     }
 
     private var createGrant: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            Text("Create Spend Grant")
-                .font(.system(size: 29, weight: .regular, design: .serif))
-                .tracking(-0.5)
-                .accessibilityAddTraits(.isHeader)
+        @Bindable var fields = form
+        return VStack(alignment: .leading, spacing: 0) {
             if registeredLive {
-                Picker("Registered API", selection: $selectedResourceID) {
+                eyebrow("REGISTERED API")
+                Picker("Registered API", selection: $fields.selectedResourceID) {
                     Text("Choose an API").tag("")
                     ForEach(overview.service.registeredResources ?? []) { resource in
                         Text((resource.name ?? resource.resourceId) + (resource.source == "agent" ? " · Agent-submitted" : ""))
                             .lineLimit(1).truncationMode(.tail).tag(resource.resourceId)
                     }
                 }
-                .frame(maxWidth: .infinity)
+                .labelsHidden()
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .disabled(isSaving)
                 .accessibilityIdentifier("grant-resource")
                 .padding(.top, 12)
                 if let resource = overview.service.registeredResources?.first(where: { $0.resourceId == selectedResourceID }) {
-                    resourceSummary(resource).padding(.top, 10)
                     DisclosureGroup(isExpanded: $showingAPIDetails) {
-                        apiDetails(resource).padding(.top, 8)
+                        VStack(alignment: .leading, spacing: 10) {
+                            resourceSummary(resource)
+                            apiDetails(resource)
+                        }
+                        .padding(.top, 8)
                     } label: {
-                        Text("View API Details").font(.system(size: 11)).foregroundStyle(secondaryInk)
+                        Text("API details").font(.system(size: 11)).foregroundStyle(secondaryInk)
                     }
                     .tint(secondaryInk)
                     .disabled(isSaving)
@@ -212,21 +255,32 @@ struct SpendGrantDetail: View {
                     .transaction { if reduceMotion { $0.animation = nil } }
                     .padding(.top, 10)
                     if let keys = resource.requestInputs?.query?.names, !keys.isEmpty {
-                        sampleInput("Sample query", keys: keys, text: $sampleQuery, identifier: "grant-sample-query")
+                        sampleInput("Sample query", keys: keys, text: $fields.sampleQuery, identifier: "grant-sample-query")
                             .padding(.top, 12)
                     }
                     if let keys = resource.requestInputs?.jsonBody?.names, !keys.isEmpty {
-                        sampleInput("Sample JSON body", keys: keys, text: $sampleBody, identifier: "grant-sample-body")
+                        sampleInput("Sample JSON body", keys: keys, text: $fields.sampleBody, identifier: "grant-sample-body")
                             .padding(.top, 12)
                     }
                 }
             }
-            HStack(alignment: .top, spacing: 24) {
-                amountField("Total authorized", text: $draft.total, field: .total)
-                amountField("Per transaction", text: $draft.perTransaction, field: .perTransaction)
+            Group {
+                if entry == .perTransaction {
+                    amountField("Per transaction", text: $fields.draft.perTransaction, field: .perTransaction)
+                } else {
+                    amountField("Total authorized", text: $fields.draft.total, field: .total)
+                }
             }
             .padding(.top, 16)
-            SpendGrantExpiryPicker(selection: $draft.expiration, reduceMotion: reduceMotion)
+            if otherLimitMissing {
+                Button(entry == .perTransaction ? "Set total authorized" : "Set per-transaction limit", action: onOtherLimit)
+                    .buttonStyle(.plain)
+                    .font(.system(size: 11))
+                    .foregroundStyle(secondaryInk)
+                    .accessibilityIdentifier("grant-other-limit")
+                    .padding(.top, 10)
+            }
+            SpendGrantExpiryPicker(selection: $fields.draft.expiration, reduceMotion: reduceMotion)
                 .disabled(isSaving)
                 .padding(.top, 16)
 
@@ -243,10 +297,11 @@ struct SpendGrantDetail: View {
                 .font(.system(size: 11)).foregroundStyle(secondaryInk)
                 .disabled(isSaving)
                 .accessibilityHint("Open Connection to enable this agent")
+                .accessibilityIdentifier("grant-connection")
                 .padding(.top, 12)
             }
             Button(action: saveGrant) {
-                Text(isSaving ? "Saving…" : isReplacing ? "Replace Spend Grant" : "Create Spend Grant")
+                Text(isSaving ? "Saving…" : isReplacing ? "Replace Grant" : "Create Grant")
                     .font(.system(size: 13))
                     .frame(maxWidth: .infinity)
                     .frame(height: 35)
@@ -256,24 +311,10 @@ struct SpendGrantDetail: View {
             .buttonStyle(.plain)
             // Reads must not disable native text/wheel controls and reset their
             // focus/scroll state. Only submission waits for the in-flight read.
-            .disabled(isSaving || isRefreshing || !overview.connection.enabled || currency == nil || (registeredLive && selectedResourceID.isEmpty))
+            .disabled(isSaving || isRefreshing || !overview.connection.enabled || currency == nil || otherLimitMissing || (registeredLive && selectedResourceID.isEmpty))
             .accessibilityIdentifier("grant-create")
             .padding(.top, 12)
 
-            if overview.connection.enabled {
-                Text(isReplacing ? "Replaces the active Spend Grant · connection stays active" : "Connection stays active · purchases require this Spend Grant")
-                    .font(.system(size: 10)).foregroundStyle(secondaryInk)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.top, 9)
-            }
-            if isReplacing {
-                Button("Revoke Spend Grant", role: .destructive) { showingRevokeConfirmation = true }
-                    .buttonStyle(.plain)
-                    .font(.system(size: 11))
-                    .foregroundStyle(YoshShellPalette.negative)
-                    .disabled(isSaving || isRefreshing)
-                    .padding(.top, 14)
-            }
             if let message = inputError ?? writeMessage {
                 Text(message)
                     .font(.system(size: 12))
@@ -372,6 +413,10 @@ struct SpendGrantDetail: View {
         if !registeredLive { return overview.scopedGrant?.status == .active }
         return (overview.grants ?? []).contains { $0.resourceId == selectedResourceID && $0.status == .active }
     }
+    private var otherLimitMissing: Bool {
+        let amount = entry == .perTransaction ? draft.total : draft.perTransaction
+        return SpendGrantDraft.minorUnits(amount).map { $0 == "0" } ?? true
+    }
     private var displayedGrant: AppOverview.Grant? {
         if registeredLive && !selectedResourceID.isEmpty { return overview.grants?.first { $0.resourceId == selectedResourceID } }
         return overview.scopedGrant
@@ -379,7 +424,7 @@ struct SpendGrantDetail: View {
     private var registeredLive: Bool { overview.service.purchaseMode == .liveMainnet || overview.service.registeredResourceRequired == true }
     private var currency: String? { DailyAuthorityPresentation(overview: overview).currency }
     private var status: String {
-        switch overview.scopedGrant?.status {
+        switch displayedGrant?.status {
         case .active: "Active"
         case .revoked: "Revoked"
         case .expired: "Expired"

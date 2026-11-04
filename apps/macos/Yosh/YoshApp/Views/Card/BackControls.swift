@@ -13,22 +13,15 @@ struct BackControls: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            hairline
-
-            HStack(spacing: 13) {
-                Image(systemName: "creditcard")
-                    .font(.system(size: 22, weight: .regular))
+        VStack(spacing: 9) {
+            HStack(spacing: 18) {
+                Image(systemName: "power")
+                    .font(.system(size: 24, weight: .light))
                     .frame(width: 28)
                     .accessibilityHidden(true)
 
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Payments")
-                        .font(.system(size: 15, weight: .medium))
-                    Text("Allow purchases within Authority")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                }
+                Text("Payments")
+                    .font(.system(size: 16, weight: .regular))
 
                 Spacer(minLength: 8)
 
@@ -41,28 +34,24 @@ struct BackControls: View {
                     .tint(YoshShellPalette.activeInk)
                     .disabled(paymentsEnabled == nil || paymentsUpdating)
                     .accessibilityLabel("Allow purchases within Authority")
+                    .accessibilityIdentifier("authority.payments.toggle")
                     .accessibilityValue(paymentsUpdating ? "Saving" : payments)
                     .accessibilityHint("Purchases require a connected Agent, Daily Authority, a Spend Grant, sufficient funds, and a configured resource.")
             }
-            .frame(minHeight: 57)
+            .frame(minHeight: 54)
+            .padding(.horizontal, 14)
+            .background(rowBoundary)
             .help("On allows purchases only when Connection, Daily Authority, Spend Grant, funds, and resource checks pass.")
 
-            hairline
-
             Button(action: onExecution) {
-                HStack(spacing: 13) {
-                    Image(systemName: "square.stack.3d.up")
-                        .font(.system(size: 22, weight: .regular))
+                HStack(spacing: 18) {
+                    Image(systemName: "globe")
+                        .font(.system(size: 24, weight: .light))
                         .frame(width: 28)
                         .accessibilityHidden(true)
 
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Execution")
-                            .font(.system(size: 15, weight: .medium))
-                        Text("Purchase environment")
-                            .font(.system(size: 11))
-                            .foregroundStyle(.secondary)
-                    }
+                    Text("Execution")
+                        .font(.system(size: 16, weight: .regular))
 
                     Spacer(minLength: 8)
 
@@ -76,23 +65,28 @@ struct BackControls: View {
                         .foregroundStyle(.secondary)
                         .accessibilityHidden(true)
                 }
-                .frame(minHeight: 57)
+                .frame(minHeight: 54)
+                .padding(.horizontal, 14)
+                .background(rowBoundary)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .disabled(paymentsUpdating)
             .accessibilityLabel("Execution")
+            .accessibilityIdentifier("authority.execution.open")
             .accessibilityValue(execution)
             .accessibilityHint("Choose the purchase execution environment")
-
-            hairline
         }
     }
 
-    private var hairline: some View {
-        Rectangle()
-            .fill(YoshShellPalette.rule.opacity(0.4))
-            .frame(height: 1)
+    private var rowBoundary: some View {
+        RoundedRectangle(cornerRadius: 22)
+            .fill(YoshShellPalette.secondaryInk.opacity(0.018))
+            .overlay {
+                RoundedRectangle(cornerRadius: 22)
+                    .strokeBorder(YoshShellPalette.rule, lineWidth: 0.65)
+            }
+            .allowsHitTesting(false)
             .accessibilityHidden(true)
     }
 }

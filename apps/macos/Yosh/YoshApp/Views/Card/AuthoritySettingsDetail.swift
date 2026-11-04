@@ -41,7 +41,7 @@ struct AuthoritySettingsDetail: View {
         self.isActive = isActive
         self.onSave = onSave
         self.onWalletRead = onWalletRead
-        _dailyLimitInput = State(initialValue: DailyAuthorityPresentation.editableLimit(overview.selectedAuthority?.dailyLimit?.value ?? (overview.service.purchaseMode == .liveMainnet ? nil : overview.budget.dailyLimit?.value)))
+        _dailyLimitInput = State(initialValue: DailyAuthorityPresentation.editableLimit(DailyAuthorityPresentation.configuredLimit(in: overview)))
     }
 
     private var presentation: DailyAuthorityPresentation {
@@ -83,7 +83,7 @@ struct AuthoritySettingsDetail: View {
             .task(id: isActive ? overview.service.network : nil) {
                 if isActive { await readBalance() }
             }
-            .onChange(of: overview.selectedAuthority?.dailyLimit?.value ?? (overview.service.purchaseMode == .liveMainnet ? nil : overview.budget.dailyLimit?.value)) { _, newValue in
+            .onChange(of: DailyAuthorityPresentation.configuredLimit(in: overview)) { _, newValue in
                 dailyLimitInput = DailyAuthorityPresentation.editableLimit(newValue)
                 inputError = nil
             }

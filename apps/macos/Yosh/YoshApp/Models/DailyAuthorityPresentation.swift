@@ -40,6 +40,11 @@ struct DailyAuthorityPresentation {
     }
 
     // Editor conversion only. The existing management API independently validates the shared limit.
+    static func configuredLimit(in overview: AppOverview) -> Int64? {
+        overview.selectedAuthority?.dailyLimit?.value
+            ?? (overview.service.purchaseMode == .liveMainnet ? nil : overview.budget.dailyLimit?.value)
+    }
+
     static func minorUnits(_ input: String) -> String? {
         let value = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard value.range(of: #"^(?:0|[1-9][0-9]*)(?:\.[0-9]{1,6})?$"#, options: .regularExpression) != nil else { return nil }

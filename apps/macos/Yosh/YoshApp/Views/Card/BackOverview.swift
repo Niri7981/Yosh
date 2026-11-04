@@ -15,6 +15,9 @@ struct BackOverview: View {
     @State private var activityRefreshing = false
     @State private var activityRefreshError: String?
     @State private var isRefreshing = false
+    @State private var isEditingDailyLimit = false
+    @State private var grantForm: SpendGrantForm?
+    @State private var grantFormScope: String?
     @State private var connectionFailure: ConnectionFailure?
     @State private var connectionMotion = ConnectionMotionObservation()
     @State private var connectionReadRevision = 0
@@ -25,7 +28,7 @@ struct BackOverview: View {
     }
 
     private enum Detail: Hashable {
-        case daily, grant, connection, activity, execution
+        case daily, grant, perTransaction, connection, activity, execution
         case purchase(String, from: PurchaseOrigin)
 
         var parent: Detail? {
@@ -120,7 +123,9 @@ struct BackOverview: View {
             while !Task.isCancelled {
                 do { try await Task.sleep(for: .seconds(3)) } catch { return }
                 if section == .connection { await refreshConnection() }
-                else if isActive && !writeState.isSaving { await reload(preservingContent: true) }
+                else if isActive && !writeState.isSaving && !isEditingDailyLimit {
+                    await reload(preservingContent: true)
+                }
             }
         }
         .onChange(of: section) { _, _ in
@@ -173,7 +178,7 @@ struct BackOverview: View {
                         onSave: { limit in await write(.dailyLimit(limit)) },
                         onWalletRead: { await reload(preservingContent: true) }
                     )
-                case .grant:
+                case .grant, .perTransaction:
                     SpendGrantDetail(
                         overview: overview,
                         isSaving: writeState.isSaving,
@@ -186,8 +191,12 @@ struct BackOverview: View {
                             await write(.createGrant(totalLimit: total, singleLimit: single, expiresAt: expiration, resourceId: resourceID, sample: sample, postApprovalHash: approvalHash))
                         },
                         onRevoke: { resourceID in await write(.revokeGrant(resourceId: resourceID)) },
-                        onPreparePost: { resourceID, sample in try await overviewClient.prepareGrantPOST(resourceID, sample: sample) }
+                        onPreparePost: { resourceID, sample in try await overviewClient.prepareGrantPOST(resourceID, sample: sample) },
+                        entry: detail == .perTransaction ? .perTransaction : .spendGrant,
+                        form: grantForm,
+                        onOtherLimit: { open(detail == .perTransaction ? .grant : .perTransaction) }
                     )
+                    .id(grantFormScope)
                 case .connection:
                     connectionPage(overview, onBack: { selectDetail(nil) })
                 case .activity:
@@ -277,10 +286,10 @@ struct BackOverview: View {
     private var overviewContent: some View {
         VStack(alignment: .leading, spacing: 0) {
             dailyAuthority
-                .padding(.top, CardPageHeader.Layout.topSpacing)
+                .padding(.top, 20)
 
             grantLimits
-                .padding(.top, CardPageHeader.Layout.firstSectionSpacing)
+                .padding(.top, 16)
 
             BackControls(
                 payments: presentation?.payments ?? "—",
@@ -315,87 +324,64 @@ struct BackOverview: View {
     }
 
     private var dailyAuthority: some View {
-        Button {
-            open(.daily)
-        } label: {
-            VStack(alignment: .leading, spacing: 0) {
-                CardPageHeader(title: presentation?.remaining ?? "—",
-                    style: .hero(eyebrow: "AVAILABLE · \(presentation?.asset ?? "—")", isAmount: true))
-
-                authorityLine
-                    .padding(.top, 10)
-
-                HStack(spacing: 8) {
-                    Text("Reserved \(presentation?.reserved ?? "—")").font(.system(size: 10))
-                        .help("Funds held for purchases in progress")
-                    Text("Paid \(presentation?.paid ?? "—")").font(.system(size: 10))
-                        .help("Payments confirmed today")
-                    Spacer(minLength: 0)
-                    Text(presentation?.dailyLimit ?? "of — daily").font(.system(size: 11)).lineLimit(1).minimumScaleFactor(0.7)
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 11, weight: .medium))
-                        .accessibilityHidden(true)
+        DailyAuthorityCard(overview: overview, isBusy: writeState.isSaving || isRefreshing,
+            isActive: section == .authority && selectedDetail == nil,
+            scopeID: overview.flatMap(dailyLimitScope),
+            onSave: { limit, scope in
+                switch await write(.dailyLimit(limit), expectedDailyScope: scope) {
+                case .confirmed: nil
+                case .failed(let message): message
                 }
-                .font(.system(size: 13))
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .trailing)
-                .padding(.top, 8)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .disabled(overview == nil || writeState.isSaving || isRefreshing)
-        .accessibilityLabel("Shared daily Authority, \(presentation?.remaining ?? "unavailable") available. Reserved \(presentation?.reserved ?? "unavailable"). Paid \(presentation?.paid ?? "unavailable"). \(presentation?.asset ?? ""). \(presentation?.dailyLimit ?? "Daily limit unavailable"). Change daily limit")
-        .help("Available: funds still available to spend today. Shared by all Agents. Reserved: funds held for purchases in progress. Paid: payments confirmed today.")
-        .accessibilityHint("Available is funds still available to spend today, shared by all Agents. Reserved holds funds for purchases in progress. Paid is payments confirmed today.")
+            },
+            onOpenDetails: { open(.daily) },
+            onEditingChanged: { isEditingDailyLimit = $0 })
     }
 
-    private var authorityLine: some View {
-        // This is a budget boundary, not a slider or payment-progress control.
-        GeometryReader { geometry in
-            ZStack(alignment: .leading) {
-                Rectangle()
-                    .fill(YoshShellPalette.rule.opacity(0.35))
-                    .frame(height: 1.5)
-
-                if let presentation, overview?.budget.remaining != nil {
-                    let endpoint = max(0, geometry.size.width - 6) * presentation.progress
-                    Rectangle()
-                        .fill(YoshShellPalette.activeInk.opacity(0.7))
-                        .frame(width: endpoint + 3, height: 1.5)
-                    Circle()
-                        .fill(YoshShellPalette.activeInk)
-                        .frame(width: 6, height: 6)
-                        .offset(x: endpoint)
-                }
-            }
-            .frame(height: 6)
+    /// Stops a retained draft from being submitted after the selected monetary context changes.
+    private func dailyLimitScope(_ overview: AppOverview) -> String? {
+        if let scope = overview.selectedAuthority, scope.assetDecimals == 6 {
+            return [memberID.uuidString, scope.mode.rawValue, scope.network, scope.assetId,
+                String(scope.assetDecimals)].joined(separator: "|")
         }
-        .frame(height: 6)
-        .accessibilityHidden(true)
+        guard overview.service.purchaseMode != .liveMainnet,
+              DailyAuthorityPresentation(overview: overview).currency != nil else { return nil }
+        if let environment = overview.service.execution {
+            guard environment.mode == overview.service.purchaseMode,
+                  environment.network == environment.asset.network, environment.asset.decimals == 6 else { return nil }
+            return [memberID.uuidString, environment.mode.rawValue, environment.network,
+                environment.asset.mint, String(environment.asset.decimals)].joined(separator: "|")
+        }
+        return [memberID.uuidString, overview.service.purchaseMode.rawValue, overview.service.network].joined(separator: "|")
     }
 
     private var grantLimits: some View {
-        Button {
-            open(.grant)
-        } label: {
-            HStack(spacing: 0) {
+        HStack(spacing: 0) {
+            Button { open(.grant) } label: {
                 limit(label: "SPEND GRANT", amount: presentation?.grantRemaining ?? "—", detail: presentation?.grantDetail ?? "unavailable")
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("authority.grant.open")
+            .accessibilityLabel("\(agentName) Spend Grant, \(presentation?.grantRemaining ?? "unavailable") remaining, \(presentation?.grantDetail ?? "unavailable"). Manage grant")
 
-                Rectangle()
-                    .fill(YoshShellPalette.rule)
-                    .frame(width: 1, height: 60)
+            Rectangle()
+                .fill(YoshShellPalette.rule)
+                .frame(width: 1, height: 60)
 
+            Button { open(.perTransaction) } label: {
                 limit(label: "PER TRANSACTION", amount: presentation?.perTransaction ?? "—", detail: "max")
                     .padding(.leading, 18)
+                    .contentShape(Rectangle())
             }
-            .frame(height: 64)
-            .contentShape(Rectangle())
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("authority.per-transaction.open")
+            .accessibilityLabel("Per transaction, \(presentation?.perTransaction ?? "unavailable") maximum. Edit per transaction limit")
         }
-        .buttonStyle(.plain)
+        .frame(height: 64)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .background(authorityCardBoundary)
         .disabled(overview == nil || writeState.isSaving || isRefreshing)
-        .accessibilityLabel("\(agentName) Spend Grant, \(presentation?.grantRemaining ?? "unavailable") remaining, \(presentation?.grantDetail ?? "unavailable"); per transaction \(presentation?.perTransaction ?? "unavailable"). Manage grant")
     }
 
     private func limit(label: String, amount: String, detail: String) -> some View {
@@ -423,8 +409,25 @@ struct BackOverview: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    private var authorityCardBoundary: some View {
+        RoundedRectangle(cornerRadius: 22)
+            .fill(YoshShellPalette.secondaryInk.opacity(0.018))
+            .overlay {
+                RoundedRectangle(cornerRadius: 22)
+                    .strokeBorder(YoshShellPalette.rule, lineWidth: 0.65)
+            }
+            .allowsHitTesting(false)
+    }
+
     private func open(_ detail: Detail) {
         guard overview != nil, !writeState.isSaving, !isRefreshing else { return }
+        if (detail == .grant || detail == .perTransaction), let overview {
+            let scope = dailyLimitScope(overview)
+            if grantForm == nil || grantFormScope != scope {
+                grantForm = SpendGrantForm(overview: overview)
+                grantFormScope = scope
+            }
+        }
         writeState = .idle
         activityRefreshError = nil
         selectDetail(detail)
@@ -537,9 +540,27 @@ struct BackOverview: View {
         }
     }
 
+    private enum WriteOutcome {
+        case confirmed
+        case failed(String)
+    }
+
     @MainActor
-    private func write(_ change: SettingsChange, preparesConnection: Bool = false) async {
-        guard overview != nil, !writeState.isSaving, !isRefreshing else { return }
+    @discardableResult
+    private func write(_ change: SettingsChange, preparesConnection: Bool = false,
+        expectedDailyScope: String? = nil) async -> WriteOutcome {
+        guard let previousOverview = overview, !writeState.isSaving, !isRefreshing else {
+            return .failed("Yosh is refreshing. Try again.")
+        }
+        let dailyScope: String?
+        if case .dailyLimit = change {
+            dailyScope = dailyLimitScope(previousOverview)
+            guard dailyScope != nil, expectedDailyScope == nil || dailyScope == expectedDailyScope else {
+                return .failed("Authority changed. Reopen the daily limit.")
+            }
+        } else {
+            dailyScope = nil
+        }
         writeState = .saving
         // A poll started before this request cannot overwrite its resulting member facts.
         connectionReadRevision += 1
@@ -558,11 +579,11 @@ struct BackOverview: View {
             case .execution(let mode):
                 let restarted = try await overviewClient.setExecution(mode)
                 if restarted {
-                    // Each profile owns a different roster; do not query the new
-                    // backend using the previous profile's member UUID.
+                    // The new profile has its own members. Its ready notification
+                    // reloads the surface; never query it with the old member UUID.
                     await onMemberChanged()
                     writeState = .idle
-                    return
+                    return .confirmed
                 }
                 success = "Execution environment saved"
             case .productionExecution(let enabled):
@@ -572,7 +593,18 @@ struct BackOverview: View {
                 try await overviewClient.setPaused(paused)
                 success = paused ? "Payments paused" : "Payments resumed"
             case .dailyLimit(let limit):
-                try await overviewClient.setDailyLimit(limit)
+                // Routine UI polling pauses while typing. Recheck the monetary
+                // context before using the existing update endpoint.
+                let current = try await loadSelectedOverview()
+                state = .loaded(current)
+                guard dailyLimitScope(current) == dailyScope else {
+                    let message = "Authority changed. Reopen the daily limit."
+                    writeState = .failure(message)
+                    return .failed(message)
+                }
+                if DailyAuthorityPresentation.configuredLimit(in: current).map(String.init) != limit {
+                    try await overviewClient.setDailyLimit(limit)
+                }
                 success = "Daily limit saved"
             case .createGrant(let total, let single, let expiration, let resourceID, let sample, let approvalHash):
                 try await overviewClient.createMemberGrant(memberID, totalLimit: total, singleLimit: single, expiresAt: expiration, resourceId: resourceID, sample: sample, postApprovalHash: approvalHash)
@@ -594,24 +626,56 @@ struct BackOverview: View {
             }
             // A lost response does not prove the write was rejected; re-read the source of truth.
             do {
-                state = .loaded(try await loadSelectedOverview())
+                let refreshed = try await loadSelectedOverview()
+                state = .loaded(refreshed)
                 await onMemberChanged()
+                if case .dailyLimit(let limit) = change,
+                   overview.flatMap(dailyLimitScope) == dailyScope,
+                   DailyAuthorityPresentation.configuredLimit(in: refreshed).map(String.init) == limit {
+                    writeState = .success("Daily limit saved")
+                    return .confirmed
+                }
             } catch {
-                selectDetail(nil, animated: false)
-                state = .failed((error as? OverviewLoadError) ?? .invalidResponse)
+                if dailyScope == nil || isInvalidMember(error) {
+                    selectDetail(nil, animated: false)
+                    state = .failed((error as? OverviewLoadError) ?? .invalidResponse)
+                }
+                // Daily edits retain the currently loaded facts, never restore a snapshot
+                // discarded by service exit, environment switching or member invalidation.
             }
             writeState = .failure(failure)
-            return
+            return .failed(failure)
         }
 
         do {
-            state = .loaded(try await loadSelectedOverview())
+            let refreshed = try await loadSelectedOverview()
+            state = .loaded(refreshed)
             await onMemberChanged()
+            if case .dailyLimit(let limit) = change {
+                guard overview.flatMap(dailyLimitScope) == dailyScope,
+                      DailyAuthorityPresentation.configuredLimit(in: refreshed).map(String.init) == limit else {
+                    let message = "Daily limit could not be confirmed. Try again."
+                    writeState = .failure(message)
+                    return .failed(message)
+                }
+            }
             writeState = .success(success)
+            return .confirmed
         } catch {
-            selectDetail(nil, animated: false)
-            state = .failed((error as? OverviewLoadError) ?? .invalidResponse)
-            writeState = .failure("Saved, but current status could not be loaded")
+            if dailyScope == nil || isInvalidMember(error) {
+                selectDetail(nil, animated: false)
+                state = .failed((error as? OverviewLoadError) ?? .invalidResponse)
+            }
+            let message = "Saved, but status could not refresh. Try again."
+            writeState = .failure(message)
+            return .failed(message)
+        }
+    }
+
+    private func isInvalidMember(_ error: Error) -> Bool {
+        switch error as? OverviewLoadError {
+        case .memberInactive, .memberNotFound: true
+        default: false
         }
     }
 

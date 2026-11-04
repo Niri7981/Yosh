@@ -2,7 +2,40 @@ import Foundation
 
 @main
 struct DailyAuthorityPresentationTest {
-    static func main() {
+    private static func overview(
+        mode: AppOverview.Service.PurchaseMode,
+        scopedLimit: String? = "1000000",
+        hasAuthority: Bool = true
+    ) throws -> AppOverview {
+        let network = mode == .liveMainnet
+            ? "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"
+            : "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1"
+        var payload: [String: Any] = [
+            "service": ["status": "running", "purchaseMode": mode.rawValue,
+                "network": mode == .liveMainnet ? "Solana Mainnet" : "Solana Devnet"],
+            "wallet": ["address": "FixturePublicAddress"],
+            "budget": ["dailyLimit": "9000000", "dailyLimitDisplay": "Fixture legacy limit",
+                "paid": "100000", "reserved": "200000", "remaining": "8000000",
+                "remainingDisplay": "Fixture legacy available", "paused": false],
+            "connection": ["enabled": true, "lastSeen": NSNull(), "access": "purchase_intent"],
+            "purchases": [],
+        ]
+        if hasAuthority {
+            payload["authority"] = [
+                "mode": mode.rawValue, "network": network, "assetId": "FixtureAsset", "assetDecimals": 6,
+                "assetLabel": "USDC", "dailyLimit": scopedLimit.map { $0 as Any } ?? NSNull(),
+                "available": scopedLimit == nil ? NSNull() : "650000",
+                "reserved": "200000", "paid": "100000", "availableDisplay": "Fixture available",
+                "reservedDisplay": "Fixture reserved", "paidDisplay": "Fixture paid",
+                "dailyLimitDisplay": "Fixture scoped limit", "dailyState": scopedLimit == nil ? "required" : "active",
+                "blockers": [], "wallet": ["address": "FixturePublicAddress", "network": network, "status": "available"],
+            ]
+        }
+        return try JSONDecoder().decode(AppOverview.self,
+            from: JSONSerialization.data(withJSONObject: payload))
+    }
+
+    static func main() throws {
         let devnet = DailyAuthorityPresentation(network: "Solana Devnet")
         let mainnet = DailyAuthorityPresentation(network: "Solana Mainnet")
         let balance = AppBalance(amount: "19000000", display: "19.00 Test USDC", available: true)
@@ -28,6 +61,23 @@ struct DailyAuthorityPresentationTest {
             precondition(DailyAuthorityPresentation.minorUnits(editor) == String(minor))
         }
         precondition(DailyAuthorityPresentation.editableLimit(nil).isEmpty, "Unset authority must remain unset")
-        print("Daily Authority: network labels, backend balance precision, integer input boundaries, zero/unset limits, and exact six-decimal round trips passed")
+
+        let scoped = try overview(mode: .liveMainnet)
+        precondition(scoped.selectedAuthority?.available?.value == 650_000)
+        precondition(DailyAuthorityPresentation.configuredLimit(in: scoped) == 1_000_000,
+            "Editing must use the configured scope limit, not Available or the legacy budget")
+        let scopedDevnet = try overview(mode: .liveDevnet, scopedLimit: "2000000")
+        precondition(DailyAuthorityPresentation.configuredLimit(in: scopedDevnet) == 2_000_000,
+            "A selected Devnet scope must take precedence over the legacy budget")
+        let unsetMainnet = try overview(mode: .liveMainnet, scopedLimit: nil)
+        precondition(DailyAuthorityPresentation.configuredLimit(in: unsetMainnet) == nil,
+            "An unset Mainnet limit must never borrow the legacy budget")
+        let missingMainnet = try overview(mode: .liveMainnet, hasAuthority: false)
+        precondition(DailyAuthorityPresentation.configuredLimit(in: missingMainnet) == nil,
+            "Missing Mainnet scope must never borrow the legacy budget")
+        let legacyDevnet = try overview(mode: .liveDevnet, hasAuthority: false)
+        precondition(DailyAuthorityPresentation.configuredLimit(in: legacyDevnet) == 9_000_000,
+            "Legacy Devnet projections must retain their configured budget fallback")
+        print("Daily Authority: network labels, configured/available limit separation, scoped and legacy selection, integer input boundaries, zero/unset limits, and exact six-decimal round trips passed")
     }
 }

@@ -11,6 +11,8 @@
 		E84900000000000000000003 /* PurchaseNotifications.swift in Sources */ = {isa = PBXBuildFile; fileRef = E84900000000000000000004 /* PurchaseNotifications.swift */; };
 		E84900000000000000000001 /* PurchaseNotificationFeed.swift in Sources */ = {isa = PBXBuildFile; fileRef = E84900000000000000000002 /* PurchaseNotificationFeed.swift */; };
 		D84900000000000000000001 /* SettingsEnvironmentSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = D84900000000000000000002 /* SettingsEnvironmentSection.swift */; };
+		C84900000000000000000073 /* SpendGrantForm.swift in Sources */ = {isa = PBXBuildFile; fileRef = C84900000000000000000074 /* SpendGrantForm.swift */; };
+		C84900000000000000000071 /* DailyAuthorityCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = C84900000000000000000072 /* DailyAuthorityCard.swift */; };
 		C84900000000000000000063 /* PurchaseDetailDisclosureStyle.swift in Sources */ = {isa = PBXBuildFile; fileRef = C84900000000000000000064 /* PurchaseDetailDisclosureStyle.swift */; };
 		C84900000000000000000061 /* HostNetworkIcon.swift in Sources */ = {isa = PBXBuildFile; fileRef = C84900000000000000000062 /* HostNetworkIcon.swift */; };
 		B84900000000000000000055 /* PostRequestApprovalView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B84900000000000000000054 /* PostRequestApprovalView.swift */; };
@@ -100,6 +102,8 @@
 		E84900000000000000000004 /* PurchaseNotifications.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PurchaseNotifications.swift; sourceTree = "<group>"; };
 		E84900000000000000000002 /* PurchaseNotificationFeed.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PurchaseNotificationFeed.swift; sourceTree = "<group>"; };
 		D84900000000000000000002 /* SettingsEnvironmentSection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsEnvironmentSection.swift; sourceTree = "<group>"; };
+		C84900000000000000000074 /* SpendGrantForm.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpendGrantForm.swift; sourceTree = "<group>"; };
+		C84900000000000000000072 /* DailyAuthorityCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DailyAuthorityCard.swift; sourceTree = "<group>"; };
 		C84900000000000000000064 /* PurchaseDetailDisclosureStyle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PurchaseDetailDisclosureStyle.swift; sourceTree = "<group>"; };
 		C84900000000000000000062 /* HostNetworkIcon.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostNetworkIcon.swift; sourceTree = "<group>"; };
 		B84900000000000000000054 /* PostRequestApprovalView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PostRequestApprovalView.swift; sourceTree = "<group>"; };
@@ -307,6 +311,8 @@
 				A0000000000000000000002E /* BackOverview.swift */,
 				A0000000000000000000004B /* AuthoritySettingsDetail.swift */,
 				A00000000000000000000079 /* DailyAuthorityContent.swift */,
+				C84900000000000000000072 /* DailyAuthorityCard.swift */,
+				C84900000000000000000074 /* SpendGrantForm.swift */,
 				A0000000000000000000004D /* SpendGrantDetail.swift */,
 				B84900000000000000000035 /* SpendGrantWheelColumn.swift */,
 				B84900000000000000000043 /* ConnectionBridge.swift */,
@@ -463,6 +469,8 @@
 				A00000000000000000000068 /* ActivityLedgerRow.swift in Sources */,
 				C84900000000000000000063 /* PurchaseDetailDisclosureStyle.swift in Sources */,
 				C84900000000000000000061 /* HostNetworkIcon.swift in Sources */,
+				C84900000000000000000071 /* DailyAuthorityCard.swift in Sources */,
+				C84900000000000000000073 /* SpendGrantForm.swift in Sources */,
 				A0000000000000000000006A /* PurchaseDetailPresentation.swift in Sources */,
 				A00000000000000000000056 /* PurchaseDetail.swift in Sources */,
 				A00000000000000000000058 /* CardMemberSession.swift in Sources */,
