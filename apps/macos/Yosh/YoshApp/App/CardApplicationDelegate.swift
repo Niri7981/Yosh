@@ -45,14 +45,17 @@ final class CardApplicationDelegate: NSObject, NSApplicationDelegate, NSWindowDe
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
         window.titlebarSeparatorStyle = .none
-        window.contentView = NSHostingView(rootView: CardWindow(overviewClient: OverviewClient(runtime: serviceRuntime), appLock: YoshAppLock(developmentSession: isDevelopment)))
+        let hostingView = NSHostingView(rootView: CardWindow(overviewClient: OverviewClient(runtime: serviceRuntime), appLock: YoshAppLock(developmentSession: isDevelopment)))
+        // Hidden titlebar chrome must not enlarge this fixed-size card window.
+        hostingView.safeAreaRegions = []
+        window.contentView = hostingView
         window.setFrame(windowRect, display: false)
         for button in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
             window.standardWindowButton(button)?.isHidden = true
         }
         window.isOpaque = false
-        // Give the transparent window a mouse target even where SwiftUI draws material.
-        window.backgroundColor = NSColor(white: 1, alpha: 0.01)
+        // CardMaterial supplies the mouse surface; keep the rounded corners transparent.
+        window.backgroundColor = .clear
         window.ignoresMouseEvents = false
         window.isMovableByWindowBackground = false
         window.hasShadow = false

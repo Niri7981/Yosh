@@ -59,7 +59,6 @@ struct CardWindow: View {
                 .modifier(CardFaceRotation(angle: showingBack ? 180 : 0, perspective: 0.35, active: isFlipping))
             }
         }
-        .padding(CardMetrics.windowInset)
         .frame(width: CardMetrics.windowSize.width, height: CardMetrics.windowSize.height)
         .preferredColorScheme(appearance == "dark" ? .dark : appearance == "light" ? .light : nil)
         .environment(\.colorScheme, appearance == "dark" ? .dark : appearance == "light" ? .light : systemScheme)

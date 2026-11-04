@@ -29,7 +29,7 @@ struct AuthorityDetailViewTest {
         window.orderFront(nil)
         settle(host)
         precondition(CardMetrics.cardSize == CGSize(width: 420, height: 684))
-        precondition(CardMetrics.windowSize == CGSize(width: 444, height: 708))
+        precondition(CardMetrics.windowSize == CardMetrics.cardSize)
         precondition(host.frame.size == NSSize(width: 420, height: 526))
         guard let scroll = scrollView(in: host), let document = scroll.documentView else {
             fatalError("Authority detail must retain a native vertical scroll viewport")

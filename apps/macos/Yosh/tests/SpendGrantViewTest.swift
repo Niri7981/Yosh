@@ -114,7 +114,7 @@ struct SpendGrantViewTest {
         defer { window.close() }
         settle(host)
         guard let scroll = scrollViews(host).first, let document = scroll.documentView else { fatalError("Missing Resource form scroll view") }
-        precondition(CardMetrics.cardSize == CGSize(width: 420, height: 684) && CardMetrics.windowSize == CGSize(width: 444, height: 708))
+        precondition(CardMetrics.cardSize == CGSize(width: 420, height: 684) && CardMetrics.windowSize == CardMetrics.cardSize)
         precondition(element("grant-api-details", in: host) == nil, "API details require a selected Resource")
         chooseResource(overview.service.registeredResources![0], host: host, window: window)
         precondition(element("grant-api-details", in: host) != nil)
