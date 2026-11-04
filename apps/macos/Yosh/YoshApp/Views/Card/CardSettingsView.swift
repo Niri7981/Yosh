@@ -63,7 +63,7 @@ struct CardSettingsView: View {
                 Button("Cancel", role: .cancel) {}
                 Button("Use Mainnet") { Task { await switchEnvironment(.mainnet) } }
             } message: {
-                Text("Mainnet uses real SOL and USDC. Payments are irreversible. Its existing wallet, authority and payment settings stay separate from Devnet and Simulation. Selecting Mainnet does not create a wallet.")
+                Text("Mainnet uses real SOL and USDC. Its existing wallet, authority and payment settings stay separate from Devnet and Simulation. Selecting Mainnet does not create a wallet.")
             }
             .onReceive(NotificationCenter.default.publisher(for: .nativeServiceExited)) { _ in
                 guard !switchingEnvironment else { return }

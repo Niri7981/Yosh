@@ -11,6 +11,7 @@ struct ExecutionDetail: View {
 
     @State private var showingEnableConfirmation = false
     @State private var showingMainnetSelection = false
+    @State private var showingDetails = false
 
     private let ink = YoshShellPalette.ink
     private let secondaryInk = YoshShellPalette.secondaryInk
@@ -29,39 +30,34 @@ struct ExecutionDetail: View {
                 .foregroundStyle(secondaryInk)
                 .disabled(isSaving)
                 .accessibilityLabel("Back to Authority")
+                .accessibilityIdentifier("execution-back")
 
                 Text("Execution")
-                    .font(.system(size: 44, weight: .regular, design: .serif))
-                    .tracking(-1.2)
+                    .font(.system(size: 34, weight: .regular, design: .serif))
+                    .tracking(-0.8)
                     .accessibilityAddTraits(.isHeader)
-                    .padding(.top, 12)
-                Text("Choose the environment for purchases allowed by policy.")
-                    .font(.system(size: 13))
+                    .padding(.top, 10)
+                    .padding(.bottom, 18)
+                hairline
+                Text("ENVIRONMENT")
+                    .font(.system(size: 9, weight: .medium))
+                    .tracking(1.8)
                     .foregroundStyle(secondaryInk)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.top, 8)
-                    .padding(.bottom, 24)
+                    .padding(.top, 18)
+                    .padding(.bottom, 6)
 
                 ForEach(AppOverview.Service.PurchaseMode.allCases, id: \.self) { mode in
-                    hairline
                     Button {
                         guard environment?.mode != mode else { return }
                         if mode == .liveMainnet { showingMainnetSelection = true }
                         else { Task { await onSelect(mode) } }
                     } label: {
                         HStack(alignment: .firstTextBaseline, spacing: 12) {
-                            VStack(alignment: .leading, spacing: 6) {
+                            VStack(alignment: .leading, spacing: 3) {
                                 Text(mode.title).font(.system(size: 15, weight: .medium))
-                                Text(description(mode))
-                                    .font(.system(size: 12))
+                                Text(shortDescription(mode))
+                                    .font(.system(size: 11))
                                     .foregroundStyle(secondaryInk)
-                                if mode == .liveMainnet, let status = environment?.mainnetStatus {
-                                    Text(status)
-                                        .font(.system(size: 11))
-                                        .foregroundStyle(secondaryInk)
-                                        .fixedSize(horizontal: false, vertical: true)
-                                        .padding(.top, 3)
-                                }
                             }
                             Spacer(minLength: 0)
                             Image(systemName: "checkmark")
@@ -70,7 +66,7 @@ struct ExecutionDetail: View {
                                 .accessibilityHidden(true)
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.vertical, 17)
+                        .padding(.vertical, 12)
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
@@ -79,6 +75,7 @@ struct ExecutionDetail: View {
                     .accessibilityLabel(mode.title)
                     .accessibilityValue(environment?.mode == mode ? "Selected" : "Not selected")
                     .accessibilityHint(description(mode))
+                    .accessibilityIdentifier("execution-mode-\(mode.rawValue)")
                 }
                 hairline
                 if let environment, environment.mode == .liveMainnet {
@@ -86,8 +83,8 @@ struct ExecutionDetail: View {
                         VStack(alignment: .leading, spacing: 5) {
                             Text("Mainnet execution")
                                 .font(.system(size: 15, weight: .medium))
-                            Text("Allow eligible Agents to make real payments within your Daily Authority and Spend Grants.")
-                                .font(.system(size: 12))
+                            Text("Within Daily Authority and Spend Grants")
+                                .font(.system(size: 11))
                                 .foregroundStyle(secondaryInk)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
@@ -100,21 +97,40 @@ struct ExecutionDetail: View {
                             }
                         ))
                         .labelsHidden()
+                        .toggleStyle(.switch)
+                        .tint(YoshShellPalette.activeInk)
                         .disabled(isSaving)
+                        .accessibilityIdentifier("execution-mainnet-toggle")
+                        .accessibilityHint("Real payments require an active connection, Daily Authority and a matching Spend Grant.")
                     }
-                    .padding(.vertical, 17)
-                    hairline
+                    .padding(.top, 16)
+                    if let status = environment.mainnetStatus {
+                        Text(status)
+                            .font(.system(size: 11))
+                            .foregroundStyle(secondaryInk)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .accessibilityIdentifier("execution-mainnet-status")
+                            .padding(.top, 8)
+                    }
                 }
                 if let environment {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("\(environment.mode.title) · \(environment.network)")
-                        Text("\(environment.assetLabel ?? "Asset not verified") · \(environment.asset.decimals) decimals")
-                        Text(environment.asset.mint).textSelection(.enabled)
+                    DisclosureGroup(isExpanded: $showingDetails) {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("\(environment.mode.title) · \(environment.network)")
+                            Text("\(environment.assetLabel ?? "Asset not verified") · \(environment.asset.decimals) decimals")
+                            Text(environment.asset.mint).textSelection(.enabled)
+                        }
+                        .font(.system(size: 10))
+                        .foregroundStyle(secondaryInk)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.top, 8)
+                        .accessibilityIdentifier("execution-details-content")
+                    } label: {
+                        Text("Network details").font(.system(size: 11)).foregroundStyle(secondaryInk)
                     }
-                    .font(.system(size: 10))
-                    .foregroundStyle(secondaryInk)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.top, 18)
+                    .tint(secondaryInk)
+                    .accessibilityIdentifier("execution-details")
+                    .padding(.top, 20)
                 }
                 if isSaving {
                     Text("Saving…").font(.system(size: 12)).foregroundStyle(secondaryInk).padding(.top, 14)
@@ -143,7 +159,9 @@ struct ExecutionDetail: View {
         .confirmationDialog("Enable real Mainnet payments?", isPresented: $showingEnableConfirmation,
             titleVisibility: .visible) {
             Button("Enable Mainnet execution") { Task { await onProductionExecution(true) } }
+                .accessibilityIdentifier("execution-enable-confirm")
             Button("Cancel", role: .cancel) { }
+                .accessibilityIdentifier("execution-enable-cancel")
         } message: {
             Text("Agents still need an active connection, Daily Authority, a registered API and a matching Spend Grant. Each purchase is checked before signing.")
         }
@@ -158,6 +176,14 @@ struct ExecutionDetail: View {
         case .simulated: "No transaction is submitted."
         case .liveDevnet: "Developer testing with Test assets on Solana Devnet."
         case .liveMainnet: "Production purchases on Solana Mainnet."
+        }
+    }
+
+    private func shortDescription(_ mode: AppOverview.Service.PurchaseMode) -> String {
+        switch mode {
+        case .simulated: "No transactions"
+        case .liveDevnet: "Test assets"
+        case .liveMainnet: "Real payments"
         }
     }
 }
