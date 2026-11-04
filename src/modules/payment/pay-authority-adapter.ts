@@ -13,8 +13,6 @@ import { DEVNET_NETWORK, DEVNET_USDC_MINT, MAINNET_NETWORK, MAINNET_USDC_MINT, t
 import type { PaymentExecutionContext, PaymentExecutor } from './payment-execution-contract';
 import { assertIsolatedPaymentDirectory, PreparedSchema } from './isolated-pay-execution';
 import { assertPayControlledExtensions } from './resource-challenge';
-import { payMainnetConsentDecision } from './pay-authorization-outcome';
-import { assertPayMainnetAcceptance } from './pay-mainnet-control';
 import { preparePayUnsigned } from './pay-unsigned-preflight';
 import { readPayLifetime } from './mainnet-pay-execution';
 import { isDevnetDevelopment } from '../pay-dev/environment';
@@ -31,8 +29,8 @@ type Attempt = { facts: Facts; digest: string; generation: number; purchaseId: s
   lifetime?: { recentBlockhash: string; lastValidBlockHeight: string }; phase: 'authorized' | 'executing' | 'replay' | 'done' };
 
 /** Backend-only adapter. Real Yosh authority, atomic Ledger, claim, signing and
- * reconciliation own the decision. Mainnet additionally requires the stopped
- * upgrade profile, explicit production enablement and one exact operator receipt. */
+ * reconciliation own the decision. Mainnet requires explicit production
+ * enablement and the product Grant bound atomically to each new purchase. */
 export function createPayAuthorityAdapter(options: { directory: string; runtime: () => AppRuntime; config: () => PaymentConfig;
   executor: PaymentExecutor; origin: string; rpcUrl: string; mainnet?: true; devnet?: true }) {
   if (options.mainnet && options.devnet) throw new Error('PAY_NETWORK_CONFIGURATION_CONFLICT');
@@ -141,8 +139,6 @@ export function createPayAuthorityAdapter(options: { directory: string; runtime:
             payment_required: record.intent.x402Challenge });
           const { config, resourceId } = parse(facts, principal);
           if (!resourceId || hash(facts) !== row.facts_hash) throw new Error('PAY_RECOVERY_FACTS_MISMATCH');
-          if (options.mainnet) assertPayMainnetAcceptance(options.directory, config, facts, { resourceId,
-            providerId: record.intent.providerId, resourceUrl: facts.request.url });
           options.executor.assertEligibility(config, ledger);
           // Renew atomically against the original reservation, never authorize/reserve again.
           const permit = ledger.recoverExternalPrepayment(record.approvalId);
@@ -182,10 +178,6 @@ export function createPayAuthorityAdapter(options: { directory: string; runtime:
             headers: Object.fromEntries(spend.request.headers), access: 'https' }); return true; } catch { return false; }
         });
         if (resources.length !== 1) throw new Error('PAY_RESOURCE_NOT_REGISTERED');
-        const resource = resources[0];
-        const rejection = options.mainnet ? payMainnetConsentDecision(() => assertPayMainnetAcceptance(options.directory, config, spend, {
-          resourceId: resource.resourceId, providerId: resource.providerId, resourceUrl: spend.request.url })) : undefined;
-        if (rejection) return rejection;
       }
       if (existing?.status === 'APPROVED') throw new Error('PAY_DURABLE_RECOVERY_REQUIRED');
       if (pending.has(spend.attempt_id) || attempts.has(spend.attempt_id)) throw new Error('PAY_ATTEMPT_REUSED');
@@ -229,9 +221,9 @@ export function createPayAuthorityAdapter(options: { directory: string; runtime:
           return { allow: epoch === generation };
         }
         if (!resourceId) throw new Error('PAY_RESOURCE_NOT_REGISTERED');
-        if (options.mainnet) assertPayMainnetAcceptance(options.directory, config, facts, {
-          resourceId, providerId: config.registeredResources!.find(resource => resource.resourceId === resourceId)!.providerId,
-          resourceUrl: facts.request.url });
+        // The shared purchase service selects the current resource Grant and
+        // reserves against its immutable ID/version. An old operator acceptance
+        // file is historical test evidence, not product spending authority.
         const result = await requestPaidResourcePurchase({ requestId: id, resourceId, reason: 'Pay MCP API purchase',
           ...(liveNetwork ? { request: requestInput } : {}) }, {
           config, ledger, origin: options.origin, principal, execute: true, deferExecution: true,
@@ -291,8 +283,6 @@ export function createPayAuthorityAdapter(options: { directory: string; runtime:
       if (options.mainnet) {
         const attempt = [...attempts.values()].find(value => value.approvalId === context.record.approvalId);
         if (!attempt) throw new Error('PAY_ATTEMPT_BINDING_MISMATCH');
-        assertPayMainnetAcceptance(options.directory, context.config, attempt.facts, {
-          resourceId: context.record.intent.resourceId, providerId: context.record.intent.providerId, resourceUrl: attempt.facts.request.url });
       }
       const value = unsigned.get(context.record.approvalId);
       if (!value) throw new Error('PAY_UNSIGNED_PREPARATION_REQUIRED');

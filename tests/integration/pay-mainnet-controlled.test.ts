@@ -138,16 +138,37 @@ async function fixture() {
     async close() { await app.prepareQuit(); app.close(); rmSync(directory, { recursive: true, force: true }); } };
 }
 
-it('requires an operator acceptance independently of real Grant and Budget, then atomically reserves full Mainnet Pay facts', async () => {
+it.each(['missing', 'expired'] as const)('a newly created Grant authorizes a new purchase with %s legacy operator receipt', async receipt => {
   const f = await fixture();
   try {
-    expect(await f.call('authorize')).toEqual({ decision: 'RejectBeforeExecution' }); expect(f.record()).toBeUndefined();
+    if (receipt === 'expired') {
+      f.accept({ ...f.facts, operation_id: 'previous-purchase' });
+      const path = join(f.directory, 'pay-mainnet-acceptance.json');
+      const previous = z.record(z.string(), z.unknown()).parse(JSON.parse(readFileSync(path, 'utf8')));
+      writeFileSync(path, JSON.stringify({ ...previous, expiresAt: Date.now() - 1 }), { mode: 0o600 });
+    }
+    const grant = await f.app.createSpendGrant({ resourceId: 'mainnet-fixture-data', sample: { query: { coins: 'SOL' } },
+      totalLimit: '5000', singleLimit: '1000', expiresAt: Date.now() + 3600_000 });
+    expect(await f.call('authorize')).toEqual({ allow: true });
+    expect(await f.call('plan', { facts: f.facts })).toMatchObject({ action: 'build' });
+    const record = f.app.ledger.getOwned(f.record()!.purchaseId, f.facts.caller_id)!;
+    expect(record.intent.authority).toMatchObject({ grantId: grant.id, grantVersion: grant.version });
+    await expect(f.call('execute', { facts: f.facts, unsigned: f.prepared })).rejects.toThrow('Payment stopped; use the same task');
+    // Fixture merchant loses the response: signing reached once, original outcome stays reserved.
+    expect(loadBuyerSigner).toHaveBeenCalledOnce();
+    expect(f.record()!.status).toBe('PAYMENT_UNKNOWN');
+    expect(f.app.ledger.managedSummary(Date.now(), 'live_mainnet')).toMatchObject({ reserved: '1000', paid: '0' });
+  } finally { await f.close(); }
+});
+
+it('atomically reserves full Mainnet Pay facts under the current Grant without a CLI acceptance', async () => {
+  const f = await fixture();
+  try {
+    expect(f.record()).toBeUndefined();
     expect(f.app.ledger.managedSummary(Date.now(), 'live_mainnet')).toMatchObject({ reserved: '0', paid: '0' });
     expect(f.app.spendGrantSummary()?.committed).toBe('0');
     expect(loadBuyerSigner).not.toHaveBeenCalled();
     expect(f.app.ledger.executionSafety.hasExternalAuthorityClaim(f.facts.caller_id, f.facts.operation_id)).toBe(false);
-    f.accept({ ...f.facts, accepted: { ...f.facts.accepted, extra: { ...f.facts.accepted.extra, recentBlockhash: f.config.buyer } },
-      payment_required: { ...f.facts.payment_required, accepts: [{ ...f.facts.accepted, extra: { ...f.facts.accepted.extra, recentBlockhash: f.config.buyer } }] } });
     f.facts.attempt_id = randomUUID();
     expect(await f.call('authorize')).toEqual({ allow: true });
     expect(await f.call('plan', { facts: f.facts })).toMatchObject({ action: 'build' });
@@ -163,10 +184,67 @@ it('requires an operator acceptance independently of real Grant and Budget, then
   } finally { await f.close(); }
 });
 
+it.each(['revoked', 'expired', 'paused', 'insufficient budget'] as const)('a legacy receipt cannot authorize a purchase with %s product authority', async blocker => {
+  const f = await fixture();
+  const clock = vi.spyOn(Date, 'now');
+  try {
+    f.accept();
+    if (blocker === 'revoked') f.app.revokeSpendGrant();
+    if (blocker === 'expired') clock.mockReturnValue(Date.now() + 3600_001);
+    if (blocker === 'paused') f.app.setPaused(true);
+    if (blocker === 'insufficient budget') f.app.setDailyLimit('999');
+    expect(await f.call('authorize')).toEqual({ allow: true });
+    await expect(f.call('plan', { facts: f.facts })).rejects.toThrow('PAY_AUTHORIZATION_REJECTED');
+    expect(f.record()!.status).toBe('DENIED');
+    expect(f.app.ledger.managedSummary(Date.now(), 'live_mainnet')).toMatchObject({ reserved: '0', paid: '0' });
+    expect(loadBuyerSigner).not.toHaveBeenCalled();
+  } finally { clock.mockRestore(); await f.close(); }
+});
+
+it('replacing a Grant during signer loading never rebinds an existing purchase to the new Grant', async () => {
+  const f = await fixture();
+  try {
+    await f.call('authorize'); await f.call('plan', { facts: f.facts });
+    const id = f.record()!.purchaseId;
+    const originalBinding = f.app.ledger.getOwned(id, f.facts.caller_id)!.intent.authority;
+    const sign = vi.fn(f.signer.signTransactions);
+    let replacementId: string | undefined;
+    vi.mocked(loadBuyerSigner).mockImplementation(async () => {
+      const replacement = await f.app.createSpendGrant({ resourceId: 'mainnet-fixture-data', sample: { query: { coins: 'SOL' } },
+        totalLimit: '5000', singleLimit: '1000', expiresAt: Date.now() + 3600_000 });
+      replacementId = replacement.id;
+      return { ...f.signer, signTransactions: sign };
+    });
+    await expect(f.call('execute', { facts: f.facts, unsigned: f.prepared })).rejects.toThrow();
+    expect(replacementId).toBeDefined();
+    expect(replacementId).not.toBe(originalBinding!.grantId);
+    expect(f.app.ledger.getOwned(id, f.facts.caller_id)!.intent.authority).toEqual(originalBinding);
+    expect(sign).not.toHaveBeenCalled();
+    expect(f.rpc.mock.calls.some(([url]) => String(url) === f.facts.request.url)).toBe(false);
+  } finally { await f.close(); }
+});
+
+it('concurrent Mainnet purchases share the current Grant and atomic daily budget without CLI receipts', async () => {
+  const f = await fixture();
+  try {
+    f.app.setDailyLimit('1000');
+    const other = { ...f.facts, operation_id: 'second-purchase', attempt_id: randomUUID() };
+    await f.call('authorize'); await f.call('authorize', other);
+    const plans = await Promise.allSettled([f.call('plan', { facts: f.facts }), f.call('plan', { facts: other })]);
+    expect(plans.filter(plan => plan.status === 'fulfilled')).toHaveLength(1);
+    const rows = f.app.ledger.listForOwner(f.facts.caller_id, 50);
+    expect(rows.filter(row => row.status === 'APPROVED')).toHaveLength(1);
+    expect(rows.filter(row => row.status === 'DENIED')).toHaveLength(1);
+    expect(f.app.ledger.managedSummary(Date.now(), 'live_mainnet')).toMatchObject({ reserved: '1000', paid: '0' });
+    expect(f.app.spendGrantSummary()?.committed).toBe('1000');
+    expect(loadBuyerSigner).not.toHaveBeenCalled();
+  } finally { await f.close(); }
+});
+
 it('Mainnet controlled execution persists original Unknown and recovers once after restart without another signature or replacement', async () => {
   const f = await fixture();
   try {
-    f.accept(); await f.call('authorize'); await f.call('plan', { facts: f.facts });
+    await f.call('authorize'); await f.call('plan', { facts: f.facts });
     await expect(f.call('execute', { facts: f.facts, unsigned: f.prepared })).rejects.toThrow();
     const initial = f.record()!; expect(initial.status).toBe('PAYMENT_UNKNOWN');
     const record = f.app.ledger.getOwned(initial.purchaseId, f.facts.caller_id)!;
@@ -190,7 +268,7 @@ it('Mainnet controlled execution persists original Unknown and recovers once aft
 it('Pause during Keychain loading fences Mainnet signature and final HTTP even after Resume', async () => {
   const f = await fixture();
   try {
-    f.accept(); await f.call('authorize'); await f.call('plan', { facts: f.facts });
+    await f.call('authorize'); await f.call('plan', { facts: f.facts });
     const sign = vi.fn(f.signer.signTransactions);
     vi.mocked(loadBuyerSigner).mockImplementation(async () => { f.app.setPaused(true); f.app.setPaused(false); return { ...f.signer, signTransactions: sign }; });
     await expect(f.call('execute', { facts: f.facts, unsigned: f.prepared })).rejects.toThrow();
@@ -204,7 +282,7 @@ it('recovers a lost Mainnet plan on the original reservation after lease expiry 
   const f = await fixture();
   const clock = vi.spyOn(Date, 'now');
   try {
-    f.accept(); await f.call('authorize'); await f.call('plan', { facts: f.facts });
+    await f.call('authorize'); await f.call('plan', { facts: f.facts });
     const first = f.record()!;
     const owned = f.app.ledger.getOwned(first.purchaseId, f.facts.caller_id)!;
     const oldPermit = f.app.ledger.executionSafety.permit(owned);
@@ -237,7 +315,7 @@ it('recovers a lost Mainnet plan on the original reservation after lease expiry 
 it('pre-payment recovery rejects terminated purchases without a new reservation or signer', async () => {
   const f = await fixture();
   try {
-    f.accept(); await f.call('authorize'); await f.call('plan', { facts: f.facts });
+    await f.call('authorize'); await f.call('plan', { facts: f.facts });
     const record = f.app.ledger.getOwned(f.record()!.purchaseId, f.facts.caller_id)!;
     f.app.ledger.releaseExpired(record.intent.expiresAt);
     await expect(f.app.payMcpRecovery({ operationId: f.facts.operation_id }, f.principal(), 'http://127.0.0.1:3049'))
@@ -250,7 +328,7 @@ it('pre-payment recovery rejects terminated purchases without a new reservation 
 it('recovery rechecks Pause, rejects concurrent rebuilds and fences an in-flight stale plan', async () => {
   const f = await fixture();
   try {
-    f.accept(); await f.call('authorize'); await f.call('plan', { facts: f.facts });
+    await f.call('authorize'); await f.call('plan', { facts: f.facts });
     await expect(f.call('authorize', { ...f.facts, attempt_id: randomUUID() })).rejects.toThrow('PAY_DURABLE_RECOVERY_REQUIRED');
     f.app.setPaused(true);
     await expect(f.app.payMcpRecovery({ operationId: f.facts.operation_id }, f.principal(), 'http://127.0.0.1:3049')).rejects.toThrow('Payments are paused');
@@ -277,7 +355,7 @@ it('recovery rechecks Pause, rejects concurrent rebuilds and fences an in-flight
 it('a durable CLAIMED fence without a saved signature is never treated as proof of no signing', async () => {
   const f = await fixture();
   try {
-    f.accept(); await f.call('authorize'); await f.call('plan', { facts: f.facts });
+    await f.call('authorize'); await f.call('plan', { facts: f.facts });
     const record = f.app.ledger.getOwned(f.record()!.purchaseId, f.facts.caller_id)!;
     f.app.ledger.claim(record.approvalId, undefined, undefined, 'live_mainnet', f.app.ledger.executionSafety.permit(record));
     await expect(f.app.payMcpRecovery({ operationId: f.facts.operation_id }, f.principal(), 'http://127.0.0.1:3049'))
@@ -289,7 +367,7 @@ it('a durable CLAIMED fence without a saved signature is never treated as proof 
 it('a controller plan failure after reserve can resume on the same runtime without authorizing again', async () => {
   const f = await fixture();
   try {
-    f.accept(); await f.call('authorize');
+    await f.call('authorize');
     f.rpc.mockRejectedValueOnce(new Error('FIXTURE_PLAN_RPC_UNAVAILABLE'));
     await expect(f.call('plan', { facts: f.facts })).rejects.toThrow('FIXTURE_PLAN_RPC_UNAVAILABLE');
     const first = f.record()!;
@@ -309,7 +387,7 @@ it.each([
 ])('recovery schema failure stays on the same reserved Purchase before claim/signing: %j', async output => {
   const f = await fixture();
   try {
-    f.accept(); await f.call('authorize'); await f.call('plan', { facts: f.facts });
+    await f.call('authorize'); await f.call('plan', { facts: f.facts });
     const first = f.record()!;
     const reserve = vi.spyOn(f.app.ledger, 'reserve');
     vi.mocked(preparePayUnsigned).mockResolvedValue(output.ok ? { ...output, result: { ...output.result, accepted: f.facts.accepted } } : output);

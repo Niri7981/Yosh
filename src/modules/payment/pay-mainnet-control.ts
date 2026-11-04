@@ -133,8 +133,9 @@ export function recordPayMainnetAcceptance(directory: string, raw: unknown) {
   privatePayJson(directory, isMainnetDevelopment(directory) ? 'pay-development-mainnet.json' : 'pay-mainnet-cutover.json');
   writeControl(directory, 'pay-mainnet-acceptance.json', receipt);
 }
-/** A private operator receipt, never a model-supplied approved flag. It binds
- * exactly one operation; the existing Ledger prevents its second consumption. */
+/** Legacy one-operation acceptance validator retained for historical tooling.
+ * Product purchases use the App-created Spend Grant and Ledger signing guards;
+ * an acceptance file neither grants product spending rights nor blocks them. */
 export function assertPayMainnetAcceptance(directory: string, config: PaymentConfig, facts: {
   caller_id: string; operation_id: string; request: unknown; accepted: unknown; payment_required?: unknown;
   network: string; asset: string; recipient: string; amount_atomic: string;

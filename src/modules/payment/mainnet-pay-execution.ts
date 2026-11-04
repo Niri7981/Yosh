@@ -9,7 +9,6 @@ import { PreparedSchema } from './isolated-pay-execution';
 import { assertUnsignedPaymentBindings, decodeOriginalTransaction } from './original-payment-evidence';
 import { X402ChallengeSchema, SolanaPublicKeySchema } from '../resources/http-resource';
 import type { PurchaseLedger } from '../purchases/purchase-ledger';
-import { assertPayMainnetAcceptance } from './pay-mainnet-control';
 import { isDevnetDevelopment } from '../pay-dev/environment';
 
 export async function readPayMainnetLifetime(config: PaymentConfig) {
@@ -50,17 +49,11 @@ export function createPayExecution(options: {
   const assertCurrent = (context: PaymentExecutionContext) => {
     const claim = claims.get(context.record.approvalId);
     if (!claim || claim.context !== context || claim.generation !== generation) throw new Error('PAY_EXECUTOR_STALE_GENERATION');
+    // Recheck the purchase's original Grant, budget, Pause and request bindings;
+    // never switch an in-flight purchase to a newer Grant or legacy CLI receipt.
     context.beforeSign();
     const row = ledger?.executionSafety.provenance(context.record.intent.id);
     if (row?.origin !== 'external_pay') throw new Error('EXTERNAL_PROVENANCE_REQUIRED');
-    if (mainnet) {
-      const request = context.record.intent.httpRequest!;
-      assertPayMainnetAcceptance(directory, context.config, { caller_id: String(row.caller_id), operation_id: String(row.operation_id),
-        request: { method: request.method, url: request.url, headers: Object.entries(request.headers).sort(), body: request.body ?? null },
-        accepted: context.record.quote, payment_required: context.record.intent.x402Challenge, network: context.record.quote.network,
-        asset: context.record.quote.asset, recipient: context.record.quote.payTo, amount_atomic: context.record.quote.amount }, {
-        resourceId: context.record.intent.resourceId, providerId: context.record.intent.providerId, resourceUrl: request.url });
-    }
   };
   const eligibility = (config: PaymentConfig, target: PurchaseLedger) => {
     assertPaymentConfigExecutionEnabled(config);
