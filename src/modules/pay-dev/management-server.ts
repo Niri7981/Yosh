@@ -4,6 +4,7 @@ import { z } from 'zod';
 import type { AppRuntime } from '../app/app-runtime';
 import type { createPayAuthorityAdapter } from '../payment/pay-authority-adapter';
 import { McpSessionEventSchema } from '../mcp/session';
+import * as notifications from '../../app/api/app/notifications/route';
 import * as overview from '../../app/api/app/overview/route';
 import * as health from '../../app/api/app/health/route';
 import * as settings from '../../app/api/app/settings/route';
@@ -42,7 +43,7 @@ export async function serveDevelopmentRuntime<T extends { memberId: string }>(op
     // Reuse the product's member-authenticated read. Payment entry stays Pay MCP.
     ['GET /api/agent', request => new URL(request.url).searchParams.get('operation') === 'status'
       ? agent.GET(request) : Promise.resolve(Response.json({ code: 'INVALID_OPERATION' }, { status: 400 }))],
-    ['GET /api/app/overview', overview.GET], ['GET /api/app/health', health.GET],
+    ['GET /api/app/notifications', notifications.GET], ['GET /api/app/overview', overview.GET], ['GET /api/app/health', health.GET],
     ['PUT /api/app/settings', settings.PUT], ['PUT /api/app/grant', grant.PUT],
     ['GET /api/app/members', members.GET], ['POST /api/app/members', members.POST],
     ['POST /api/app/lifecycle', lifecycle.POST], ['GET /api/app/execution', executionMode.GET],

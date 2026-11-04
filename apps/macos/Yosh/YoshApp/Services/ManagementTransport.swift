@@ -6,6 +6,7 @@ import Security
 enum ServiceEndpoint {
     case health
     case overview
+    case purchaseNotifications(Int64?)
     case wallets
     case addWallet(AddWalletRequest)
     case createDevelopmentPaymentWallet
@@ -44,6 +45,7 @@ enum ServiceEndpoint {
         case .prepareResource: "/api/app/resources/prepare"
         case .health: "/api/app/health"
         case .overview: "/api/app/overview"
+        case .purchaseNotifications: "/api/app/notifications"
         case .wallets, .addWallet, .createDevelopmentPaymentWallet: "/api/app/wallets"
         case .balance: "/api/app/balance"
         case .execution, .setExecution, .setProductionExecutionEnabled: "/api/app/execution"
@@ -60,7 +62,7 @@ enum ServiceEndpoint {
 
     var isMutation: Bool {
         switch self {
-        case .health, .overview, .wallets, .balance, .execution, .members, .member, .resources, .resource: false
+        case .purchaseNotifications, .health, .overview, .wallets, .balance, .execution, .members, .member, .resources, .resource: false
         case .addWallet, .createDevelopmentPaymentWallet, .prepareEnvironmentSwitch, .setExecution, .setProductionExecutionEnabled, .setPaused, .setDailyLimit, .createGrant, .revokeGrant, .setConnection, .createMember,
              .renameMember, .revokeMember, .setMemberConnection, .createMemberGrant, .revokeMemberGrant, .prepareQuit, .shutdown, .registerResource, .resourceState, .discoverResource, .prepareResource: true
         }
@@ -73,7 +75,7 @@ enum ServiceEndpoint {
         case .addWallet, .createDevelopmentPaymentWallet, .prepareEnvironmentSwitch, .createMember, .registerResource, .discoverResource, .prepareResource: "POST"
         case .revokeMember: "DELETE"
         case .prepareQuit, .shutdown: "POST"
-        case .health, .overview, .wallets, .balance, .execution, .members, .member, .resources, .resource: "GET"
+        case .purchaseNotifications, .health, .overview, .wallets, .balance, .execution, .members, .member, .resources, .resource: "GET"
         }
     }
 
@@ -119,7 +121,7 @@ enum ServiceEndpoint {
             Data(#"{"action":"prepareQuit"}"#.utf8)
         case .shutdown:
             Data(#"{"action":"shutdown"}"#.utf8)
-        case .health, .overview, .wallets, .balance, .execution, .members, .member, .revokeMember, .resources, .resource:
+        case .purchaseNotifications, .health, .overview, .wallets, .balance, .execution, .members, .member, .revokeMember, .resources, .resource:
             nil
         }
     }
@@ -289,10 +291,16 @@ struct ServiceConfiguration: Sendable {
         let timestamp = String(Int64(Date.now.timeIntervalSince1970 * 1000))
         let body = try endpoint.body()
         let key = SymmetricKey(data: Data(managementToken.utf8))
-        var request = URLRequest(url: baseURL.appending(path: endpoint.path), cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: timeout)
+        var components = URLComponents(url: baseURL.appending(path: endpoint.path), resolvingAgainstBaseURL: false)!
+        if case .purchaseNotifications(let after) = endpoint, let after {
+            guard after >= 0 else { throw ServiceRuntimeError.configuration }
+            components.queryItems = [URLQueryItem(name: "after", value: String(after))]
+        }
+        let signedPath = endpoint.path + (components.percentEncodedQuery.map { "?" + $0 } ?? "")
+        var request = URLRequest(url: components.url!, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: timeout)
         request.httpMethod = endpoint.method
         request.httpBody = body
-        let canonical = ["2049-management-v1", endpoint.method, endpoint.path, timestamp, nonce,
+        let canonical = ["2049-management-v1", endpoint.method, signedPath, timestamp, nonce,
                          Self.hex(SHA256.hash(data: body ?? Data()))].joined(separator: "\n")
         request.setValue(timestamp, forHTTPHeaderField: "X-2049-Timestamp")
         request.setValue(nonce, forHTTPHeaderField: "X-2049-Nonce")

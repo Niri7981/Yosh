@@ -30,6 +30,10 @@ final class CardApplicationDelegate: NSObject, NSApplicationDelegate, NSWindowDe
         }
         let serviceRuntime = NativeServiceRuntime()
         self.serviceRuntime = serviceRuntime
+        PurchaseNotifications.shared.start(client: OverviewClient(runtime: serviceRuntime))
+        NotificationCenter.default.addObserver(forName: .nativeServiceExited, object: nil, queue: .main) { _ in
+            Task { @MainActor in PurchaseNotifications.shared.serviceChanged() }
+        }
         let windowRect = NSRect(origin: .zero, size: CardMetrics.windowSize)
         let window = AgentCardNSWindow(
             contentRect: windowRect,
@@ -74,9 +78,13 @@ final class CardApplicationDelegate: NSObject, NSApplicationDelegate, NSWindowDe
         guard let serviceRuntime else { return .terminateNow }
         if terminationRequested { return .terminateLater }
         terminationRequested = true
+        PurchaseNotifications.shared.stop()
         Task {
             let stopped = await serviceRuntime.shutdown()
-            if !stopped { terminationRequested = false }
+            if !stopped {
+                terminationRequested = false
+                PurchaseNotifications.shared.start(client: OverviewClient(runtime: serviceRuntime))
+            }
             sender.reply(toApplicationShouldTerminate: stopped)
         }
         return .terminateLater

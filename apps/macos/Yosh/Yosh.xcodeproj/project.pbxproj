@@ -7,6 +7,9 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		E84900000000000000000005 /* PurchaseNotificationsRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = E84900000000000000000006 /* PurchaseNotificationsRow.swift */; };
+		E84900000000000000000003 /* PurchaseNotifications.swift in Sources */ = {isa = PBXBuildFile; fileRef = E84900000000000000000004 /* PurchaseNotifications.swift */; };
+		E84900000000000000000001 /* PurchaseNotificationFeed.swift in Sources */ = {isa = PBXBuildFile; fileRef = E84900000000000000000002 /* PurchaseNotificationFeed.swift */; };
 		D84900000000000000000001 /* SettingsEnvironmentSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = D84900000000000000000002 /* SettingsEnvironmentSection.swift */; };
 		C84900000000000000000063 /* PurchaseDetailDisclosureStyle.swift in Sources */ = {isa = PBXBuildFile; fileRef = C84900000000000000000064 /* PurchaseDetailDisclosureStyle.swift */; };
 		C84900000000000000000061 /* HostNetworkIcon.swift in Sources */ = {isa = PBXBuildFile; fileRef = C84900000000000000000062 /* HostNetworkIcon.swift */; };
@@ -93,6 +96,9 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		E84900000000000000000006 /* PurchaseNotificationsRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PurchaseNotificationsRow.swift; sourceTree = "<group>"; };
+		E84900000000000000000004 /* PurchaseNotifications.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PurchaseNotifications.swift; sourceTree = "<group>"; };
+		E84900000000000000000002 /* PurchaseNotificationFeed.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PurchaseNotificationFeed.swift; sourceTree = "<group>"; };
 		D84900000000000000000002 /* SettingsEnvironmentSection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsEnvironmentSection.swift; sourceTree = "<group>"; };
 		C84900000000000000000064 /* PurchaseDetailDisclosureStyle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PurchaseDetailDisclosureStyle.swift; sourceTree = "<group>"; };
 		C84900000000000000000062 /* HostNetworkIcon.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostNetworkIcon.swift; sourceTree = "<group>"; };
@@ -239,6 +245,7 @@
 				A00000000000000000000017 /* AgentIdentity.swift */,
 				A00000000000000000000100 /* YoshAppLock.swift */,
 				A0000000000000000000003C /* AppOverview.swift */,
+				E84900000000000000000002 /* PurchaseNotificationFeed.swift */,
 				A000000000000000000000F4 /* AuthoritySurface.swift */,
 				A000000000000000000000F0 /* ExecutionEnvironment.swift */,
 				A0000000000000000000003E /* AuthorityOverviewPresentation.swift */,
@@ -270,6 +277,7 @@
 			isa = PBXGroup;
 			children = (
 				A00000000000000000000040 /* OverviewClient.swift */,
+				E84900000000000000000004 /* PurchaseNotifications.swift */,
 				A00000000000000000000104 /* YoshAppLockStore.swift */,
 				A00000000000000000000102 /* YoshAppLockCredential.swift */,
 				A00000000000000000000043 /* NativeServiceRuntime.swift */,
@@ -328,6 +336,7 @@
 				B84900000000000000000054 /* PostRequestApprovalView.swift */,
 				A00000000000000000000071 /* CardSettingsBody.swift */,
 				A00000000000000000000073 /* SettingsSection.swift */,
+				E84900000000000000000006 /* PurchaseNotificationsRow.swift */,
 				D84900000000000000000002 /* SettingsEnvironmentSection.swift */,
 				A00000000000000000000075 /* SettingsRow.swift */,
 				A00000000000000000000038 /* AgentsMenu.swift */,
@@ -468,6 +477,7 @@
 				C84900000000000000000002 /* WalletsView.swift in Sources */,
 				A00000000000000000000072 /* CardSettingsBody.swift in Sources */,
 				A00000000000000000000074 /* SettingsSection.swift in Sources */,
+				E84900000000000000000005 /* PurchaseNotificationsRow.swift in Sources */,
 				D84900000000000000000001 /* SettingsEnvironmentSection.swift in Sources */,
 				A00000000000000000000076 /* SettingsRow.swift in Sources */,
 				A00000000000000000000078 /* DailyAuthorityPresentation.swift in Sources */,
@@ -485,10 +495,12 @@
 				A00000000000000000000039 /* AgentsMenu.swift in Sources */,
 				A0000000000000000000003B /* BackFlipButton.swift in Sources */,
 				A0000000000000000000003D /* AppOverview.swift in Sources */,
+				E84900000000000000000001 /* PurchaseNotificationFeed.swift in Sources */,
 				A000000000000000000000F5 /* AuthoritySurface.swift in Sources */,
 				A000000000000000000000F1 /* ExecutionEnvironment.swift in Sources */,
 				A0000000000000000000003F /* AuthorityOverviewPresentation.swift in Sources */,
 				A00000000000000000000041 /* OverviewClient.swift in Sources */,
+				E84900000000000000000003 /* PurchaseNotifications.swift in Sources */,
 				A00000000000000000000044 /* NativeServiceRuntime.swift in Sources */,
 				A00000000000000000000046 /* ManagementTransport.swift in Sources */,
 				A00000000000000000000048 /* BackendLaunchConfiguration.swift in Sources */,

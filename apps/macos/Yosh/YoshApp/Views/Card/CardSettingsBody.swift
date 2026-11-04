@@ -188,7 +188,7 @@ struct CardSettingsBody: View {
                     separator
                     unavailableToggle("Launch at login")
                     separator
-                    unavailableToggle("Notifications")
+                    PurchaseNotificationsRow()
                 }
                 .accessibilityIdentifier("settings.general")
             }

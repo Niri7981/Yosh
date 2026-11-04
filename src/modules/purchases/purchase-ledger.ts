@@ -1058,6 +1058,42 @@ export class PurchaseLedger {
         ...(row.reason ? { reason: String(row.reason) } : {}),
         ...(row.decision_reason ? { decisionReason: String(row.decision_reason) } : {}), ...(row.grant_id ? { grantId: String(row.grant_id) } : {}) }); });
   }
+  /** Read-only, bounded event cursor for native notifications, independent of the selected Agent.
+   * Every existing SpendIntent purchases one API request; retries reuse that purchase, never add quantity.
+   * Scan all events so non-notifiable transitions cannot stall the cursor. */
+  notificationEvents(after?: number) {
+    if (after !== undefined && (!Number.isSafeInteger(after) || after < 0)) throw new Error('INVALID_NOTIFICATION_CURSOR');
+    const latest = Number(this.db.prepare('SELECT COALESCE(MAX(sequence),0) AS n FROM purchase_events').get()!.n);
+    if (after === undefined) return { cursor: latest, events: [] };
+    const rows = this.db.prepare(`SELECT e.sequence,e.type,p.status,p.task_id,p.execution_mode,CAST(p.amount AS TEXT) AS amount,
+      json_extract(p.purchase,'$.resourceId') AS resource_id,json_extract(p.purchase,'$.currency') AS currency,
+      ms.environment,ms.network,ms.asset_id,ms.asset_decimals,m.label AS agent
+      FROM purchase_events e JOIN purchases p ON p.id=e.purchase_id
+      JOIN monetary_scopes ms ON ms.id=p.monetary_scope_id
+      LEFT JOIN card_members m ON m.id=p.owner_card_member_id
+      WHERE e.sequence>? ORDER BY e.sequence LIMIT 50`).all(after);
+    const events = rows.flatMap(row => {
+      const paid = row.type === 'payment.PAID' && row.status === 'PAID';
+      const unpaid = (row.type === 'authority.DENIED' && row.status === 'DENIED')
+        || (row.type === 'purchase.EXPIRED' && row.status === 'EXPIRED')
+        || (['payment.FAILED_ON_CHAIN', 'payment.FAILED_BEFORE_SUBMISSION'].includes(String(row.type)) && row.status === 'FAILED');
+      if ((!paid && !unpaid) || !['live_mainnet', 'live_devnet'].includes(String(row.execution_mode))) return [];
+      const resourceId = String(row.resource_id ?? 'API');
+      const resource = this.resources.list().find(entry => entry.definition.resourceId === resourceId);
+      const amount = atomicAmount(row.amount), decimals = Number(row.asset_decimals);
+      if (!Number.isInteger(decimals) || decimals < 0 || decimals > 18) return [];
+      const digits = amount.toString().padStart(decimals + 1, '0');
+      const fraction = decimals === 0 ? '' : digits.slice(-decimals).replace(/0+$/, '');
+      const value = decimals === 0 ? digits : digits.slice(0, -decimals) + (fraction ? '.' + fraction : '');
+      const ticker = /^[A-Z0-9]{2,10}$/.test(String(row.currency)) ? String(row.currency) : 'asset units';
+      const priceDisplay = `${value} ${row.environment === 'live_devnet' ? 'Test ' : ''}${ticker}`;
+      return [{ sequence: Number(row.sequence), purchaseId: String(row.task_id), agent: String(row.agent ?? 'Agent'),
+        apiName: resource?.definition.displayName ?? resourceId, amount: amount.toString(), quantity: '1', priceDisplay,
+        network: String(row.network), assetId: String(row.asset_id), decimals,
+        outcome: paid ? 'Paid' as const : 'Unpaid' as const }];
+    });
+    return { cursor: rows.length ? Number(rows[rows.length - 1].sequence) : Math.max(after, latest), events };
+  }
   eventsForOwner(taskId: string, memberId: string) {
     this.assertReadOwner(memberId);
     return this.db.prepare(`SELECT e.sequence,e.type,e.at FROM purchase_events e JOIN purchases p ON p.id=e.purchase_id
