@@ -35,7 +35,7 @@ private struct ScrollFixture: View {
                                     .padding(.top, CardPageHeader.Layout.topSpacing).padding(.bottom, 12)
                             case .settings:
                                 CardSettingsBody(information: nil, appVersion: "Fixture", isLoading: false, error: nil,
-                                    onCopyWallet: { _ in }, onOpenDataFolder: { _ in }, onOpenRepository: {}, onReload: {})
+                                    onCopyWallet: { _ in }, onOpenDataFolder: { _ in }, onOpenRepository: {}, onReload: {}, showsAdvanced: true)
                             case .connection, .authority:
                                 Text(section.title).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                             }
@@ -94,7 +94,7 @@ struct TabScrollStabilityTest {
         guard let settings = scrollViews(in: host).first(where: { $0 !== members }) else { throw Failure("Missing Settings scroll view") }
         let settingsFrame = settings.convert(settings.bounds, to: host)
         let initialSettingsY = settings.contentView.bounds.origin.y
-        try require(abs(initialSettingsY) < 0.5, "Settings must initially show GENERAL from the top, offset=\(initialSettingsY)")
+        try require(abs(initialSettingsY) < 0.5, "Settings Advanced must initially show its controls from the top, offset=\(initialSettingsY)")
 
         for destination in [BackSection.members, .connection, .authority, .settings, .members, .settings, .members] {
             press(destination, probe: probe, window: window)
