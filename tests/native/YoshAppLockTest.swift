@@ -8,6 +8,7 @@ struct YoshAppLockTest {
     private static let replacementPIN = "135790"
 
     static func main() async throws {
+        try validateCredentialNamespace()
         let original = try validateVerifierAndEncoding()
         let offlineStore = FakeCredentialStore()
         await offlineStore.setLoadFailure(true)
@@ -22,6 +23,32 @@ struct YoshAppLockTest {
         await validateLoadFailureAndRetry(original)
         await validateBusyReentry()
         print("Yosh App Lock passed: confirmed setup, PIN verification/change, persistent enablement, fail-closed storage, busy serialization and credential validation (fake store only)")
+    }
+
+    private static func validateCredentialNamespace() throws {
+        let manager = FileManager.default
+        let app = manager.temporaryDirectory.appending(path: "yosh-pin-namespace-\(UUID().uuidString).app")
+        try manager.createDirectory(at: app.appending(path: "Contents"), withIntermediateDirectories: true)
+        defer { try? manager.removeItem(at: app) }
+        func writeIdentity(_ id: String, plugin: Bool) throws {
+            let data = try PropertyListSerialization.data(fromPropertyList: ["CFBundleIdentifier": id,
+                "YoshPayDevelopment": true, "YoshCodexPluginDevelopment": plugin], format: .xml, options: 0)
+            try data.write(to: app.appending(path: "Contents/Info.plist"))
+        }
+        try writeIdentity("com.yosh.pay-development.v011rc5", plugin: false)
+        expect(try YoshKeychainAppLockStore.scopedService(bundleURL: app) == YoshKeychainAppLockStore.service,
+            "existing PIN records retain their lookup identity")
+        try writeIdentity("com.yosh.codex-plugin-dev", plugin: true)
+        expect(try YoshKeychainAppLockStore.scopedService(bundleURL: app) == "com.yosh.codex-plugin-dev.app-lock.v1",
+            "plugin PIN queries never select the production PIN namespace")
+        try writeIdentity("com.yosh.codex-plugin-dev", plugin: false)
+        expectThrows("plugin identity without its flag must not fall back to production PIN") {
+            _ = try YoshKeychainAppLockStore.scopedService(bundleURL: app)
+        }
+        try writeIdentity("com.yosh.pay-development.v011rc5", plugin: true)
+        expectThrows("a plugin flag cannot select another bundle's PIN") {
+            _ = try YoshKeychainAppLockStore.scopedService(bundleURL: app)
+        }
     }
 
     private static func validateVerifierAndEncoding() throws -> YoshAppLockCredential {

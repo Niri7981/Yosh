@@ -18,9 +18,26 @@ actor YoshKeychainAppLockStore: YoshAppLockStoring {
     static let service = "com.twentyfortynine.yosh-app-lock.v1"
     static let account = "local-app-lock"
     static let maximumEncodedBytes = 2_048
+    private let bundleURL: URL
+
+    init(bundleURL: URL = Bundle.main.bundleURL) { self.bundleURL = bundleURL }
+
+    static func scopedService(bundleURL: URL) throws -> String {
+        let url = bundleURL.appending(path: "Contents/Info.plist")
+        guard let data = try? Data(contentsOf: url),
+              let info = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] else { return service }
+        let plugin = "com.yosh.codex-plugin-dev"
+        if info["CFBundleIdentifier"] as? String == plugin || info["YoshCodexPluginDevelopment"] as? Bool == true {
+            guard info["CFBundleIdentifier"] as? String == plugin,
+                  info["YoshCodexPluginDevelopment"] as? Bool == true,
+                  info["YoshPayDevelopment"] as? Bool == true else { throw YoshAppLockStoreError.invalidRecord }
+            return "\(plugin).app-lock.v1"
+        }
+        return service
+    }
 
     func load() async throws -> YoshAppLockCredential? {
-        var query = itemQuery
+        var query = try itemQuery()
         query[kSecReturnData] = true
         query[kSecMatchLimit] = kSecMatchLimitOne
         var result: CFTypeRef?
@@ -35,14 +52,15 @@ actor YoshKeychainAppLockStore: YoshAppLockStoring {
 
     func save(_ credential: YoshAppLockCredential) async throws {
         let data = try Self.encode(credential)
+        let query = try itemQuery()
         let changes: [CFString: Any] = [kSecValueData: data]
-        let status = SecItemUpdate(itemQuery as CFDictionary, changes as CFDictionary)
+        let status = SecItemUpdate(query as CFDictionary, changes as CFDictionary)
         if status == errSecSuccess { return }
         guard status == errSecItemNotFound else {
             throw YoshAppLockStoreError.keychainFailure(status)
         }
 
-        var item = itemQuery
+        var item = query
         item[kSecValueData] = data
         let addStatus = SecItemAdd(item as CFDictionary, nil)
         guard addStatus == errSecSuccess else {
@@ -71,9 +89,9 @@ actor YoshKeychainAppLockStore: YoshAppLockStoring {
         }
     }
 
-    private var itemQuery: [CFString: Any] {
+    private func itemQuery() throws -> [CFString: Any] {
         [kSecClass: kSecClassGenericPassword,
-         kSecAttrService: Self.service,
+         kSecAttrService: try Self.scopedService(bundleURL: bundleURL),
          kSecAttrAccount: Self.account]
     }
 }

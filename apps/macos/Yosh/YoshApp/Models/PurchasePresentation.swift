@@ -86,7 +86,8 @@ struct PurchasePresentation {
     }
 
     static func environmentLabel(_ purchase: AppOverview.Purchase) -> String {
-        switch (purchase.monetaryEnvironment, purchase.network) {
+        if purchase.offline == true { return "Offline · No real funds" }
+        return switch (purchase.monetaryEnvironment, purchase.network) {
         case ("live_mainnet", "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"): "Mainnet"
         case ("live_devnet", "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1"),
              ("legacy_test", "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1"): "Devnet · Developer"

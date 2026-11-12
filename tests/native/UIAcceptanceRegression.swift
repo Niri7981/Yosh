@@ -80,6 +80,7 @@ struct UIAcceptanceRegression {
             "executionTrace": ["source": "pay_mcp", "traceId": "fixture-pay-trace", "operationId": "fixture-pay-operation", "complete": true]
         ]
         let purchase = try JSONDecoder().decode(AppOverview.Purchase.self, from: JSONSerialization.data(withJSONObject: fields))
+        precondition(PurchasePresentation.environmentLabel(purchase) == "Offline · No real funds")
         let presentation = PurchaseDetailPresentation(purchase, agentName: "Codex")
         precondition(presentation.stages.contains { $0.id == .delivered })
         precondition(presentation.receipts.contains { $0.label == "Trace ID" && $0.value == "fixture-pay-trace" })
