@@ -32,6 +32,56 @@ export function parseControllerInput<T>(schema: z.ZodType<T>, raw: unknown, stag
 const categories = z.enum(['string', 'number', 'boolean', 'object', 'array', 'null', 'undefined', 'unknown']);
 const safeFields = new Set(['facts', 'unsigned', 'transaction', 'recentBlockhash', 'lastValidBlockHeight', 'operationId', 'operation_id', 'attempt_id', 'caller_id', 'request', 'method', 'url', 'headers', 'body', 'execution_network', 'network', 'asset', 'recipient', 'amount_atomic', 'accepted', 'payment_required', 'ok', 'result', 'value', 'blockhash']);
 
+const failureCodes = {
+  preparation: 'PAY_PREPARATION_FAILED', unsigned_decode: 'PAY_UNSIGNED_DECODE_FAILED',
+  unsigned_bindings: 'PAY_UNSIGNED_BINDINGS_FAILED', preflight: 'PAY_PREFLIGHT_FAILED', simulation: 'PAY_SIMULATION_FAILED',
+  signer_authorization: 'PAY_SIGNER_AUTHORIZATION_FAILED', signer_load: 'PAY_SIGNER_LOAD_FAILED',
+  transaction_decode: 'PAY_TRANSACTION_DECODE_FAILED', signing: 'PAY_SIGNING_FAILED', signature_validation: 'PAY_SIGNATURE_VALIDATION_FAILED',
+  payload_encode: 'PAY_PAYLOAD_ENCODE_FAILED', payload_persistence: 'PAY_PAYLOAD_PERSISTENCE_FAILED',
+  submission_prepare: 'PAY_SUBMISSION_PREPARE_FAILED', submission: 'PAY_SUBMISSION_FAILED',
+  settlement_reconciliation: 'PAY_SETTLEMENT_RECONCILIATION_FAILED', delivery: 'PAY_DELIVERY_FAILED',
+} as const;
+export type PaymentFailureStage = keyof typeof failureCodes;
+const paymentDetails = z.object({
+  failureStage: z.enum(Object.keys(failureCodes) as [PaymentFailureStage, ...PaymentFailureStage[]]).optional(),
+  failureCode: z.enum(Object.values(failureCodes)).optional(),
+  purchaseId: z.string().regex(/^[a-zA-Z0-9_.:-]{1,128}$/).optional(),
+  rpcMethod: z.enum(['getGenesisHash', 'getLatestBlockhash', 'getMultipleAccounts', 'getBalance', 'simulateTransaction',
+    'getSignatureStatuses', 'getSignaturesForAddress', 'getTransaction', 'getBlockHeight']).optional(),
+  rpcHttpStatus: z.number().int().min(100).max(599).optional(),
+  rpcFailureCode: z.enum(['HTTP_ERROR', 'RPC_REJECTED', 'INVALID_RESPONSE', 'TIMEOUT', 'TRANSPORT_ERROR']).optional(),
+  transportCode: z.enum(['ENOTFOUND', 'EAI_AGAIN', 'ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EACCES', 'ERR_TLS_CERT_ALTNAME_INVALID']).optional(),
+}).strict();
+const paymentFailures = new WeakMap<object, z.infer<typeof paymentDetails>>();
+
+/** Keep only allowlisted facts across the purchase layer's deliberately generic error. */
+export function paymentFailure(error: unknown, stage: PaymentFailureStage, purchaseId?: string, replacement?: Error): Error {
+  const source = error instanceof Error ? error : new Error('PAYMENT_EXECUTION_FAILED');
+  const target = replacement ?? source;
+  const id = paymentDetails.shape.purchaseId.safeParse(purchaseId);
+  paymentFailures.set(target, { failureStage: stage, failureCode: failureCodes[stage], ...paymentFailures.get(source),
+    ...(id.success && id.data ? { purchaseId: id.data } : {}) });
+  return target;
+}
+
+/** Never retain an RPC URL, response body, error message, params or signed bytes. */
+export function rpcFailure(error: unknown, method: string, details: Pick<z.infer<typeof paymentDetails>, 'rpcHttpStatus' | 'rpcFailureCode'> = {}): Error {
+  const target = error instanceof Error ? error : new Error('PAYMENT_RPC_FAILED');
+  const rpcMethod = paymentDetails.shape.rpcMethod.safeParse(method);
+  const cause = error instanceof Error && 'cause' in error ? error.cause : error;
+  const transport = paymentDetails.shape.transportCode.safeParse(typeof cause === 'object' && cause !== null && 'code' in cause ? cause.code : undefined);
+  const timeout = target.name === 'TimeoutError' || target.name === 'AbortError' || (transport.success && transport.data === 'ETIMEDOUT');
+  const safe = paymentDetails.parse({ ...details, ...(rpcMethod.success ? { rpcMethod: rpcMethod.data } : {}),
+    rpcFailureCode: details.rpcFailureCode ?? (timeout ? 'TIMEOUT' : 'TRANSPORT_ERROR'),
+    ...(transport.success && transport.data ? { transportCode: transport.data } : {}) });
+  paymentFailures.set(target, { ...safe, ...paymentFailures.get(target) });
+  return target;
+}
+
+export function copyPaymentFailure(source: unknown, replacement: Error): Error {
+  if (source instanceof Error && paymentFailures.has(source)) paymentFailures.set(replacement, paymentFailures.get(source)!);
+  return replacement;
+}
 
 export const ControllerDiagnostic = z.object({
   target: z.literal('yosh_controller'), version: z.literal(1), callerId: z.uuid(),
@@ -43,6 +93,7 @@ export const ControllerDiagnostic = z.object({
     'CONTROLLER_RPC_FAILED', 'CONTROLLER_RECOVERY_REQUIRED', 'CONTROLLER_INPUT_INVALID']),
   endpoint: z.enum(['/pay/plan', '/pay/execute', '/pay/recover']).optional(),
   validationStage: validationStages.optional(),
+  ...paymentDetails.shape,
   unsignedFailureCode: unsignedFailureCodes.optional(),
   issues: z.array(z.object({ path: z.array(z.union([z.number().int().nonnegative(), z.string().refine(value => safeFields.has(value) || value === '[redacted]')])).max(16),
     code: z.enum(['invalid_type', 'invalid_value', 'invalid_format', 'too_big', 'too_small', 'unrecognized_keys', 'invalid_union', 'custom', 'other']),
@@ -76,12 +127,14 @@ export function controllerBackendDiagnostic(error: unknown) {
   const message = error instanceof Error ? error.message : '';
   const transportCode = ControllerDiagnostic.shape.transportCode.safeParse(error instanceof Error && 'code' in error ? error.code : undefined);
   const backendCode = ControllerDiagnostic.shape.backendCode.safeParse(message);
-  return { code: error instanceof z.ZodError ? 'CONTROLLER_INPUT_INVALID' as const
+  const details = error instanceof Error ? paymentFailures.get(error) : undefined;
+  return { code: details?.rpcFailureCode ? 'CONTROLLER_RPC_FAILED' as const : error instanceof z.ZodError ? 'CONTROLLER_INPUT_INVALID' as const
     : /RECOVERY_REQUIRED|RECOVERY_UNAVAILABLE/.test(message) ? 'CONTROLLER_RECOVERY_REQUIRED' as const
       : /BINDING|FENCED|MISMATCH|STALE/.test(message) ? 'CONTROLLER_BINDING_REJECTED' as const
         : /^RPC |PAY_RPC_/.test(message) ? 'CONTROLLER_RPC_FAILED' as const : 'CONTROLLER_INTERNAL_ERROR' as const,
     ...(transportCode.success && transportCode.data ? { transportCode: transportCode.data } : {}),
     ...(backendCode.success ? { backendCode: backendCode.data } : {}),
+    ...details,
     ...(error instanceof z.ZodError ? { backendCode: 'CONTROLLER_INPUT_INVALID' as const,
       ...(stages.has(error) ? { validationStage: stages.get(error) } : {}),
       ...(unsignedFailures.has(error) ? { unsignedFailureCode: unsignedFailures.get(error) } : {}),

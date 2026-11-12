@@ -1,3 +1,4 @@
+import { paymentFailure, type PaymentFailureStage } from '../payment/pay-controller-diagnostics';
 import type { ExternalExecutionPermit } from './execution-safety';
 import type { Trace } from '../demo/trace';
 import type { PaymentPayload, PaymentRequirements } from '@x402/core/types';
@@ -174,6 +175,7 @@ export async function executeApprovedPayment(ledger: PurchaseLedger, approvalId:
   const context: PaymentExecutionContext = { config: signerConfig, record, endpoint, beforeSign,
     ...(config.mode === 'live_mainnet' ? { production: purchaseSigningAuthorization(ledger, approvalId, signerConfig, endpoint, permit) } : {}) };
   let reconciliationStarted = false;
+  let stage: PaymentFailureStage = 'preparation';
   try {
     executor?.beginPreparation?.(context);
     checkPaymentBinding(record, config, endpoint);
@@ -182,11 +184,14 @@ export async function executeApprovedPayment(ledger: PurchaseLedger, approvalId:
       if (preflight.facilitator.feePayer !== record.quote.extra?.feePayer) throw new Error('Quote fee payer changed');
     }
     beforeSign(); trace('SIGNING');
+    stage = 'preparation';
     const { payload, lifetime } = await (executor ? executor.prepare(context) : prepareJavaScriptPayment(context));
+    stage = 'payload_persistence';
     ledger.savePayload(approvalId, payload, validate, originalEvidence(record, payload, signerConfig, lifetime), permit);
     trace('SIGNED');
     // Encode before committing the send marker. The guarded write and fetch call
     // are synchronous neighbors; pause/exit cannot start a new submission after acknowledgement.
+    stage = 'submission_prepare';
     const request = record.intent.httpRequest;
     const headers = { ...request?.headers, ...paymentSignatureHeaders(payload) };
     const init = { headers, ...(request ? { method: request.method, ...(request.body === undefined ? {} : { body: request.body }) } : {}),
@@ -194,6 +199,7 @@ export async function executeApprovedPayment(ledger: PurchaseLedger, approvalId:
     const submit = request?.access === 'https' ? await prepareSafeResourceFetch(endpoint, init) : () => fetch(endpoint, init);
     executor?.assertBeforeSubmission(context);
     ledger.markSubmissionAttempt(approvalId, validate, undefined, permit);
+    stage = 'submission';
     const pendingResponse = submit();
     trace('SUBMITTED');
     const response = await pendingResponse;
@@ -204,10 +210,12 @@ export async function executeApprovedPayment(ledger: PurchaseLedger, approvalId:
     const submitted = record.ownerCardMemberId ? ledger.getOwned(record.intent.idempotencyKey, record.ownerCardMemberId) : ledger.getLegacy(record.intent.idempotencyKey);
     observeDeliveryReceipt(ledger, submitted!, response, config);
     try {
+      stage = 'settlement_reconciliation';
       reconciliationStarted = true;
       await reconcileApprovedPayment(ledger, record.intent.idempotencyKey, config, trace, record.ownerCardMemberId);
       const paid = (record.ownerCardMemberId ? ledger.getOwned(record.intent.idempotencyKey, record.ownerCardMemberId) : ledger.getLegacy(record.intent.idempotencyKey))!;
       if (paid.status !== 'PAID') { await response.body?.cancel().catch(() => {}); throw new Error('Original transaction unresolved or failed'); }
+      stage = 'delivery';
       return await receiveOriginalDelivery(ledger, paid, response, config, endpoint, trace);
     } finally {
       // Persist the original delivery before this advisory subprocess can fail
@@ -218,14 +226,15 @@ export async function executeApprovedPayment(ledger: PurchaseLedger, approvalId:
           { code: 'PAY_PROTOCOL_OBSERVATION_FAILED' }); }
       }
     }
-  } catch {
+  } catch (error) {
     const original = ledger.savedOriginalPayment(approvalId);
     if (original?.state === 'SIGNED_NOT_SUBMITTED' || (!original && !ledger.savedPayload(approvalId))) ledger.failUnsubmitted(approvalId);
     else {
       ledger.unknown(approvalId);
       if (!reconciliationStarted) await reconcileApprovedPayment(ledger, record.intent.idempotencyKey, config, trace, record.ownerCardMemberId);
     }
-    throw new Error('Payment stopped; use the same task for reconciliation, never create a replacement payment');
+    throw paymentFailure(error, stage, record.intent.idempotencyKey,
+      new Error('Payment stopped; use the same task for reconciliation, never create a replacement payment'));
   }
 }
 

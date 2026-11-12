@@ -1,3 +1,4 @@
+import { rpcFailure, copyPaymentFailure } from './pay-controller-diagnostics';
 import { fetchRpcRead } from './rpc-read-transport';
 import { address, getAddressEncoder, getProgramDerivedAddress } from "@solana/kit";
 import { assertPaymentConfigExecutionEnabled, DEVNET_GENESIS, PAYMENT_AMOUNT, TOKEN_PROGRAM, type PaymentConfig } from "./payment-config";
@@ -64,10 +65,11 @@ export async function runPaymentPreflight(
     try {
       const request: RequestInit = { ...init, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS), redirect: "error" };
       const response = rpcMethod ? await fetchRpcRead(config.mode, rpcMethod, fetcher, url, request) : await fetcher(url, request);
-      if (!response.ok) throw new Error();
+      if (!response.ok) throw rpcMethod ? rpcFailure(new Error(), rpcMethod, { rpcHttpStatus: response.status, rpcFailureCode: 'HTTP_ERROR' }) : new Error();
       return object(await readPaymentJson(response));
-    } catch {
-      throw new Error(`${label} request failed or timed out`);
+    } catch (error) {
+      const failure = rpcMethod ? rpcFailure(error, rpcMethod) : error;
+      throw copyPaymentFailure(failure, new Error(`${label} request failed or timed out`));
     }
   }
   async function rpc(method: string, params: unknown[] = []): Promise<unknown> {
@@ -75,7 +77,7 @@ export async function runPaymentPreflight(
       method: "POST", headers: { "content-type": "application/json" },
       body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
     }, method);
-    if (response.error || !("result" in response)) throw new Error(`RPC ${method} returned an error`);
+    if (response.error || !("result" in response)) throw rpcFailure(new Error(`RPC ${method} returned an error`), method, { rpcFailureCode: response.error ? 'RPC_REJECTED' : 'INVALID_RESPONSE' });
     return response.result;
   }
 

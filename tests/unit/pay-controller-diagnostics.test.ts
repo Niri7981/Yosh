@@ -2,7 +2,7 @@ import { chmodSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from 'node:
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { z } from 'zod';
-import { parseControllerInput } from '../../src/modules/payment/pay-controller-diagnostics';
+import { parseControllerInput, paymentFailure, rpcFailure } from '../../src/modules/payment/pay-controller-diagnostics';
 import { expect, it } from 'vitest';
 import { controllerBackendDiagnostic, recordControllerDiagnostic } from '../../src/modules/payment/pay-controller-diagnostics';
 const identity = { target: 'yosh_controller', version: 1, callerId: '8c697f80-b9e3-43f9-bddb-6174416573b7',
@@ -26,6 +26,24 @@ it('refuses a diagnostics symlink', () => {
   try {
     symlinkSync(join(directory, 'other'), join(directory, 'pay-controller-diagnostics.jsonl'));
     expect(() => recordControllerDiagnostic(directory, { ...identity, code: 'CONTROLLED_PLAN_INVALID' })).toThrow();
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+it('persists inner RPC stage and purchase identity through a sanitized outer error', () => {
+  const source = rpcFailure(Object.assign(new Error('https://SECRET_RPC_URL/?token=SECRET'), { cause: { code: 'ETIMEDOUT' } }), 'getGenesisHash');
+  paymentFailure(source, 'preflight');
+  const failure = paymentFailure(source, 'preparation', 'pay_fixture', new Error('Payment stopped'));
+  const diagnostic = controllerBackendDiagnostic(failure);
+  expect(diagnostic).toMatchObject({ failureStage: 'preflight', failureCode: 'PAY_PREFLIGHT_FAILED', purchaseId: 'pay_fixture',
+    rpcMethod: 'getGenesisHash', rpcFailureCode: 'TIMEOUT', transportCode: 'ETIMEDOUT' });
+  const directory = mkdtempSync(join(tmpdir(), 'controller-diagnostics-')); chmodSync(directory, 0o700);
+  try {
+    recordControllerDiagnostic(directory, { ...identity, ...diagnostic, endpoint: '/pay/execute' });
+    const log = readFileSync(join(directory, 'pay-controller-diagnostics.jsonl'), 'utf8');
+    expect(JSON.parse(log)).toMatchObject(diagnostic);
+    expect(log).not.toContain('SECRET');
+    const unknown = controllerBackendDiagnostic(paymentFailure(rpcFailure(new Error('SECRET'), 'SECRET_METHOD'), 'preflight', 'SECRET/URL'));
+    expect(JSON.stringify(unknown)).not.toContain('SECRET');
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
