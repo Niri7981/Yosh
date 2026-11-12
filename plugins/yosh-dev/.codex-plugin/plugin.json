@@ -1,0 +1,28 @@
+{
+  "name": "yosh-dev",
+  "version": "0.1.0",
+  "description": "Isolated Yosh Dev authority and paid API workflows for Codex.",
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Yosh Dev",
+    "shortDescription": "Use paid API workflows with isolated Yosh Dev authority.",
+    "longDescription": "Connect Codex to Yosh Codex Plugin Dev for declared Offline test API discovery and registration, controlled purchases, spending status and original purchase delivery. Each registered API needs its own Grant. Simulation provides status only. No real funds, external API access or live networks. Requires the separate Dev app.",
+    "developerName": "Yosh",
+    "category": "Developer tools",
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
+    "brandColor": "#6582AA",
+    "composerIcon": "./assets/icon.png",
+    "logo": "./assets/icon.png",
+    "defaultPrompt": [
+      "Check my Yosh Dev connection and spending readiness.",
+      "Use Yosh Dev to discover and register a declared offline test API, without purchasing.",
+      "Read the original Yosh Dev purchase status and delivered result."
+    ]
+  },
+  "onboardingSkill": "./skills/connect-yosh/SKILL.md",
+  "requires_local_executor": true
+}
