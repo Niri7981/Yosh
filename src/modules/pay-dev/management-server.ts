@@ -1,3 +1,4 @@
+import { mainnetLocalGrants } from '../authority/mainnet-local-grants';
 import { recordControllerDiagnostic, controllerBackendDiagnostic, readControllerJson, parseControllerInput } from '../payment/pay-controller-diagnostics';
 import { createServer } from 'node:http';
 import { z } from 'zod';
@@ -24,9 +25,13 @@ import * as resource from '../../app/api/app/resources/[resourceId]/route';
 import * as agentDiscovery from '../../app/api/agent/discovery/route';
 import * as agentResources from '../../app/api/agent/resources/route';
 import * as agentQuote from '../../app/api/agent/quote/route';
+import * as agentPurchase from '../../app/api/agent/purchase/route';
+import * as agentDelivery from '../../app/api/agent/purchases/[purchaseId]/delivery/route';
 import * as agent from '../../app/api/agent/route';
-import { managementRoute } from '../app/management-auth';
+import { ManagementApiError, managementRoute } from '../app/management-auth';
 import { smallJson } from '../http/local-request';
+import { IS_CODEX_PLUGIN_DEVELOPMENT } from './profile';
+import { readPluginOfflineQuote } from './codex-plugin-resource-tools';
 
 
 /** Shared authenticated management server. The payment path stays in AppRuntime
@@ -35,14 +40,27 @@ export async function serveDevelopmentRuntime<T extends { memberId: string }>(op
   app: AppRuntime; origin: string; port: number; descriptor: T;
   authority?: ReturnType<typeof createPayAuthorityAdapter>;
   simulator?: { merchantOrigin: string };
+  localAuthorizationOnly?: boolean;
+  localAuthorizationLink?: () => string;
   cleanup(): Promise<void>;
 }) {
   const { app, origin, port, descriptor, authority, simulator } = options;
   type Handler = (request: Request) => Promise<Response>;
   const routes = new Map<string, Handler>([
+    ['POST /api/app/local-grants', request => mainnetLocalGrants(request, app)],
+    ['POST /api/app/local-authorization-link', request => managementRoute(request, true, async () => {
+      if (!options.localAuthorizationLink) throw new ManagementApiError('LOCAL_AUTHORIZATION_UNAVAILABLE', 404, 'Local setup is unavailable.');
+      return Response.json({ url: options.localAuthorizationLink() });
+    })],
+    ['GET /api/app/local-authorization-state', request => managementRoute(request, false, async () => {
+      if (!options.localAuthorizationLink) throw new ManagementApiError('LOCAL_AUTHORIZATION_UNAVAILABLE', 404, 'Local setup is unavailable.');
+      const state = app.memberOverview(descriptor.memberId);
+      return Response.json({ enabled: state.connection.enabled, connectionState: state.connection.integration?.state ?? 'disconnected', paused: state.budget.paused });
+    })],
     // Reuse the product's member-authenticated read. Payment entry stays Pay MCP.
     ['GET /api/agent', request => new URL(request.url).searchParams.get('operation') === 'status'
       ? agent.GET(request) : Promise.resolve(Response.json({ code: 'INVALID_OPERATION' }, { status: 400 }))],
+    ['GET /api/agent/purchase', agentPurchase.GET],
     ['GET /api/app/notifications', notifications.GET], ['GET /api/app/overview', overview.GET], ['GET /api/app/health', health.GET],
     ['PUT /api/app/settings', settings.PUT], ['PUT /api/app/grant', grant.PUT],
     ['GET /api/app/members', members.GET], ['POST /api/app/members', members.POST],
@@ -75,10 +93,26 @@ export async function serveDevelopmentRuntime<T extends { memberId: string }>(op
       for (const [name, value] of Object.entries(incoming.headers)) if (typeof value === 'string') headers.set(name, value);
       const request = new Request(url, { method, headers, ...(chunks.length ? { body: Buffer.concat(chunks) } : {}) });
       let response: Response;
-      if (simulator && url.pathname.startsWith('/api/paid/')) {
+      if (options.localAuthorizationOnly && url.pathname.startsWith('/api/app/') && method !== 'GET'
+        && !['/api/app/lifecycle','/api/app/local-authorization-link'].includes(url.pathname)) {
+        // In C, possession of the old same-user management file is not consent.
+        // Trusted confirmation commits in-process; no generic HTTP write bypass.
+        response = await managementRoute(request, true, async () => {
+          throw new ManagementApiError('LOCAL_AUTHORIZATION_REQUIRED', 403, '请在本地授权页完成系统确认。');
+        });
+      } else if (simulator && url.pathname.startsWith('/api/paid/')) {
         response = await fetch(`${simulator.merchantOrigin}${url.pathname}${url.search}`, {
           method, headers: { ...Object.fromEntries(headers), host: new URL(simulator.merchantOrigin).host },
           ...(chunks.length ? { body: Buffer.concat(chunks) } : {}), redirect: 'error', signal: AbortSignal.timeout(15000) });
+      } else if (IS_CODEX_PLUGIN_DEVELOPMENT && simulator && method === 'POST'
+        && url.pathname === '/api/agent/quote') {
+        let principal;
+        try { principal = app.authenticateAgent(request); }
+        catch { outgoing.writeHead(401, { 'content-type': 'application/json' }); outgoing.end(JSON.stringify({ code: 'AGENT_UNAUTHORIZED' })); return; }
+        try { response = Response.json(await readPluginOfflineQuote(app, origin, await smallJson(request), principal),
+          { headers: { 'cache-control': 'no-store' } }); }
+        catch (error) { response = Response.json({ code: error instanceof z.ZodError ? 'OFFLINE_FIXTURE_INPUT_INVALID' : 'OFFLINE_RESOURCE_TOOL_UNAVAILABLE',
+          testOnly: true, paymentSent: false, spendingAuthorityCreated: false }, { status: 422 }); }
       } else if (url.pathname === '/api/agent/session' && method === 'POST') {
         app.observeMcpSession(request, McpSessionEventSchema.parse(await smallJson(request)));
         response = Response.json({ ok: true });
@@ -103,9 +137,12 @@ export async function serveDevelopmentRuntime<T extends { memberId: string }>(op
         }
       } else {
         const handler = routes.get(`${method} ${url.pathname}`);
+        const deliveryPath = /^\/api\/agent\/purchases\/([a-zA-Z0-9_-]{1,80})\/delivery$/.exec(url.pathname);
         const dynamic = /^\/api\/app\/members\/([a-f0-9-]{36})(?:\/(grant|connection))?$/.exec(url.pathname);
         const resourcePath = /^\/api\/app\/resources\/([a-z0-9][a-z0-9._-]{0,119})$/.exec(url.pathname);
         if (handler) response = await handler(request);
+        else if (deliveryPath && method === 'GET') response = await agentDelivery.GET(request,
+          { params: Promise.resolve({ purchaseId: deliveryPath[1] }) });
         else if (resourcePath && ['GET', 'PUT'].includes(method)) {
           const context = { params: Promise.resolve({ resourceId: resourcePath[1] }) };
           response = await (method === 'GET' ? resource.GET(request, context) : resource.PUT(request, context));

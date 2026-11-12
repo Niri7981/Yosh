@@ -9,7 +9,7 @@ import { PAY_DEVELOPMENT_PROFILE } from './profile';
 
 /** Real product runtime in a distinct test store. This path does not install a
  * simulator, replace fetch, copy a signer, provision a wallet or enable Mainnet. */
-export async function startLiveDevnetDevelopmentBackend(options: { directory: string; port?: number }) {
+export async function startLiveDevnetDevelopmentBackend(options: { directory: string; port?: number; localAuthorizationOnly?: boolean; localAuthorizationLink?: () => string; afterClose?: () => Promise<void> }) {
   const devnet = isDevnetDevelopment(options.directory);
   const simulated = isSimulatedDevelopment(options.directory);
   if (!devnet && !simulated) throw new Error('PAY_DEVELOPMENT_ENVIRONMENT_REJECTED');
@@ -34,7 +34,7 @@ export async function startLiveDevnetDevelopmentBackend(options: { directory: st
     renameSync(temporary, join(options.directory, devnet ? 'pay-devnet-runtime.json' : 'pay-simulated-runtime.json'));
     const folder = openSync(options.directory, 'r');
     try { fsyncSync(folder); } finally { closeSync(folder); }
-    return await serveDevelopmentRuntime({ app, origin, port, descriptor, async cleanup() { globals.__yosh = previous; } });
+    return await serveDevelopmentRuntime({ app, origin, port, descriptor, localAuthorizationOnly: options.localAuthorizationOnly, localAuthorizationLink: options.localAuthorizationLink, async cleanup() { await options.afterClose?.(); globals.__yosh = previous; } });
   } catch (error) {
     await app.prepareQuit(); app.close(); globals.__yosh = previous; throw error;
   }
