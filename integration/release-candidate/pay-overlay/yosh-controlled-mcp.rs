@@ -173,7 +173,11 @@ fn unsigned_preflight(input: Value) -> Result<Value, &'static str> {
     let payer = solana_pubkey::Pubkey::from_str(&input.payer).map_err(|_| "INVALID_PAYER")?;
     let rpc = pay_kit::x402::solana_rpc_client::rpc_client::RpcClient::new_with_timeout(input.rpc_url, Duration::from_secs(5));
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|_| "RUNTIME_UNAVAILABLE")?;
-    let transaction = runtime.block_on(pay_kit::x402::client::exact::prepare_unsigned_payment(&payer, &rpc, &requirement, None)).map_err(|_| "UNSIGNED_PREPARE_FAILED")?;
+    // The Yosh custody validator and signer currently accept V0 transactions.
+    // Advertise that ceiling without rewriting the merchant's accepted offer.
+    let transaction = runtime.block_on(pay_kit::x402::client::exact::prepare_unsigned_payment(
+        &payer, &rpc, &requirement, Some(pay_kit::core::tx::TxVersion::V0),
+    )).map_err(|_| "UNSIGNED_PREPARE_FAILED")?;
     if transaction.signatures.iter().any(|v| v.as_ref().iter().any(|b| *b != 0)) { return Err("SIGNED_TRANSACTION_FORBIDDEN"); }
     let transaction = pay_kit::core::tx::encode(&transaction).map_err(|_| "WIRE_ENCODING_FAILED")?;
     Ok(json!({"accepted": accepted, "unsigned": {"transaction": transaction, "recentBlockhash": input.lifetime.recent_blockhash, "lastValidBlockHeight": height.to_string()}}))
@@ -337,5 +341,119 @@ mod bridge_diagnostics_tests {
         let error = bridge(response(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}"))
             .plan(&request).err().unwrap().to_string();
         assert!(error.contains("CONTROLLED_PLAN_INVALID"));
+    }
+}
+
+// Exercise the prepared Pay module as well as this binary's preflight entry.
+// Both paths must respect the transaction formats the Yosh custody host accepts.
+#[cfg(test)]
+use pay_mcp::authority;
+#[cfg(test)]
+#[path = "../controlled.rs"]
+mod controlled;
+
+#[cfg(test)]
+mod custody_version_tests {
+    use super::*;
+    use pay_kit::core::tx::{self, TxVersion};
+    use std::{io::Write, sync::atomic::{AtomicUsize, Ordering}};
+
+    fn envelope(versions: &[u8]) -> Value {
+        json!({"x402Version":2,"resource":{"url":"https://example.com/data"},
+            "accepts":[{"scheme":"exact","network":"solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+                "asset":"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v","amount":"1000",
+                "payTo":"J7aN3PLJnTCF5qpEnvJHJsnCjcGuqC2rYtEM8Gv3xwg","maxTimeoutSeconds":60,
+                "extra":{"decimals":6,"transactionVersions":versions}}]})
+    }
+
+    fn rpc() -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut request = Vec::new();
+            loop {
+                let mut chunk = [0; 1024];
+                let len = socket.read(&mut chunk).unwrap();
+                assert!(len > 0 && request.len() + len <= 8192);
+                request.extend_from_slice(&chunk[..len]);
+                if let Some(end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
+                    let header = String::from_utf8_lossy(&request[..end]);
+                    let length: usize = header.lines().find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length").then(|| value.trim().parse().unwrap())
+                    }).unwrap();
+                    if request.len() >= end + 4 + length {
+                        let input: Value = serde_json::from_slice(&request[end + 4..]).unwrap();
+                        assert_eq!(input["method"], "isBlockhashValid");
+                        break;
+                    }
+                }
+            }
+            let body = r#"{"jsonrpc":"2.0","id":0,"result":{"context":{"slot":1},"value":true}}"#;
+            write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+        });
+        url
+    }
+
+    fn assert_unsigned_v0(wire: &str) {
+        let transaction = tx::decode(wire).unwrap();
+        assert_eq!(TxVersion::of(&transaction.message).unwrap(), TxVersion::V0);
+        assert!(transaction.signatures.iter().all(|s| s.as_ref().iter().all(|b| *b == 0)));
+    }
+
+    #[test]
+    fn preflight_uses_only_versions_the_custody_host_accepts() {
+        assert_eq!(std::env::var("NODE_ENV").as_deref(), Ok("test"));
+        for versions in [&[0, 1][..], &[0][..], &[1][..]] {
+            let payment_required = envelope(versions);
+            let result = unsigned_preflight(json!({"payer":"11111111111111111111111111111111",
+                "rpcUrl":rpc(),"lifetime":{"recentBlockhash":"11111111111111111111111111111111","lastValidBlockHeight":"5000"},
+                "url":"https://example.com/data","paymentRequired":payment_required}));
+            if versions == [1] {
+                assert_eq!(result.unwrap_err(), "UNSIGNED_PREPARE_FAILED");
+            } else {
+                let result = result.unwrap();
+                assert_unsigned_v0(result["unsigned"]["transaction"].as_str().unwrap());
+                assert_eq!(result["accepted"], payment_required["accepts"][0]);
+            }
+        }
+    }
+
+    struct Controller { rpc_url: String, executes: AtomicUsize }
+    impl controlled::ControlledExecution for Controller {
+        fn plan(&self, _: &controlled::ControlledRequest) -> pay_core::Result<controlled::ExecutionPlan> {
+            Ok(controlled::ExecutionPlan::Build { payer: "11111111111111111111111111111111".into(),
+                rpc_url: self.rpc_url.clone(), lifetime: Some(controlled::ControlledLifetime {
+                    recent_blockhash: "11111111111111111111111111111111".into(), last_valid_block_height: 5000 }) })
+        }
+        fn execute(&self, request: &controlled::ControlledRequest, unsigned: controlled::UnsignedPayment) -> pay_core::Result<controlled::ControlledResponse> {
+            self.executes.fetch_add(1, Ordering::SeqCst);
+            assert_unsigned_v0(&unsigned.transaction);
+            assert_eq!(request.spend.accepted, request.payment_required["accepts"][0]);
+            Ok(controlled::ControlledResponse { status: 200, headers: vec![], body: b"fixture".to_vec() })
+        }
+    }
+
+    #[test]
+    fn controlled_purchase_uses_v0_and_rejects_v1_only_before_execute() {
+        for versions in [&[0, 1][..], &[0][..], &[1][..]] {
+            let raw = envelope(versions);
+            let challenge = pay_core::client::x402::parse(&[], Some(&raw.to_string())).unwrap();
+            let controller = Controller { rpc_url: rpc(), executes: AtomicUsize::new(0) };
+            let spend = SpendRequest { operation_id: "fixture".into(), attempt_id: "fixture".into(), caller_id: "fixture".into(),
+                request: authority::ImmutableRequest { method: "GET".into(), url: "https://example.com/data".into(), headers: vec![], body: None },
+                amount_atomic: "1000".into(), asset: challenge.requirements.currency.clone(), network: challenge.requirements.network.clone(),
+                recipient: challenge.requirements.recipient.clone(), accepted: raw["accepts"][0].clone(), execution_network: "mainnet".into() };
+            let result = controlled::run(&controller, spend, Some(raw), &challenge);
+            if versions == [1] {
+                assert!(result.err().unwrap().to_string().contains("UNSIGNED_PREPARE_FAILED"));
+                assert_eq!(controller.executes.load(Ordering::SeqCst), 0);
+            } else {
+                assert!(result.is_ok(), "versions {versions:?}: {}", result.err().unwrap());
+                assert_eq!(controller.executes.load(Ordering::SeqCst), 1);
+            }
+        }
     }
 }
