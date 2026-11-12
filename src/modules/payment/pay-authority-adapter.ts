@@ -16,6 +16,7 @@ import { assertPayControlledExtensions } from './resource-challenge';
 import { preparePayUnsigned } from './pay-unsigned-preflight';
 import { readPayLifetime } from './mainnet-pay-execution';
 import { isDevnetDevelopment } from '../pay-dev/environment';
+import type { OfflineResourcePolicy } from '../pay-dev/offline-resource-policy';
 
 /** Shared deterministic lookup; never creates or reserves a purchase. */
 export const payOperationPurchaseId = (caller: string, operation: string) => `pay_${hash([caller, operation]).slice(0,60)}`;
@@ -32,12 +33,24 @@ type Attempt = { facts: Facts; digest: string; generation: number; purchaseId: s
  * reconciliation own the decision. Mainnet requires explicit production
  * enablement and the product Grant bound atomically to each new purchase. */
 export function createPayAuthorityAdapter(options: { directory: string; runtime: () => AppRuntime; config: () => PaymentConfig;
-  executor: PaymentExecutor; origin: string; rpcUrl: string; mainnet?: true; devnet?: true }) {
+  executor: PaymentExecutor; origin: string; rpcUrl: string; mainnet?: true; devnet?: true; offlineResources?: OfflineResourcePolicy }) {
   if (options.mainnet && options.devnet) throw new Error('PAY_NETWORK_CONFIGURATION_CONFLICT');
   if (options.devnet) {
     if (process.env.YOSH_PAY_MCP_DEVNET !== '1' || !isDevnetDevelopment(options.directory)) throw new Error('PAY_DEVNET_CONFIGURATION_REQUIRED');
   } else if (!options.mainnet) assertIsolatedPaymentDirectory(options.directory);
   const liveNetwork = options.mainnet || options.devnet;
+  const registeredCandidates = (request: Facts['request'], config: PaymentConfig) => {
+    const resources = options.offlineResources ? options.runtime().ledger.resources.active() : config.registeredResources ?? [];
+    return resources.filter(resource => {
+      try {
+        options.offlineResources?.assertResource(resource);
+        assertAuthorizedRequestInstance({ ...resource, request: { ...resource.request,
+          headers: { ...resource.request.headers, accept: resource.request.headers.accept ?? 'application/json' } } }, {
+          method: request.method, url: request.url, headers: Object.fromEntries(request.headers), access: resource.request.access });
+        return true;
+      } catch { return false; }
+    });
+  };
   options.runtime().ledger.executionSafety.enable(Date.now());
   const attempts = new Map<string, Attempt>();
   const pending = new Map<string, string>();
@@ -52,7 +65,9 @@ export function createPayAuthorityAdapter(options: { directory: string; runtime:
     options.runtime().ledger.assertCardMemberActive(principal.cardMemberId);
     if (facts.request.headers.some(([name, value]) => name !== 'accept' || value !== 'application/json')
       || new Set(facts.request.headers.map(([name]) => name)).size !== facts.request.headers.length) throw new Error('PAY_REQUEST_HEADERS_REJECTED');
-    const config = options.config();
+    const baseConfig = options.config();
+    const registered = liveNetwork || Boolean(options.offlineResources?.includesUrl(facts.request.url));
+    const config = registered && options.offlineResources ? { ...baseConfig, registeredResources: registeredCandidates(facts.request, baseConfig) } : baseConfig;
     if (options.devnet && (process.env.YOSH_PAY_MCP_DEVNET !== '1' || !isDevnetDevelopment(options.directory)))
       throw new Error('PAY_DEVNET_CONFIGURATION_REQUIRED');
     if (options.mainnet ? process.env.YOSH_PAY_MCP_MAINNET !== '1' || config.mode !== 'live_mainnet' || !config.productionExecutionEnabled
@@ -61,7 +76,7 @@ export function createPayAuthorityAdapter(options: { directory: string; runtime:
       throw new Error('PAY_PRODUCTION_BLOCKED');
     if (facts.asset !== config.mint || facts.network !== config.network) throw new Error('PAY_ECONOMIC_FACTS_MISMATCH');
     let requestInput: { query: Record<string,string> } | undefined;
-    const candidates = liveNetwork ? (config.registeredResources ?? []).filter(resource => {
+    const candidates = registered ? (config.registeredResources ?? []).filter(resource => {
       try {
         const target = new URL(facts.request.url);
         const names = resourceInputNames(resource.requestInputs?.query);
@@ -69,12 +84,12 @@ export function createPayAuthorityAdapter(options: { directory: string; runtime:
         const policy = { ...resource, request: { ...resource.request,
           headers: { ...resource.request.headers, accept: resource.request.headers.accept ?? 'application/json' } } };
         const instance = assertAuthorizedRequestInstance(policy, { method: facts.request.method, url: facts.request.url,
-          headers: Object.fromEntries(facts.request.headers), access: 'https' });
+          headers: Object.fromEntries(facts.request.headers), access: options.offlineResources ? resource.request.access : 'https' });
         if (instance.body !== undefined) return false;
         requestInput = { query }; return true;
       } catch { return false; }
     }) : [];
-    const resourceId = liveNetwork ? candidates.length === 1 ? candidates[0].resourceId : undefined
+    const resourceId = registered ? candidates.length === 1 ? candidates[0].resourceId : undefined
       : (['market-snapshot', 'market-analysis', 'token-risk-report'] as const).find(id => new URL(paidResource(id).path, options.origin).href === facts.request.url);
     // Pay preserves the SDK-selected source envelope. Reconstructing it from
     // request.url + accepted would discard route metadata and extensions.
@@ -85,7 +100,8 @@ export function createPayAuthorityAdapter(options: { directory: string; runtime:
     const quote = matches[0];
     if (quote.amount !== facts.amount_atomic || quote.network !== facts.network || quote.asset !== facts.asset || quote.payTo !== facts.recipient
       || hash(quote) !== hash(facts.accepted)) throw new Error('PAY_ECONOMIC_FACTS_MISMATCH');
-    return { facts, config, resourceId, challenge, requestInput };
+    return { facts, config, resourceId, challenge, requestInput, registered,
+      requestAccess: candidates[0]?.request.access ?? 'test_loopback' as const };
   };
   const purchaseId = payOperationPurchaseId;
   const get = (raw: unknown, principal: SpendPrincipal) => {
@@ -172,12 +188,16 @@ export function createPayAuthorityAdapter(options: { directory: string; runtime:
       const existing = options.runtime().ledger.getOwned(id, principal.cardMemberId);
       if (!existing && options.runtime().ledger.executionSafety.hasExternalAuthorityClaim(principal.cardMemberId, spend.operation_id))
         throw new Error('PAY_ORIGINAL_OUTCOME_UNRESOLVED');
-      if (!existing && liveNetwork) {
+      if (!existing && (liveNetwork || options.offlineResources?.includesUrl(spend.request.url))) {
+        if (options.offlineResources) {
+          if (registeredCandidates(spend.request, config).length !== 1) throw new Error('PAY_RESOURCE_NOT_REGISTERED');
+        } else {
         const resources = (config.registeredResources ?? []).filter(resource => {
           try { assertAuthorizedRequestInstance({ ...resource, request: { ...resource.request, headers: { ...resource.request.headers, accept: resource.request.headers.accept ?? 'application/json' } } }, { method: spend.request.method, url: spend.request.url,
             headers: Object.fromEntries(spend.request.headers), access: 'https' }); return true; } catch { return false; }
         });
         if (resources.length !== 1) throw new Error('PAY_RESOURCE_NOT_REGISTERED');
+        }
       }
       if (existing?.status === 'APPROVED') throw new Error('PAY_DURABLE_RECOVERY_REQUIRED');
       if (pending.has(spend.attempt_id) || attempts.has(spend.attempt_id)) throw new Error('PAY_ATTEMPT_REUSED');
@@ -198,7 +218,7 @@ export function createPayAuthorityAdapter(options: { directory: string; runtime:
     },
     authorize(raw: unknown, principal: SpendPrincipal) {
       return options.runtime().runExternalPaymentOperation(async () => {
-        const { facts, config, resourceId, challenge, requestInput } = parse(raw, principal);
+        const { facts, config, resourceId, challenge, requestInput, registered, requestAccess } = parse(raw, principal);
         if (attempts.has(facts.attempt_id)) throw new Error('PAY_ATTEMPT_REUSED');
         const epoch = generation;
         const id = purchaseId(principal.cardMemberId, facts.operation_id);
@@ -225,11 +245,11 @@ export function createPayAuthorityAdapter(options: { directory: string; runtime:
         // reserves against its immutable ID/version. An old operator acceptance
         // file is historical test evidence, not product spending authority.
         const result = await requestPaidResourcePurchase({ requestId: id, resourceId, reason: 'Pay MCP API purchase',
-          ...(liveNetwork ? { request: requestInput } : {}) }, {
+          ...(registered ? { request: requestInput } : {}) }, {
           config, ledger, origin: options.origin, principal, execute: true, deferExecution: true,
           externalSelectedQuote: facts.accepted,
-          ...(liveNetwork ? { externalQuote: challenge, externalRequest: { method: facts.request.method, url: facts.request.url,
-            headers: Object.fromEntries(facts.request.headers), access: 'https' as const } } : {}),
+          ...(registered ? { externalQuote: challenge, externalRequest: { method: facts.request.method, url: facts.request.url,
+            headers: Object.fromEntries(facts.request.headers), access: requestAccess } } : {}),
           externalExecution: {callerId: principal.cardMemberId, operationId: facts.operation_id, attemptId: facts.attempt_id,
             factsHash: hash(facts), requestHash: hash(facts.request), quoteHash: hash(facts.accepted)},
           fetcher: async (url, init) => {
@@ -268,7 +288,7 @@ export function createPayAuthorityAdapter(options: { directory: string; runtime:
         const { attempt, record, config } = get(raw, principal);
         if (attempt.phase !== 'authorized' || record.status !== 'APPROVED') throw new Error('PAY_OPERATION_ALREADY_STARTED');
         const value = parseControllerInput(PreparedSchema, { ok: true, ...parseControllerInput(z.object({ transaction: z.string(), recentBlockhash: z.string(), lastValidBlockHeight: z.string() }).strict(), prepared, 'execute_unsigned') }, 'execute_unsigned');
-        if (liveNetwork && (!attempt.lifetime || value.recentBlockhash !== attempt.lifetime.recentBlockhash
+        if ((liveNetwork || (options.offlineResources && !record.intent.resourcePath)) && (!attempt.lifetime || value.recentBlockhash !== attempt.lifetime.recentBlockhash
           || value.lastValidBlockHeight !== attempt.lifetime.lastValidBlockHeight)) throw new Error('PAY_BLOCKHASH_BINDING_MISMATCH');
         attempt.phase = 'executing';
         unsigned.set(record.approvalId, value);

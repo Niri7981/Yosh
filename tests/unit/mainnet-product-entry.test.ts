@@ -1,3 +1,5 @@
+import { startLocalAuthorization } from '../../src/modules/authority/local-authorization-server';
+import { mainnetLocalGrants } from '../../src/modules/authority/mainnet-local-grants';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -36,6 +38,7 @@ vi.mock('../../src/modules/payment/solana-payment', async original => ({ ...awai
 vi.mock('../../src/modules/payment/reconcile-transaction', () => ({ reconcileStoredOriginalPayment: vi.fn().mockResolvedValue({ status: 'UNKNOWN' }) }));
 const context = vi.hoisted(() => ({ app: undefined as AppRuntime | undefined }));
 vi.mock('../../src/modules/app/app-runtime', async original => ({ ...await original<typeof import('../../src/modules/app/app-runtime')>(), appRuntime: () => context.app! }));
+const browserFetch = globalThis.fetch;
 const origin = 'http://127.0.0.1:3049';
 const secret = 'fixture-management-secret-32-bytes';
 const dirs: string[] = [];
@@ -436,4 +439,84 @@ it('runtime resource selection survives an App backend restart and ignores later
   expect(restarted.inspectRegisteredResource(id)).toEqual(before);
   expect((await restarted.overview()).service.registeredResources.some(resource => resource.resourceId === id)).toBe(true);
   expect(restarted.spendGrantSummary()).toBeNull(); expect(restarted.ledger.listForAdministration()).toHaveLength(0);
+});
+
+it('adds frozen mainnet web grants while preserving the original App grant and purchase entry', async () => {
+  const f = await fixture(); await f.daily(); await f.grant();
+  const memberId = readConnection(f.dir).cardMemberId!;
+  const old = f.app.memberOverview(memberId).grant;
+  const controls = f.app.ledger.managedSummary(Date.now(), 'live_mainnet');
+  const connection = readConnection(f.dir);
+  const frozen = await f.app.freezeLocalGrant({ resourceId: f.resource.resourceId, totalLimit: '100000', singleLimit: '10000', expiresAt: Date.now() + 3600000 }, memberId, 'a'.repeat(64));
+  expect(frozen.request).toMatchObject({ payerWallet: f.signer.address, environment: 'mainnet', binding: { mode: 'live_mainnet', scope: { network: f.resource.network, payTo: f.resource.recipient } } });
+  const wrongWallet = f.app.ledger.localGrantApprovals().freeze({ ...frozen.request, payerWallet: f.resource.recipient }, Date.now());
+  expect(() => f.app.commitLocalGrant({ requestId: wrongWallet.request.id, digest: wrongWallet.digest }, 'a'.repeat(64))).toThrow('LOCAL_AUTHORIZATION_CONTENT_CHANGED');
+  expect(f.app.memberOverview(memberId).grant?.id).toBe(old?.id);
+  await f.app.commitLocalGrant({ requestId: frozen.request.id, digest: frozen.digest }, 'a'.repeat(64));
+  expect(f.app.ledger.localGrantApprovals().read(frozen.request.id).state).toBe('CONSUMED');
+  expect(readConnection(f.dir)).toEqual(connection);
+  expect(f.app.ledger.managedSummary(Date.now(), 'live_mainnet')).toEqual(controls);
+  expect(f.app.ledger.listForAdministration()).toHaveLength(0);
+  await expect(Promise.resolve().then(() => f.app.commitLocalGrant({ requestId: frozen.request.id, digest: frozen.digest }, 'a'.repeat(64)))).rejects.toThrow();
+  await f.grant(); // The original native App route remains compatible.
+  expect((await f.call('native-after-web')).status).toBe(200);
+  expect(prepareSolanaPayment).toHaveBeenCalledTimes(1);
+});
+it('rejects web grants after agent revocation without replacing the previous grant', async () => {
+  const f = await fixture(); await f.grant();
+  const memberId = readConnection(f.dir).cardMemberId!;
+  const frozen = await f.app.freezeLocalGrant({ resourceId: f.resource.resourceId, totalLimit: '100000', singleLimit: '10000', expiresAt: Date.now() + 3600000 }, memberId, 'a'.repeat(64));
+  f.app.setAgentConnection(false, origin);
+  await expect(Promise.resolve().then(() => f.app.commitLocalGrant({ requestId: frozen.request.id, digest: frozen.digest }, 'a'.repeat(64)))).rejects.toThrow();
+  expect(f.app.ledger.localGrantApprovals().read(frozen.request.id).state).toBe('PENDING');
+  expect(prepareSolanaPayment).not.toHaveBeenCalled();
+});
+it('requires management authentication and the original browser session for mainnet web grants', async () => {
+  const f = await fixture();
+  const memberId = readConnection(f.dir).cardMemberId!;
+  const url = origin + '/api/app/local-grants';
+  const body = { action: 'freeze', memberId, sessionHash: 'a'.repeat(64), draft: { resourceId: f.resource.resourceId, totalLimit: '100000', singleLimit: '10000', expiresAt: Date.now() + 3600000 } };
+  const call = (input: object) => mainnetLocalGrants(signedManagementRequest(url, secret, { method: 'POST', headers: { origin, 'content-type': 'application/json' }, body: JSON.stringify(input) }), f.app);
+  expect((await mainnetLocalGrants(new Request(url, { method: 'POST', headers: { origin, 'content-type': 'application/json', authorization: 'Bearer ' + readConnection(f.dir).token }, body: JSON.stringify(body) }), f.app)).status).toBe(401);
+  const response = await call(body); expect(response.status).toBe(200);
+  const frozen = await response.json();
+  const changedSession = await call({ action: 'commit', memberId, sessionHash: 'b'.repeat(64), id: frozen.request.id, digest: frozen.digest });
+  expect(changedSession.status).toBe(400);
+  expect(f.app.memberOverview(memberId).grant).toBeNull();
+  const commit = { action: 'commit', memberId, sessionHash: body.sessionHash, id: frozen.request.id, digest: frozen.digest };
+  expect((await call(commit)).status).toBe(200);
+  const grantId = f.app.memberOverview(memberId).grant?.id;
+  expect((await call(commit)).status).toBe(200);
+  expect(f.app.memberOverview(memberId).grant?.id).toBe(grantId);
+});
+
+it('routes mainnet web requests through trusted confirmation and never forwards test controls', async () => {
+  const f = await fixture();
+  const memberId = readConnection(f.dir).cardMemberId!;
+  let confirmations = 0, declined = true;
+  const web = await startLocalAuthorization({ app: f.app, memberId,
+    confirm: async request => { expect(request.environment).toBe('mainnet'); confirmations++; if (declined) throw new Error('LOCAL_CONFIRMATION_DECLINED'); },
+    mainnet: async (sessionHash, input) => {
+      const response = await mainnetLocalGrants(signedManagementRequest(origin + '/api/app/local-grants', secret, {
+        method: 'POST', headers: { origin, 'content-type': 'application/json' }, body: JSON.stringify({ ...input, memberId, sessionHash }),
+      }), f.app);
+      const result = await response.json(); if (!response.ok) throw new Error(result.code); return result;
+    } });
+  try {
+    const session = await browserFetch(web.origin + '/session', { method: 'POST', headers: { origin: web.origin, 'content-type': 'application/json' }, body: JSON.stringify({ token: new URL(web.createLink()).hash.slice(1) }) });
+    const { token } = await session.json();
+    const call = (path: string, body: object) => browserFetch(web.origin + path, { method: 'POST', headers: { origin: web.origin, 'content-type': 'application/json', authorization: 'Bearer ' + token, 'x-yosh-environment': 'mainnet' }, body: JSON.stringify(body) });
+    expect((await call('/controls/requests', { type: 'pause', paused: false })).status).toBe(400);
+    const prepared = await call('/requests', { resourceId: f.resource.resourceId, total: '0.1', single: '0.01', hours: 1 });
+    expect(prepared.status).toBe(201); const { request } = await prepared.json();
+    expect((await call('/confirm', { id: request.id })).status).toBe(400);
+    expect(f.app.memberOverview(memberId).grant).toBeNull();
+    declined = false;
+    expect((await call('/confirm', { id: request.id })).status).toBe(200);
+    const grantId = f.app.memberOverview(memberId).grant?.id;
+    expect((await call('/confirm', { id: request.id })).status).toBe(200);
+    expect(confirmations).toBe(2);
+    expect(f.app.memberOverview(memberId).grant?.id).toBe(grantId);
+    expect(f.app.ledger.listForAdministration()).toHaveLength(0);
+  } finally { await web.close(); }
 });

@@ -14,6 +14,7 @@ import type { PurchaseStatus } from './purchase-state';
 import { hash } from './spending-policy';
 import { resourcePaymentBinding } from '../payment/resource-challenge';
 import { TEST_CACHED_DELIVERY } from '../resources/delivery-capability';
+import { IS_CODEX_PLUGIN_DEVELOPMENT } from '../pay-dev/profile';
 
 export const PurchaseRequestInputSchema = z.object({
   requestId: z.string().regex(/^[a-zA-Z0-9_-]{1,80}$/),
@@ -110,7 +111,8 @@ export async function requestPaidResourcePurchase(raw: unknown, options: {
   const request = options.externalExecution ? { ...quotedRequest, headers: { accept: 'application/json' } } : quotedRequest;
   const descriptor = paidResource(input.resourceId);
   const now = clock();
-  const authority = options.ledger.spendAuthorityForDecision(principal, PAID_RESOURCE_PURCHASE_OPERATION, now, executionMode);
+  const authority = options.ledger.spendAuthorityForDecision(principal, PAID_RESOURCE_PURCHASE_OPERATION, now, executionMode,
+    IS_CODEX_PLUGIN_DEVELOPMENT ? PAID_RESOURCE_SCOPE_ID : undefined);
   const intent = SpendIntentSchema.parse({ id: randomUUID(), idempotencyKey: input.requestId, requestHash,
     resourceId: descriptor.id, resourceScopeId: PAID_RESOURCE_SCOPE_ID, resourcePath: descriptor.path,
     httpRequest: request, x402Challenge: challenge, deliveryRecovery: TEST_CACHED_DELIVERY,
