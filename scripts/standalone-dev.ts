@@ -35,7 +35,8 @@ const Manifest = z.object({ kind: z.literal(runtimeKind), apiVersion: z.literal(
   dataContract: z.literal(SCHEMA_CONTRACT), productionEnabled: z.literal(false),
   files: z.record(z.string(), z.string().regex(/^[a-f0-9]{64}$/)) }).passthrough();
 const runtimeFiles = ['node', 'standalone.cjs', 'mcp.cjs', 'pay-mcp', 'pay-protocol-engine', 'offline.sb',
-  ...(local ? ['local-mcp.cjs', 'mainnet-launch.mjs', 'mainnet-launch.sh', 'yosh-confirm', 'spirit-design-sheet.png', 'instrument-serif.woff2', 'Instrument-Serif-OFL.txt'] : [])];
+  ...(local ? ['local-mcp.cjs', 'mainnet.cjs', 'mainnet-mcp.cjs', 'mainnet-manifest.json', 'mainnet.sb',
+    'yosh-confirm', 'spirit-design-sheet.png', 'instrument-serif.woff2', 'Instrument-Serif-OFL.txt'] : [])];
 
 function privateDirectory(path: string) {
   const stat = lstatSync(path);

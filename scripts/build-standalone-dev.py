@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build an uninstalled, Offline-only runtime without a Yosh App shell.
+"""Build uninstalled standalone Offline or local authorization runtimes.
 
 Node and Rust inputs come from a verified dependency-only build, or explicitly
 from a legacy Dev artifact. No installed App or wallet is read.
@@ -48,11 +48,18 @@ def main():
     shutil.copy2(provenance, output / 'dependency-provenance.json')
     env = {key: os.environ[key] for key in ['HOME', 'PATH', 'TMPDIR', 'LANG'] if key in os.environ}
     inputs = {}
-    for source_name, name in [('standalone-dev.ts', 'standalone.cjs'), ('pay-dev-mcp.ts', 'mcp.cjs'), *([('local-plugin-mcp.ts', 'local-mcp.cjs')] if args.local_authorization else [])]:
+    entries = [('standalone-dev.ts', 'standalone.cjs', False), ('pay-dev-mcp.ts', 'mcp.cjs', False)]
+    if args.local_authorization:
+        entries += [('local-plugin-mcp.ts', 'local-mcp.cjs', False),
+                    ('mainnet-standalone.ts', 'mainnet.cjs', True), ('pay-dev-mcp.ts', 'mainnet-mcp.cjs', True)]
+    for source_name, name, mainnet in entries:
         metadata = output / (name + '.inputs.json')
         subprocess.run([str(runtime / 'node'), str(ROOT / 'node_modules/esbuild/bin/esbuild'),
             str(ROOT / 'scripts' / source_name), '--bundle', '--platform=node', '--target=node24', '--format=cjs',
-            '--define:__YOSH_LOCAL_AUTH_DEV__=' + ('true' if args.local_authorization else 'false'), '--define:__YOSH_PLUGIN_DEV__=true', '--define:__YOSH_STANDALONE_DEV__=true', '--define:__YOSH_RC5__=false',
+            '--define:__YOSH_LOCAL_AUTH_DEV__=' + ('true' if args.local_authorization and not mainnet else 'false'),
+            '--define:__YOSH_PLUGIN_DEV__=' + ('false' if mainnet else 'true'),
+            '--define:__YOSH_STANDALONE_DEV__=' + ('false' if mainnet else 'true'),
+            '--define:__YOSH_RC5__=' + ('true' if mainnet else 'false'),
             '--outfile=' + str(runtime / name), '--metafile=' + str(metadata)], cwd=ROOT, env=env, check=True)
         for path in json.loads(metadata.read_text())['inputs']:
             inputs[path] = builder.digest(ROOT / path)
@@ -76,16 +83,25 @@ def main():
             shutil.copy2(ROOT / 'src/modules/authority/web-assets' / name, runtime / name)
         inputs['scripts/native/LocalGrantConfirmation.swift'] = builder.digest(ROOT / 'scripts/native/LocalGrantConfirmation.swift')
     if args.local_authorization:
-        shutil.copy2(ROOT / 'plugins/yosh-mainnet/scripts/launch.mjs', runtime / 'mainnet-launch.mjs')
-        bridge = (ROOT / 'plugins/yosh-mainnet/scripts/launch.sh').read_text()
-        bridge = bridge.replace('$(/usr/bin/dirname "$0")/..', '$(/usr/bin/dirname "$0")')
-        bridge = bridge.replace('$plugin_root/scripts/launch.mjs', '$plugin_root/mainnet-launch.mjs')
-        (runtime / 'mainnet-launch.sh').write_text(bridge)
-        (runtime / 'mainnet-launch.sh').chmod(0o755)
-        for name in ['plugins/yosh-mainnet/scripts/launch.mjs', 'plugins/yosh-mainnet/scripts/launch.sh']:
-            inputs[name] = builder.digest(ROOT / name)
+        # This guard proves App independence. Existing backend policy and
+        # authentication still govern storage, Keychain access and payments.
+        (runtime / 'mainnet.sb').write_text('''(version 1)
+(allow default)
+(deny file-read* file-write* (regex #".*\\.app(/|$)"))
+''')
+        builder.write_json(runtime / 'mainnet-manifest.json', {
+            'kind': 'yosh-mainnet-standalone', 'apiVersion': 1, 'dataContract': 'existing-mainnet-v1',
+            'profile': 'com.yosh.pay-development.v011rc5', 'version': '0.1.0-dev', 'productionEnabled': False,
+            'sourceHead': builder.git(ROOT, 'rev-parse', 'HEAD').decode().strip(),
+            'dependencyArtifactSha256': builder.digest(artifact),
+            'files': {name: builder.digest(runtime / name) for name in
+                      ['node', 'mainnet.cjs', 'mainnet-mcp.cjs', 'pay-mcp', 'pay-protocol-engine', 'mainnet.sb']},
+            'licenses': {name: builder.digest(runtime / 'licenses' / name) for name in
+                         ['Node-LICENSE', 'Pay-LICENSE', 'pay-kit-LICENSE']},
+        })
     manifest = {'kind': 'yosh-local-devnet' if args.local_authorization else 'yosh-standalone-offline-dev', 'apiVersion': 2 if args.local_authorization else 1, 'dataContract': 'local-devnet-v1' if args.local_authorization else 'standalone-offline-v1',
-        'productionEnabled': False, 'mainnetBridge': bool(args.local_authorization), 'signing': 'dependency-ad-hoc-only', 'version': '0.1.0-dev',
+        'productionEnabled': False, 'mainnetBridge': False, 'mainnetStandalone': bool(args.local_authorization),
+        'signing': 'dependency-ad-hoc-only', 'version': '0.1.0-dev',
         'profile': 'com.yosh.local-authorization-dev' if args.local_authorization else 'com.yosh.standalone-plugin-dev', 'ports': [17449, 17452] if args.local_authorization else [15449, 15450, 15451],
         'sourceHead': builder.git(ROOT, 'rev-parse', 'HEAD').decode().strip(),
         'dependencyArtifactSha256': builder.digest(artifact),

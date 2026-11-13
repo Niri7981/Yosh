@@ -22,19 +22,31 @@ async function command(action: 'settings' | 'connection') {
 }
 const Connection = z.object({ enabled: z.boolean(), connectionState: z.string(), paused: z.boolean() });
 const setup = [
-  { name: 'open_local_settings', description: 'Get a short-lived Yosh settings link. Pass environment: mainnet for direct Mainnet entry or devnet for Devnet. Without environment the page asks the user to choose before reading either network. Mainnet attaches to the existing original backend when available. Does not approve, create a wallet, enable spending or pay. The user confirms changes in the native system window.', inputSchema: { type: 'object' as const, properties: { environment: { type: 'string', enum: ['mainnet', 'devnet'] } }, additionalProperties: false } },
+  { name: 'open_local_settings', description: 'Get a short-lived Yosh settings link. Pass environment: mainnet for direct Mainnet entry or devnet for Devnet. Without environment the page asks the user to choose before reading either network. Mainnet preserves the original wallet, Grant and ledger through the bundled backend. Does not approve, create a wallet, enable spending or pay. The user confirms changes in the native system window.', inputSchema: { type: 'object' as const, properties: { environment: { type: 'string', enum: ['mainnet', 'devnet'] } }, additionalProperties: false } },
   { name: 'local_setup_status', description: 'Read pairing and pause state; refresh Pay tool availability after the user completes local setup. Does not change authorization.', inputSchema: { type: 'object' as const, properties: {}, additionalProperties: false } },
 ];
-const server = new Server({ name: 'yosh-local-dev', version: '0.2.3' }, { capabilities: { tools: { listChanged: true } } });
+const server = new Server({ name: 'yosh-local-dev', version: '0.2.4' }, { capabilities: { tools: { listChanged: true } } });
 let client: Client | undefined, connecting: Promise<Client> | undefined;
 let mainnetClient: Client | undefined, mainnetConnecting: Promise<Client> | undefined;
+let mainnetStarting: Promise<void> | undefined;
 let inventory: EnvironmentTools = {};
+async function ensureMainnet() {
+  mainnetStarting ??= execute(join(root, 'node'), [join(root, 'mainnet.cjs'), 'start'],
+    { cwd: root, timeout: 60_000, maxBuffer: 16384, env: { HOME: directory, PATH: '/usr/bin:/bin', NODE_ENV: 'production' } })
+    .then(() => undefined).finally(() => { mainnetStarting = undefined; });
+  return mainnetStarting;
+}
 async function mainnet() {
+  // A connected MCP child can outlive the previous backend. Recheck ownership
+  // and authenticated readiness before every inventory read or tool dispatch.
+  await ensureMainnet();
   if (mainnetClient) return mainnetClient;
   mainnetConnecting ??= (async () => {
-    const next = new Client({ name: 'yosh-dev-mainnet-proxy', version: '0.2.3' });
+    const next = new Client({ name: 'yosh-dev-mainnet-proxy', version: '0.2.4' });
     try {
-      await next.connect(new StdioClientTransport({ command: '/bin/bash', args: [join(root, 'mainnet-launch.sh')], stderr: 'ignore' }));
+      await next.connect(new StdioClientTransport({ command: join(root, 'node'),
+        args: [join(root, 'mainnet.cjs'), 'install-mcp'], cwd: root, stderr: 'ignore',
+        env: { HOME: directory, PATH: '/usr/bin:/bin', NODE_ENV: 'production' } }));
       next.onclose = () => { if (mainnetClient === next) mainnetClient = undefined; };
       mainnetClient = next; return next;
     } catch (error) { await next.close(); throw error; }
@@ -53,7 +65,7 @@ async function pay() {
   if (!state.enabled) { await client?.close(); client = undefined; throw new Error('LOCAL_CONNECTION_DISABLED'); }
   if (client) return client;
   connecting ??= (async () => {
-    const next = new Client({ name: 'yosh-local-proxy', version: '0.2.3' });
+    const next = new Client({ name: 'yosh-local-proxy', version: '0.2.4' });
     try {
       await next.connect(new StdioClientTransport({ command: join(root, 'node'), args: [join(root, 'mcp.cjs'), '--data-dir', directory],
         cwd: directory, stderr: 'ignore', env: { HOME: directory, PATH: '/usr/bin:/bin', NODE_ENV: 'test', YOSH_PAY_DEV: '1', YOSH_PAY_DEV_ENV: 'devnet' } }));

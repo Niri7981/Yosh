@@ -394,3 +394,9 @@ M6 前必须再次取得具体主网交易授权（API/收款方、用途、金�
 用户在真实 Codex 对话中明确授权一次 Agent402 BTC、ETH、SOL USD 数据购买，上限 0.001 USDC，使用既有 Spend Grant，并要求任何阻碍或未知付款即停止。实际 MCP 返回 PAID / CONFIRMED / COMPLETE；只读账本确认相同交易签名、原付款 CONFIRMED 和交付重试次数 0。交易签名、购买 ID、状态字段的准确区别和结果见 [首笔主网验收](docs/demo/first-mainnet-purchase-20261008.md)。这只是该笔 GET 的验收，不证明商家恢复、真实 POST 购买或其它资源能力。
 
 冻结提交 `e7ef99e8029509355f105edd8013606a05934aaf` 之后的已完成工作按通用 Agent MCP 注册、Spend Grant/连接生命周期修正、原生接线及回归、真实 Mainnet 验收文档拆分签名提交。Grant 创建、替换和撤销不再轮换 MCP 连接凭据；显式断开/轮换仍使旧凭据失效，购买仍逐笔检查 Grant。归档验证为 77 文件 / 941 项测试、typecheck、lint、production build、原生资源模型测试、安装签名及已有 Release 产物比对通过。公共 RPC 独立查询网络失败，未新增链上确认主张。此归档任务不改产品代码，不重装/重启，不登记资源、不创建 Grant、不付款；付款、Authority 与购买/恢复核心目录和冻结提交一致。Git 推送及桌面同步结果以本次完成回复为准；到同步为止，不进入 UI polish。
+
+## 2026-11-13：Mainnet Standalone 前两项
+
+用户授权先实现插件独立主网后台及原经济身份复用。插件作为完整独立产品，App 是可选的管理入口。本轮 0.2.4 本地插件已在原 App 关闭时，由两个新的真实 Codex app-server 宿主完成独立启动、连接和历史购买只读验收；复用原 Keychain 钱包、CardMember、Grant、额度、账本与恢复核心。原 App 正常退出、再次启动和原 MCP 查询通过；安装文件与原经济记录保留。自动化回归 199 项、打包测试 10 项及 typecheck/lint/build 通过。未执行新付款、恢复付款、授权修改、正式 App 替换、提交、推送或发布。当前 Desktop 聊天的旧 MCP 连接不等同于新安装版本。新用户主网配置、运行中 App 界面挂接及 Mainnet 自动升级属于后续范围。细节与证据见 [Mainnet Standalone stages 1–2](docs/architecture/mainnet-standalone-runtime-20261113.md)。
+
+随后用户在新 Session 中完成 App 全程关闭的真实验收：通过插件新建 Mainnet Grant，单次支付 0.001 USDC 购买 Agent402 行情并取得结果。归档前只读 MCP 查询核对购买 `pay_4b69cafe76bfe50d2347ee565dcdd948cd222b578553b7354d7e82a82900` 为 `PAID / COMPLETE / CONFIRMED`，使用新 Grant v6。用户授权将本阶段作为已合并 PR #5 的插件版补全，按多个独立 commit 整理并创建关联的英文后续 PR，同时更新 README。此授权只覆盖当前功能归档、文档与功能分支提交/推送，不包括合并 main、替换正式 App、发布版本或新增付款。完整验收边界见同一实现记录。
