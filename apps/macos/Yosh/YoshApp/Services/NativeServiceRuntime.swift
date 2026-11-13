@@ -107,16 +107,16 @@ actor NativeServiceRuntime {
 
     func developmentEnvironment() throws -> PayDevelopmentSelection? {
         guard launch.isPayDevelopment else { return nil }
-        return try YoshPayDevelopment.selection(directory: launch.developmentRoot())
+        return try launch.developmentSelection()
     }
 
     func switchDevelopmentEnvironment(_ selection: PayDevelopmentSelection) async throws {
         guard launch.isPayDevelopment, !switchingEnvironment else { throw ServiceRuntimeError.configuration }
         switchingEnvironment = true
         defer { switchingEnvironment = false }
-        try selection.validate()
+        try launch.validateDevelopmentSelection(selection)
         let directory = try launch.developmentRoot()
-        let previous = try YoshPayDevelopment.selection(directory: directory)
+        let previous = try launch.developmentSelection()
         if previous == selection { return }
         let configuration = try await ready()
         let (_, response) = try await configuration.request(.prepareEnvironmentSwitch)
@@ -209,7 +209,7 @@ actor NativeServiceRuntime {
             if launch.developmentServicePortOverride != nil {
                 guard process?.isRunning == true || Self.portAvailable(port) else { throw ServiceRuntimeError.portConflict }
             } else {
-                try Self.preflightDevelopmentPorts(ownedProcessRunning: process?.isRunning == true)
+                try Self.preflightDevelopmentPorts(ownedProcessRunning: process?.isRunning == true, bundleURL: launch.bundleURL)
             }
         }
         let runtime = allowsLaunch ? try launch.runtimeDirectory() : nil
@@ -506,9 +506,9 @@ actor NativeServiceRuntime {
         Darwin.kill(pid, 0) == 0 || errno == EPERM
     }
 
-    static func preflightDevelopmentPorts(ownedProcessRunning: Bool) throws {
+    static func preflightDevelopmentPorts(ownedProcessRunning: Bool, bundleURL: URL = Bundle.main.bundleURL) throws {
         guard !ownedProcessRunning else { return }
-        guard YoshPayDevelopment.servicePorts.allSatisfy(portAvailable) else {
+        guard YoshPayDevelopment.ports(bundleURL: bundleURL).allSatisfy(portAvailable) else {
             throw ServiceRuntimeError.portConflict
         }
     }

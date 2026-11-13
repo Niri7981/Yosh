@@ -1,4 +1,4 @@
-import { PAY_DEVELOPMENT_PROFILE } from '../src/modules/pay-dev/profile';
+import { IS_CODEX_PLUGIN_DEVELOPMENT, PAY_DEVELOPMENT_PROFILE } from '../src/modules/pay-dev/profile';
 import { join, resolve } from 'node:path';
 import { userInfo } from 'node:os';
 import { startPayDevelopmentBackend } from '../src/modules/pay-dev/runtime';
@@ -7,16 +7,19 @@ import { assertLoopbackPortsAvailable } from '../src/modules/pay-dev/port-availa
 import { startLiveDevnetDevelopmentBackend } from '../src/modules/pay-dev/live-devnet-runtime';
 
 async function main() {
+  if (IS_CODEX_PLUGIN_DEVELOPMENT && !['offline', 'simulated'].includes(process.env.YOSH_PAY_DEV_ENV ?? 'offline'))
+    throw new Error(process.env.YOSH_PAY_DEV_ENV === 'mainnet' ? 'YOSH_PLUGIN_MAINNET_DISABLED' : 'YOSH_PLUGIN_ENVIRONMENT_DISABLED');
   if (!process.env.YOSH_DATA_DIR || !process.env.YOSH_PACKAGED_RUNTIME_DIR) throw new Error('PAY_DEVELOPMENT_LAUNCH_REQUIRED');
   if (!['offline', 'simulated', 'devnet', 'mainnet'].includes(process.env.YOSH_PAY_DEV_ENV ?? 'offline'))
     throw new Error('PAY_DEVELOPMENT_ENVIRONMENT_REJECTED');
   const fixturePort = process.env.YOSH_PAY_NATIVE_FIXTURE_PORT;
+  if (IS_CODEX_PLUGIN_DEVELOPMENT && fixturePort !== undefined) throw new Error('PAY_NATIVE_FIXTURE_REJECTED');
   const port = fixturePort === undefined ? PAY_DEVELOPMENT_PROFILE.backendPort : Number(fixturePort);
   if (fixturePort !== undefined && (!['devnet', 'simulated'].includes(process.env.YOSH_PAY_DEV_ENV ?? '')
     || !Number.isInteger(port) || port < 1024 || port > 65535 || String(port) !== fixturePort
     || resolve(process.env.YOSH_DATA_DIR).startsWith(join(userInfo().homedir, 'Library', 'Application Support'))))
     throw new Error('PAY_NATIVE_FIXTURE_REJECTED');
-  if (fixturePort === undefined && PAY_DEVELOPMENT_PROFILE.bundleIdentifier === 'com.yosh.pay-development.v011rc5') {
+  if (fixturePort === undefined && (IS_CODEX_PLUGIN_DEVELOPMENT || PAY_DEVELOPMENT_PROFILE.bundleIdentifier === 'com.yosh.pay-development.v011rc5')) {
     await assertLoopbackPortsAvailable([PAY_DEVELOPMENT_PROFILE.backendPort,
       PAY_DEVELOPMENT_PROFILE.merchantPort, PAY_DEVELOPMENT_PROFILE.rpcPort]);
   }

@@ -1,3 +1,4 @@
+import { paymentFailure, type PaymentFailureStage } from './pay-controller-diagnostics';
 import { assertIsTransactionWithinSizeLimit, blockhash, getBase64EncodedWireTransaction, getTransactionDecoder } from '@solana/kit';
 import { z } from 'zod';
 import { assertPaymentConfigExecutionEnabled, DEVNET_NETWORK, DEVNET_USDC_MINT, MAINNET_NETWORK, MAINNET_USDC_MINT, type PaymentConfig } from './payment-config';
@@ -73,39 +74,54 @@ export function createPayExecution(options: {
       claims.set(context.record.approvalId, { context, generation, started: false });
     },
     async prepare(context) {
-      if (!ledger) throw new Error('PAY_RUNTIME_REQUIRED');
-      eligibility(context.config, ledger); assertCurrent(context);
-      const claim = claims.get(context.record.approvalId)!;
-      if (claim.started) throw new Error('PAY_OPERATION_ALREADY_STARTED');
-      claim.started = true;
-      const value = PreparedSchema.parse(await options.takeUnsigned(context));
-      const decoded = decodeOriginalTransaction(value.transaction).transaction;
-      if (decoded.signatures.some(signature => signature.some(byte => byte !== 0))
-        || decoded.message.recentBlockhash !== value.recentBlockhash) throw new Error('PAY_UNSIGNED_REQUIRED');
-      assertUnsignedPaymentBindings(value.transaction, context.config, context.record.quote);
-      await runPaymentPreflight(context.config, { amount: context.record.quote.amount, feePayer: String(context.record.quote.extra.feePayer) });
-      const simulation = await solanaRpc<unknown>(context.config, 'simulateTransaction', [value.transaction,
-        { encoding: 'base64', sigVerify: false, commitment: 'confirmed' }]);
-      z.object({ value: z.object({ err: z.null() }) }).parse(simulation);
-      assertCurrent(context);
-      if (mainnet) context.production?.assertCanSign(context.record.quote, { amount: context.record.intent.amount,
-        resource: context.endpoint, challenge: X402ChallengeSchema.parse(context.record.intent.x402Challenge) });
-      const signer = await loadBuyerSigner(context.config.buyer, process.env, context.config);
-      assertCurrent(context);
-      if (signer.address !== context.config.buyer || (mainnet && !context.production)) throw new Error(mainnet ? 'MAINNET_RESERVED_APPROVAL_REQUIRED' : 'PAY_DEVNET_SIGNER_MISMATCH');
-      if (mainnet) context.production!.assertCanSign(context.record.quote, { amount: context.record.intent.amount,
-        resource: context.endpoint, challenge: X402ChallengeSchema.parse(context.record.intent.x402Challenge) });
-      const unsigned = { ...getTransactionDecoder().decode(Buffer.from(value.transaction, 'base64')),
-        lifetimeConstraint: { blockhash: blockhash(value.recentBlockhash), lastValidBlockHeight: BigInt(value.lastValidBlockHeight) } };
-      assertIsTransactionWithinSizeLimit(unsigned);
-      const signatures = await signer.signTransactions([unsigned]);
-      if (signatures.length !== 1 || Object.keys(signatures[0]).some(address => address !== signer.address)) throw new Error('PAY_SINGLE_BUYER_SIGNATURE_REQUIRED');
-      assertCurrent(context);
-      const transaction = getBase64EncodedWireTransaction({ ...unsigned, signatures: { ...unsigned.signatures, ...signatures[0] } });
-      const challenge = X402ChallengeSchema.parse(context.record.intent.x402Challenge);
-      return { payload: { x402Version: 2, accepted: context.record.quote, resource: challenge.resource,
-        ...(challenge.extensions ? { extensions: challenge.extensions } : {}), payload: { transaction } },
-        lifetime: { recentBlockhash: value.recentBlockhash, lastValidBlockHeight: value.lastValidBlockHeight } };
+      let stage: PaymentFailureStage = 'preparation';
+      try {
+        if (!ledger) throw new Error('PAY_RUNTIME_REQUIRED');
+        eligibility(context.config, ledger); assertCurrent(context);
+        const claim = claims.get(context.record.approvalId)!;
+        if (claim.started) throw new Error('PAY_OPERATION_ALREADY_STARTED');
+        claim.started = true;
+        stage = 'unsigned_decode';
+        const value = PreparedSchema.parse(await options.takeUnsigned(context));
+        const decoded = decodeOriginalTransaction(value.transaction).transaction;
+        if (decoded.signatures.some(signature => signature.some(byte => byte !== 0))
+          || decoded.message.recentBlockhash !== value.recentBlockhash) throw new Error('PAY_UNSIGNED_REQUIRED');
+        stage = 'unsigned_bindings';
+        assertUnsignedPaymentBindings(value.transaction, context.config, context.record.quote);
+        stage = 'preflight';
+        await runPaymentPreflight(context.config, { amount: context.record.quote.amount, feePayer: String(context.record.quote.extra.feePayer) });
+        stage = 'simulation';
+        const simulation = await solanaRpc<unknown>(context.config, 'simulateTransaction', [value.transaction,
+          { encoding: 'base64', sigVerify: false, commitment: 'confirmed' }]);
+        z.object({ value: z.object({ err: z.null() }) }).parse(simulation);
+        stage = 'signer_authorization';
+        assertCurrent(context);
+        if (mainnet) context.production?.assertCanSign(context.record.quote, { amount: context.record.intent.amount,
+          resource: context.endpoint, challenge: X402ChallengeSchema.parse(context.record.intent.x402Challenge) });
+        stage = 'signer_load';
+        const signer = await loadBuyerSigner(context.config.buyer, process.env, context.config);
+        stage = 'signer_authorization';
+        assertCurrent(context);
+        if (signer.address !== context.config.buyer || (mainnet && !context.production)) throw new Error(mainnet ? 'MAINNET_RESERVED_APPROVAL_REQUIRED' : 'PAY_DEVNET_SIGNER_MISMATCH');
+        if (mainnet) context.production!.assertCanSign(context.record.quote, { amount: context.record.intent.amount,
+          resource: context.endpoint, challenge: X402ChallengeSchema.parse(context.record.intent.x402Challenge) });
+        stage = 'transaction_decode';
+        const unsigned = { ...getTransactionDecoder().decode(Buffer.from(value.transaction, 'base64')),
+          lifetimeConstraint: { blockhash: blockhash(value.recentBlockhash), lastValidBlockHeight: BigInt(value.lastValidBlockHeight) } };
+        assertIsTransactionWithinSizeLimit(unsigned);
+        stage = 'signing';
+        const signatures = await signer.signTransactions([unsigned]);
+        stage = 'signature_validation';
+        if (signatures.length !== 1 || Object.keys(signatures[0]).some(address => address !== signer.address)) throw new Error('PAY_SINGLE_BUYER_SIGNATURE_REQUIRED');
+        stage = 'signer_authorization';
+        assertCurrent(context);
+        stage = 'payload_encode';
+        const transaction = getBase64EncodedWireTransaction({ ...unsigned, signatures: { ...unsigned.signatures, ...signatures[0] } });
+        const challenge = X402ChallengeSchema.parse(context.record.intent.x402Challenge);
+        return { payload: { x402Version: 2, accepted: context.record.quote, resource: challenge.resource,
+          ...(challenge.extensions ? { extensions: challenge.extensions } : {}), payload: { transaction } },
+          lifetime: { recentBlockhash: value.recentBlockhash, lastValidBlockHeight: value.lastValidBlockHeight } };
+      } catch (error) { throw paymentFailure(error, stage, context.record.intent.idempotencyKey); }
     },
     assertBeforeSubmission(context) { assertCurrent(context); claims.delete(context.record.approvalId); },
   };

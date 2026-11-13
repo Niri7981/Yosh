@@ -4,7 +4,7 @@ import ts from 'typescript';
 
 // These are the existing prepared-artifact seams. Inspect literal paths rather
 // than comments or filenames, and follow test helpers without importing them.
-const preparedPayPath = /^(?:(?:\.\.\/)*build\.noindex\/pay-|\.\.\/pay\/rust\/|\.\.\/round2-baseline\/)/;
+const preparedPayPath = /^(?:(?:\.\.\/)*build\.noindex\/(?:pay-|codex-plugin-)|\.\.\/pay\/rust\/|\.\.\/round2-baseline\/)/;
 
 export function classifyPayEnvironmentSuites(suites: readonly string[], read: (path: string) => string | undefined): string[] {
   const dependencies = new Map<string, string[]>();

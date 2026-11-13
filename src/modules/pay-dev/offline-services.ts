@@ -1,6 +1,6 @@
-import { PAY_DEVELOPMENT_PROFILE } from './profile';
+import { IS_CODEX_PLUGIN_DEVELOPMENT, PAY_DEVELOPMENT_PROFILE } from './profile';
 import { createHash, randomUUID } from 'node:crypto';
-import { closeSync, existsSync, fsyncSync, lstatSync, openSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { closeSync, constants, existsSync, fstatSync, fsyncSync, lstatSync, openSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import { join } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
@@ -15,6 +15,7 @@ import { DEVNET_GENESIS, DEVNET_NETWORK, DEVNET_USDC_MINT, TOKEN_PROGRAM, loadPa
 import { paidResource, parsePaidResourceDelivery, type PaidResourceId } from '../resources/paid-resources';
 import { demoTokenRiskReport } from '../resources/token-risk-report';
 import { SolanaPublicKeySchema } from '../resources/http-resource';
+import { PLUGIN_OFFLINE_RESOURCE_PATHS } from './offline-resource-policy';
 
 const StateSchema = z.object({ format: z.literal('yosh-pay-offline-v1'), buyer: SolanaPublicKeySchema,
   merchant: SolanaPublicKeySchema, sponsor: z.array(z.number().int().min(0).max(255)).length(64),
@@ -28,6 +29,27 @@ const RpcSchema = z.object({ jsonrpc: z.literal('2.0'), id: z.union([z.string(),
 type OfflineState = z.infer<typeof StateSchema>;
 const INITIAL_USDC = 10_000_000n;
 const owners = new Set<string>();
+const OfflineFault = z.object({ version: z.literal(1), mode: z.enum(['none', 'lose-paid-response-and-rpc', 'delivery-unavailable']) }).strict();
+
+/** Operator-owned Offline test fixture only. No Agent or management route can
+ * select a failure, and non-plugin builds never inspect this file. */
+function offlineFault(directory: string): z.infer<typeof OfflineFault>['mode'] {
+  if (!IS_CODEX_PLUGIN_DEVELOPMENT || process.env.YOSH_PAY_DEV !== '1' || process.env.YOSH_PAY_DEV_ENV !== 'offline') return 'none';
+  privatePath(directory, true);
+  let descriptor: number;
+  try { descriptor = openSync(join(directory, 'offline-fault.json'), constants.O_RDONLY | constants.O_NOFOLLOW); }
+  catch (error) {
+    if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return 'none';
+    throw new Error('OFFLINE_FAULT_REJECTED');
+  }
+  try {
+    const stat = fstatSync(descriptor);
+    if (!stat.isFile() || stat.uid !== process.getuid?.() || (stat.mode & 0o777) !== 0o600 || stat.size > 256)
+      throw new Error('OFFLINE_FAULT_REJECTED');
+    return OfflineFault.parse(JSON.parse(readFileSync(descriptor, 'utf8'))).mode;
+  } catch { throw new Error('OFFLINE_FAULT_REJECTED'); }
+  finally { closeSync(descriptor); }
+}
 
 function privatePath(path: string, directory: boolean) {
   const info = lstatSync(path);
@@ -71,6 +93,7 @@ async function stop(server: Server) {
 export async function startOfflineServices(options: { directory: string; buyer: string; merchantPort?: number; rpcPort?: number; publicOrigin?: string }) {
   privatePath(options.directory, true);
   const directory = realpathSync(options.directory);
+  offlineFault(directory);
   if (owners.has(directory)) throw new Error('OFFLINE_SERVICES_ALREADY_RUNNING');
   const path = join(directory, 'offline-network.json');
   const buyer = SolanaPublicKeySchema.parse(options.buyer);
@@ -103,10 +126,14 @@ export async function startOfflineServices(options: { directory: string; buyer: 
   let origin = '';
   const resources: ReadonlyArray<{ id: PaidResourceId; amount: string }> = [
     { id: 'market-snapshot', amount: '200000' }, { id: 'market-analysis', amount: '20000000' }, { id: 'token-risk-report', amount: '50000' } ];
-  const offers = resources.map(resource => ({ ...resource, target: paidResource(resource.id).path,
+  const declared: Array<{ id: PaidResourceId; amount: string; target: string }> = resources.map(resource => ({ ...resource, target: paidResource(resource.id).path }));
+  if (IS_CODEX_PLUGIN_DEVELOPMENT && process.env.YOSH_PAY_DEV_ENV === 'offline') declared.push(
+    { id: 'market-snapshot', amount: '200000', target: PLUGIN_OFFLINE_RESOURCE_PATHS[0] },
+    { id: 'token-risk-report', amount: '50000', target: PLUGIN_OFFLINE_RESOURCE_PATHS[1] });
+  const offers = declared.map(resource => ({ ...resource,
     offer: { scheme: 'exact', network: DEVNET_NETWORK, asset: DEVNET_USDC_MINT, amount: resource.amount,
       payTo: state.merchant, maxTimeoutSeconds: 300, extra: { decimals: 6, feePayer: sponsor.publicKey.toBase58(),
-        memo: `yosh-pay-development-${createHash('sha256').update(state.merchant + resource.id).digest('hex').slice(0, 32)}` },
+        memo: `yosh-pay-development-${createHash('sha256').update(state.merchant + (resource.target === paidResource(resource.id).path ? resource.id : resource.target)).digest('hex').slice(0, 32)}` },
     } satisfies PaymentRequired['accepts'][number] }));
   const delivery = (id: PaidResourceId) => {
     const common = { asset: 'SOL', as_of: new Date().toISOString(), source_label: 'Offline development simulator · No real funds' };
@@ -125,6 +152,7 @@ export async function startOfflineServices(options: { directory: string; buyer: 
   const merchant = createServer(async (request, response) => {
     response.setHeader('connection', 'close'); response.setHeader('cache-control', 'no-store');
     try {
+      const fault = offlineFault(directory);
       if (request.headers.host !== `127.0.0.1:${state.merchantPort}` || request.method !== 'GET') throw new Error('REQUEST_REJECTED');
       if (request.url === '/supported') {
         response.writeHead(200, { 'content-type': 'application/json' }); response.end(JSON.stringify({ kinds: [{ x402Version: 2, scheme: 'exact', network: DEVNET_NETWORK, extra: { feePayer: sponsor.publicKey.toBase58() } }], extensions: [], signers: {} })); return;
@@ -154,7 +182,11 @@ export async function startOfflineServices(options: { directory: string; buyer: 
         // Persist settlement and fulfillment together before acknowledging HTTP.
         state.transactions.push(original); save();
       }
-      response.writeHead(200, { 'content-type': 'application/json', 'payment-response': encodePaymentResponseHeader({ success: true, network: DEVNET_NETWORK, transaction: signature, payer: buyer }) });
+      // Faults occur after durable settlement. Recovery must use this exact
+      // signed payment, never a new transaction or a released reservation.
+      if (fault === 'lose-paid-response-and-rpc') { response.destroy(); return; }
+      response.writeHead(fault === 'delivery-unavailable' ? 503 : 200, { 'content-type': 'application/json', 'payment-response': encodePaymentResponseHeader({ success: true, network: DEVNET_NETWORK, transaction: signature, payer: buyer }) });
+      if (fault === 'delivery-unavailable') { response.end(JSON.stringify({ code: 'OFFLINE_DELIVERY_UNAVAILABLE', test_only: true })); return; }
       response.end(JSON.stringify(original.delivery));
     } catch { response.writeHead(400, { 'content-type': 'application/json' }); response.end(JSON.stringify({ code: 'OFFLINE_MERCHANT_REJECTED' })); }
   });
@@ -164,6 +196,11 @@ export async function startOfflineServices(options: { directory: string; buyer: 
     try {
       if (request.headers.host !== `127.0.0.1:${state.rpcPort}` || request.method !== 'POST' || request.url !== '/') throw new Error('REQUEST_REJECTED');
       const input = RpcSchema.parse(JSON.parse(await body(request))); id = input.id;
+      if (offlineFault(directory) === 'lose-paid-response-and-rpc' && state.transactions.length
+        && ['getSignaturesForAddress', 'getTransaction'].includes(input.method)) {
+        response.writeHead(503, { 'content-type': 'application/json' });
+        response.end(JSON.stringify({ jsonrpc: '2.0', id, error: { code: -32000, message: 'OFFLINE_ORIGINAL_LOOKUP_UNAVAILABLE' } })); return;
+      }
       const params = input.params ?? []; let result: unknown;
       switch (input.method) {
         case 'getGenesisHash': result = DEVNET_GENESIS; break;

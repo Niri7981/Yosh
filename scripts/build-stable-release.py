@@ -97,6 +97,12 @@ def verify_bundle(app):
         raise ValueError('Stable source provenance mismatch')
     if provenance.get('paymentCoreUnchanged') is not True:
         verify_grant_authorization_update(app, provenance)
+    if 'payVersionCompatibilityUpdate' in provenance:
+        verify_pay_version_compatibility_update(app, provenance)
+    if 'localGrantWebUpdate' in provenance:
+        verify_local_grant_web_update(app, provenance)
+    if 'paymentDiagnosticsUpdate' in provenance:
+        verify_payment_diagnostics_update(app, provenance)
     return info
 
 
@@ -113,7 +119,7 @@ def verify_grant_authorization_update(app, provenance):
         raise ValueError('Grant authorization update provenance required')
     if update['version'] != 1 or update['kind'] != 'product-spend-grant-v1' or not isinstance(update['files'], dict) or set(update['files']) != paths:
         raise ValueError('Grant authorization update scope mismatch')
-    if update['backendSha256'] != rc.digest(app / 'Contents/Resources/Runtime/backend/server.js') \
+    if update['backendSha256'] != (provenance.get('localGrantWebUpdate', {}).get('baseBackendSha256') or rc.digest(app / 'Contents/Resources/Runtime/backend/server.js')) \
             or update['baseBackendSha256'] != provenance.get('notificationReadOnlyOverlay', {}).get('updatedBackendSha256'):
         raise ValueError('Grant authorization backend identity mismatch')
     baseline = provenance.get('sources', {}).get('yosh', {}).get('files', {})
@@ -124,6 +130,163 @@ def verify_grant_authorization_update(app, provenance):
             raise ValueError('Grant authorization source identity mismatch')
 
 
+def native_code_digest(executable):
+    # Re-signing the App changes its embedded resource signature, not its code.
+    with tempfile.TemporaryDirectory(prefix='yosh-native-identity-') as temporary:
+        copy = pathlib.Path(temporary) / 'Yosh'
+        shutil.copy2(executable, copy)
+        subprocess.run(['codesign', '--remove-signature', copy], check=True, capture_output=True)
+        return rc.digest(copy)
+
+
+def verify_local_grant_web_update(app, provenance):
+    """Allow only the reproduced installed baseline plus the five-file web bridge."""
+    update = provenance['localGrantWebUpdate']
+    paths = {'src/modules/authority/local-grant-approval.ts', 'src/modules/authority/mainnet-local-grants.ts',
+             'src/modules/app/app-runtime.ts', 'src/modules/purchases/purchase-ledger.ts', 'src/modules/pay-dev/management-server.ts'}
+    if not isinstance(update, dict) or set(update) != {'version', 'kind', 'baseBackendSha256', 'backendSha256', 'baselineReproduced', 'files', 'preservedBinaries'}:
+        raise ValueError('Local Grant web update provenance required')
+    if update['version'] != 1 or update['kind'] != 'local-grant-web-v1' or update['baselineReproduced'] is not True or set(update['files']) != paths:
+        raise ValueError('Local Grant web update scope mismatch')
+    if update['baseBackendSha256'] != provenance.get('grantAuthorizationUpdate', {}).get('backendSha256') or update['backendSha256'] != (provenance.get('paymentDiagnosticsUpdate', {}).get('baseBackendSha256') or rc.digest(app / 'Contents/Resources/Runtime/backend/server.js')):
+        raise ValueError('Local Grant web backend identity mismatch')
+    if any(not isinstance(value, str) or re.fullmatch(r'[a-f0-9]{64}', value) is None for value in update['files'].values()):
+        raise ValueError('Local Grant web source identity mismatch')
+    binaries = {'Contents/MacOS/Yosh', 'Contents/MacOS/YoshBackendNode', 'Contents/Resources/Runtime/mcp.cjs',
+                'Contents/Resources/Runtime/pay-mcp', 'Contents/Resources/Runtime/pay-protocol-engine'}
+    def preserved_digest(name):
+        if name == 'Contents/Resources/Runtime/pay-mcp' and 'payVersionCompatibilityUpdate' in provenance:
+            # The later bounded Pay update must chain to this historical hash;
+            # never rewrite the old web overlay to claim its binary was unchanged.
+            verify_pay_version_compatibility_update(app, provenance)
+            return provenance['payVersionCompatibilityUpdate']['basePayMcpSha256']
+        return native_code_digest(app / name) if name == 'Contents/MacOS/Yosh' else rc.digest(app / name)
+    if set(update['preservedBinaries']) != binaries or any(preserved_digest(name) != digest for name, digest in update['preservedBinaries'].items()):
+        raise ValueError('Local Grant web preserved binaries mismatch')
+
+
+PAY_COMPATIBILITY_SOURCES = {
+    'scripts/build-codex-plugin-dev.py', 'scripts/build-standalone-dependencies.py',
+    'integration/release-candidate/pay-overlay/yosh-controlled-mcp.rs',
+}
+PAY_COMPATIBILITY_EVIDENCE = {
+    'base-source-manifest.json', 'base-artifact.json', 'dependencies-artifact.json',
+    'build-inputs.json', 'build-steps.json',
+}
+PAY_BINARY = 'Contents/Resources/Runtime/pay-mcp'
+SOURCE_MANIFEST = 'Contents/Resources/Runtime/stable-source-manifest.json'
+
+
+def verify_pay_version_compatibility_update(app, provenance):
+    update = provenance['payVersionCompatibilityUpdate']
+    fields = {'version', 'kind', 'basePayMcpSha256', 'payMcpSha256', 'evidence', 'sources'}
+    if not isinstance(update, dict) or set(update) != fields or update['version'] != 1 \
+            or update['kind'] != 'pay-v0-compatibility-v1' \
+            or not isinstance(update['sources'], dict) or set(update['sources']) != PAY_COMPATIBILITY_SOURCES \
+            or not isinstance(update['evidence'], dict) or set(update['evidence']) != PAY_COMPATIBILITY_EVIDENCE:
+        raise ValueError('Pay version compatibility update scope mismatch')
+    hashes = [update['basePayMcpSha256'], update['payMcpSha256'], *update['sources'].values(), *update['evidence'].values()]
+    if any(not isinstance(value, str) or re.fullmatch(r'[a-f0-9]{64}', value) is None for value in hashes):
+        raise ValueError('Pay version compatibility source identity mismatch')
+    base = provenance.get('localGrantWebUpdate', {}).get('preservedBinaries', {}).get(PAY_BINARY)
+    if update['basePayMcpSha256'] != base or update['payMcpSha256'] != rc.digest(app / PAY_BINARY):
+        raise ValueError('Pay version compatibility binary identity mismatch')
+
+
+def verify_pay_version_compatibility_evidence(output, app, provenance, parent_files=None):
+    """Check the dependency build and parent bundle, not a self-declared new hash."""
+    verify_pay_version_compatibility_update(app, provenance)
+    update = provenance['payVersionCompatibilityUpdate']
+    evidence = output / 'pay-version-compatibility'
+    records = {}
+    for name, digest in update['evidence'].items():
+        file = evidence / name
+        if file.is_symlink() or not file.is_file() or rc.digest(file) != digest:
+            raise ValueError('Pay version compatibility evidence changed')
+        records[name] = json.loads(file.read_text())
+    base = records['base-source-manifest.json']
+    if {key: value for key, value in provenance.items() if key != 'payVersionCompatibilityUpdate'} != base:
+        raise ValueError('Pay version update changed historical provenance')
+    parent = records['base-artifact.json']
+    if parent['sourceManifestSha256'] != update['evidence']['base-source-manifest.json'] \
+            or parent['files'][PAY_BINARY]['sha256'] != update['basePayMcpSha256']:
+        raise ValueError('Pay version update parent artifact mismatch')
+    current = parent_files if parent_files is not None else rc.tree_files(app)
+    # Re-signing changes the native executable's embedded signature. Its code
+    # identity is independently checked by localGrantWebUpdate above.
+    allowed = {PAY_BINARY, SOURCE_MANIFEST, 'Contents/MacOS/Yosh', 'Contents/_CodeSignature/CodeResources'}
+    if set(current) != set(parent['files']) or any(current[name] != parent['files'][name] for name in current if name not in allowed):
+        raise ValueError('Pay version update changed an unrelated bundle file')
+    artifact = records['dependencies-artifact.json']
+    inputs = records['build-inputs.json']
+    if artifact.get('kind') != 'standalone-dependencies' or artifact.get('productionEnabled') is not False \
+            or artifact.get('sourceSha256') != update['evidence']['build-inputs.json'] \
+            or artifact.get('stepsSha256') != update['evidence']['build-steps.json'] \
+            or artifact.get('files', {}).get('pay-mcp', {}).get('sha256') != update['payMcpSha256']:
+        raise ValueError('Pay version dependency artifact mismatch')
+    actual_sources = {name: inputs.get('yosh', {}).get('files', {}).get(name, {}).get('sha256') for name in PAY_COMPATIBILITY_SOURCES}
+    if actual_sources != update['sources']:
+        raise ValueError('Pay version dependency source mismatch')
+    overlay = inputs.get('pay', {}).get('overlays', {}).get('rust/crates/mcp/src/bin/yosh-controlled-mcp.rs', {})
+    if inputs.get('kind') != 'standalone-dependencies' or inputs.get('productionEnabled') is not False \
+            or inputs.get('pay', {}).get('revision') != rc.HEADS['pay'] \
+            or inputs.get('payKit', {}).get('revision') != rc.KIT \
+            or overlay.get('sha256') != update['sources']['integration/release-candidate/pay-overlay/yosh-controlled-mcp.rs']:
+        raise ValueError('Pay version dependency inputs mismatch')
+    steps = records['build-steps.json']
+    if not isinstance(steps, list) or not steps or any(step.get('exitCode') != 0 for step in steps) \
+            or not {'pay-mcp', 'sign-pay-mcp'}.issubset({step.get('label') for step in steps}):
+        raise ValueError('Pay version dependency build did not pass')
+
+
+DIAGNOSTICS_SOURCES = {
+    'src/modules/payment/pay-controller-diagnostics.ts', 'src/modules/payment/mainnet-pay-execution.ts',
+    'src/modules/payment/payment-preflight.ts', 'src/modules/payment/solana-payment.ts',
+    'src/modules/purchases/approved-payment.ts',
+}
+BACKEND_BINARY = 'Contents/Resources/Runtime/backend/server.js'
+
+
+def verify_payment_diagnostics_update(app, provenance):
+    update = provenance['paymentDiagnosticsUpdate']
+    if not isinstance(update, dict) or set(update) != {'version', 'kind', 'baseBackendSha256', 'backendSha256', 'files', 'evidence'} \
+            or update['version'] != 1 or update['kind'] != 'payment-diagnostics-v1' \
+            or set(update['files']) != DIAGNOSTICS_SOURCES \
+            or set(update['evidence']) != {'base-artifact.json', 'base-source-manifest.json', 'source-changes.json'}:
+        raise ValueError('Payment diagnostics scope mismatch')
+    if update['baseBackendSha256'] != provenance.get('localGrantWebUpdate', {}).get('backendSha256') \
+            or update['backendSha256'] != rc.digest(app / BACKEND_BINARY):
+        raise ValueError('Payment diagnostics backend mismatch')
+    hashes = [update['baseBackendSha256'], update['backendSha256'], *update['files'].values(), *update['evidence'].values()]
+    if any(not isinstance(value, str) or re.fullmatch(r'[a-f0-9]{64}', value) is None for value in hashes):
+        raise ValueError('Payment diagnostics identity invalid')
+
+
+def verify_payment_diagnostics_evidence(output, app, provenance):
+    verify_payment_diagnostics_update(app, provenance)
+    update = provenance['paymentDiagnosticsUpdate']
+    records = {}
+    for name, digest in update['evidence'].items():
+        path = output / 'payment-diagnostics' / name
+        if path.is_symlink() or not path.is_file() or rc.digest(path) != digest:
+            raise ValueError('Payment diagnostics evidence changed')
+        records[name] = json.loads(path.read_text())
+    parent = records['base-artifact.json']
+    base = records['base-source-manifest.json']
+    if {k: v for k, v in provenance.items() if k != 'paymentDiagnosticsUpdate'} != base \
+            or parent['sourceManifestSha256'] != update['evidence']['base-source-manifest.json'] \
+            or parent['files'][BACKEND_BINARY]['sha256'] != update['baseBackendSha256']:
+        raise ValueError('Payment diagnostics parent mismatch')
+    changes = records['source-changes.json']
+    if changes.get('baselineReproduced') is not True or changes.get('files') != update['files']:
+        raise ValueError('Payment diagnostics source mismatch')
+    current = rc.tree_files(app)
+    allowed = {BACKEND_BINARY, SOURCE_MANIFEST, 'Contents/MacOS/Yosh', 'Contents/_CodeSignature/CodeResources'}
+    if set(current) != set(parent['files']) or any(current[name] != parent['files'][name] for name in current if name not in allowed):
+        raise ValueError('Payment diagnostics changed an unrelated bundle file')
+    return base, parent['files']
+
+
 def verify_artifact(output):
     app = output / 'Yosh.app'
     verify_bundle(app)
@@ -132,6 +295,12 @@ def verify_artifact(output):
         raise ValueError('Staged bundle changed after acceptance build')
     if record['sourceManifestSha256'] != rc.digest(app / 'Contents/Resources/Runtime/stable-source-manifest.json'):
         raise ValueError('Stable source manifest identity mismatch')
+    provenance = json.loads((app / SOURCE_MANIFEST).read_text())
+    parent_files = None
+    if 'paymentDiagnosticsUpdate' in provenance:
+        provenance, parent_files = verify_payment_diagnostics_evidence(output, app, provenance)
+    if 'payVersionCompatibilityUpdate' in provenance:
+        verify_pay_version_compatibility_evidence(output, app, provenance, parent_files)
     return app
 
 
@@ -281,7 +450,9 @@ def install(output, applications):
     if target.exists() or target.is_symlink():
         raise ValueError('Existing Yosh.app requires review; refusing replacement')
     # Never replace a running candidate or start a second owner of its state.
-    if subprocess.run(['pgrep', '-x', 'Yosh'], stdout=subprocess.DEVNULL).returncode == 0:
+    processes = subprocess.run(['ps', '-A', '-o', 'comm='], capture_output=True, text=True, check=True).stdout.splitlines()
+    # Isolated Dev Apps share the executable name but not this bundle or data.
+    if any(command.strip().endswith('/Yosh.app/Contents/MacOS/Yosh') or command.strip() == 'Yosh' for command in processes):
         raise ValueError('Quit Yosh normally before installing')
     for port in rc.ISOLATION['ports'].values():
         if subprocess.run(['lsof', '-nP', f'-iTCP:{port}', '-sTCP:LISTEN'], stdout=subprocess.DEVNULL).returncode == 0:

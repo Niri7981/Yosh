@@ -1,4 +1,4 @@
-import { PAY_DEVELOPMENT_PROFILE } from './profile';
+import { IS_LOCAL_AUTH_DEVELOPMENT, IS_CODEX_PLUGIN_DEVELOPMENT, PAY_DEVELOPMENT_PROFILE } from './profile';
 import { closeSync, existsSync, fsyncSync, lstatSync, openSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { z } from 'zod';
@@ -18,7 +18,7 @@ export const DevelopmentEnvironment = z.object({ devnetRpcUrl: RpcEndpoint.optio
 export const DEFAULT_DEV_RPC = 'https://solana-rpc.publicnode.com';
 export const DEFAULT_DEVNET_RPC = 'https://api.devnet.solana.com';
 export function assertDevelopmentOrigin(origin: string) {
-  if (PAY_DEVELOPMENT_PROFILE.bundleIdentifier === 'com.yosh.pay-development.v011rc5'
+  if ((IS_CODEX_PLUGIN_DEVELOPMENT || PAY_DEVELOPMENT_PROFILE.bundleIdentifier === 'com.yosh.pay-development.v011rc5')
     && origin !== `http://127.0.0.1:${PAY_DEVELOPMENT_PROFILE.backendPort}`)
     throw new Error('PAY_PROFILE_MISMATCH');
 }
@@ -39,13 +39,17 @@ export function readDevelopmentEnvironment(root: string) {
   }
   if (!stat.isFile() || stat.isSymbolicLink() || stat.uid !== process.getuid?.() || (stat.mode & 0o777) !== 0o600 || stat.size > 4096)
     throw new Error('PAY_DEVELOPMENT_ENVIRONMENT_REJECTED');
-  return DevelopmentEnvironment.parse(JSON.parse(readFileSync(path, 'utf8')));
+  const selection = DevelopmentEnvironment.parse(JSON.parse(readFileSync(path, 'utf8')));
+  if (IS_CODEX_PLUGIN_DEVELOPMENT && selection.environment === 'mainnet') throw new Error('YOSH_PLUGIN_MAINNET_DISABLED');
+  if (IS_CODEX_PLUGIN_DEVELOPMENT && !IS_LOCAL_AUTH_DEVELOPMENT && selection.environment === 'devnet') throw new Error('YOSH_PLUGIN_ENVIRONMENT_DISABLED');
+  return selection;
 }
 
 /** No environment variable can turn the production wallet into a Dev wallet.
  * The native Dev identity selects its own private directory and reviewed profile. */
 export function isMainnetDevelopment(directory = process.env.YOSH_DATA_DIR ?? '') {
   if (process.env.YOSH_PAY_DEV !== '1' || process.env.YOSH_PAY_DEV_ENV !== 'mainnet') return false;
+  if (IS_CODEX_PLUGIN_DEVELOPMENT) throw new Error('YOSH_PLUGIN_MAINNET_DISABLED');
   assertDevelopmentDirectory(directory, 'Mainnet');
   const selection = readDevelopmentEnvironment(dirname(directory));
   if (selection.environment !== 'mainnet' || process.env.YOSH_DATA_DIR !== directory
@@ -55,6 +59,7 @@ export function isMainnetDevelopment(directory = process.env.YOSH_DATA_DIR ?? ''
 
 function isTestDevelopment(profile: 'devnet' | 'simulated', directory: string) {
   if (process.env.YOSH_PAY_DEV !== '1' || process.env.YOSH_PAY_DEV_ENV !== profile) return false;
+  if (IS_CODEX_PLUGIN_DEVELOPMENT && !IS_LOCAL_AUTH_DEVELOPMENT && profile === 'devnet') throw new Error('YOSH_PLUGIN_ENVIRONMENT_DISABLED');
   assertDevelopmentDirectory(directory, profile === 'devnet' ? 'Devnet' : 'Simulated');
   const selection = readDevelopmentEnvironment(dirname(directory));
   const environment = resolvePaymentEnvironment();

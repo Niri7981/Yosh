@@ -138,6 +138,32 @@ async function fixture() {
     async close() { await app.prepareQuit(); app.close(); rmSync(directory, { recursive: true, force: true }); } };
 }
 
+it.each(['preflight', 'simulation', 'signer_load', 'submission'] as const)('preserves the actual %s failure across the purchase boundary without changing payment accounting', async stage => {
+  const f = await fixture();
+  try {
+    await f.call('authorize');
+    await f.call('plan', { facts: f.facts });
+    const originalRpc = f.rpc.getMockImplementation()!;
+    f.rpc.mockImplementation(async (url, init) => {
+      const method = init?.body ? JSON.parse(String(init.body)).method : undefined;
+      if (stage === 'preflight' && method === 'getGenesisHash') return new Response('SECRET_RPC_RESPONSE', { status: 429 });
+      if (stage === 'simulation' && method === 'simulateTransaction') return Response.json({ result: { value: { err: { SECRET_SIMULATION: 'SECRET_PAYLOAD' } } } });
+      return originalRpc(url, init);
+    });
+    if (stage === 'signer_load') vi.mocked(loadBuyerSigner).mockRejectedValue(new Error('SECRET_KEYCHAIN_VALUE'));
+    const error = await f.call('execute', { facts: f.facts, unsigned: f.prepared }).catch((error: unknown) => error);
+    const diagnostic = controllerBackendDiagnostic(error);
+    expect(diagnostic).toMatchObject({ failureStage: stage, failureCode: `PAY_${stage.toUpperCase()}_FAILED`, purchaseId: f.record()!.purchaseId });
+    if (stage === 'preflight') expect(diagnostic).toMatchObject({ rpcMethod: 'getGenesisHash', rpcHttpStatus: 429, rpcFailureCode: 'HTTP_ERROR' });
+    expect(JSON.stringify(diagnostic)).not.toContain('SECRET');
+    expect(f.record()!.status).toBe(stage === 'submission' ? 'PAYMENT_UNKNOWN' : 'FAILED');
+    expect(f.app.ledger.managedSummary(Date.now(), 'live_mainnet')).toMatchObject({ reserved: stage === 'submission' ? '1000' : '0', paid: '0' });
+    const signerCalls = vi.mocked(loadBuyerSigner).mock.calls.length;
+    await expect(f.call('execute', { facts: f.facts, unsigned: f.prepared })).rejects.toThrow();
+    expect(loadBuyerSigner).toHaveBeenCalledTimes(signerCalls);
+  } finally { await f.close(); }
+});
+
 it.each(['missing', 'expired'] as const)('a newly created Grant authorizes a new purchase with %s legacy operator receipt', async receipt => {
   const f = await fixture();
   try {

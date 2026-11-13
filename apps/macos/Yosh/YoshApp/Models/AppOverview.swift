@@ -78,11 +78,20 @@ struct AppOverview: Decodable {
         enum PurchaseMode: String, Codable, CaseIterable {
             case simulated, liveDevnet = "live_devnet", liveMainnet = "live_mainnet"
 
-            var title: String {
+            var title: String { title(bundleURL: Bundle.main.bundleURL) }
+
+            func title(bundleURL: URL) -> String {
                 switch self {
-                case .simulated: "Simulation"
-                case .liveDevnet: "Devnet · Developer"
-                case .liveMainnet: "Mainnet"
+                case .simulated: return "Simulation"
+                case .liveDevnet:
+                    let path = bundleURL.appending(path: "Contents/Info.plist")
+                    if let data = try? Data(contentsOf: path),
+                       let info = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+                       info["CFBundleIdentifier"] as? String == "com.yosh.codex-plugin-dev",
+                       info["YoshCodexPluginDevelopment"] as? Bool == true,
+                       info["YoshPayDevelopment"] as? Bool == true { return "Offline · No real funds" }
+                    return "Devnet · Developer"
+                case .liveMainnet: return "Mainnet"
                 }
             }
         }

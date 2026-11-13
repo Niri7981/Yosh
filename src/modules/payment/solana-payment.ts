@@ -1,3 +1,4 @@
+import { rpcFailure } from './pay-controller-diagnostics';
 import { ExactSvmScheme } from "@x402/svm/exact/client";
 import { x402Client } from "@x402/core/client";
 import { getBase64EncodedWireTransaction, type TransactionSigner } from "@solana/kit";
@@ -50,11 +51,13 @@ export async function solanaRpc<T>(config: Pick<PaymentConfig, "rpcUrl"> & Parti
   const fetcher: typeof fetch = (config.mode === 'live_mainnet' && process.env.YOSH_PAY_MCP_MAINNET === '1')
     || (config.mode === 'live_devnet' && process.env.YOSH_PAY_MCP_DEVNET === '1')
     ? (input, options) => safeResourceFetch(new URL(input instanceof Request ? input.url : String(input)).href, options ?? {}) : fetch;
-  const response = await fetchRpcRead(config.mode, method, fetcher, config.rpcUrl, init);
-  if (!response.ok) throw new Error(`RPC ${method} returned HTTP ${response.status}`);
-  const body = await readPaymentJson(response);
-  if (typeof body !== 'object' || body === null || !('result' in body) || ('error' in body && body.error)) throw new Error(`RPC ${method} failed`);
-  return body.result as T;
+  try {
+    const response = await fetchRpcRead(config.mode, method, fetcher, config.rpcUrl, init);
+    if (!response.ok) throw rpcFailure(new Error(`RPC ${method} returned HTTP ${response.status}`), method, { rpcHttpStatus: response.status, rpcFailureCode: 'HTTP_ERROR' });
+    const body = await readPaymentJson(response);
+    if (typeof body !== 'object' || body === null || !('result' in body) || ('error' in body && body.error)) throw rpcFailure(new Error(`RPC ${method} failed`), method, { rpcFailureCode: typeof body === 'object' && body !== null && 'error' in body && body.error ? 'RPC_REJECTED' : 'INVALID_RESPONSE' });
+    return body.result as T;
+  } catch (error) { throw rpcFailure(error, method); }
 }
 
 // The signer stays inside this script-only payment boundary. No Agent/UI import.

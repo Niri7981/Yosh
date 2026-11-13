@@ -1,4 +1,6 @@
+import { LocalControlApprovals, type LocalControlReceipt } from '../authority/local-control-approval';
 import { ExecutionSafety, type ExternalExecutionFacts, type ExternalExecutionPermit } from './execution-safety';
+import { LocalGrantApprovals, type LocalGrantConfirmation } from '../authority/local-grant-approval';
 import type { SpendReservation, PurchaseRecord } from './purchase-contract';
 export type { SpendReservation, PurchaseRecord } from './purchase-contract';
 import { TransactionSignatureSchema, validateSignedPaymentIdentity } from '../payment/original-payment-evidence';
@@ -84,6 +86,11 @@ function isLiveMode(mode: StoredPurchaseExecutionMode | undefined) {
 /** SQLite owns approval, budget reservation and the unique task purchase. No model writes. */
 export class PurchaseLedger {
   private db: DatabaseSync;
+  private localApprovals?: LocalGrantApprovals;
+  private localControls?: LocalControlApprovals;
+  localControlApprovals() { return this.localControls ??= new LocalControlApprovals(this.db); }
+  /** Opt-in migration: existing App ledgers do not acquire plugin-only tables. */
+  localGrantApprovals() { return this.localApprovals ??= new LocalGrantApprovals(this.db); }
   readonly executionSafety: ExecutionSafety;
   private readonly delivery: PurchaseDeliveryStore;
   readonly resources: RuntimeResourceRegistry;
@@ -359,7 +366,8 @@ export class PurchaseLedger {
     return this.sumMoney(`json_extract(purchase,'$.authority.grantId')=? AND status IN ('APPROVED','PAYING','PAYMENT_UNKNOWN','PAID')${filter}`,
       id, ...(scope.environment === 'legacy_test' ? [scope.walletIdentity, scope.network, scope.assetId, scope.assetDecimals] : []));
   }
-  createSpendGrant(raw: SpendGrantInput, rawPrincipal: SpendPrincipal, rawScope: SpendGrantScope, now = this.now(), mode?: PurchaseExecutionMode) {
+  createSpendGrant(raw: SpendGrantInput, rawPrincipal: SpendPrincipal, rawScope: SpendGrantScope, now = this.now(), mode?: PurchaseExecutionMode,
+    confirmation?: LocalGrantConfirmation) {
     assertExplicitAuthority(mode, rawScope.network, rawScope.assetId);
     if (!this.managed) throw new Error('Spend grants require a managed ledger');
     const monetary = this.scope(mode, rawScope.network, rawScope.assetId, rawScope.assetDecimals);
@@ -368,7 +376,9 @@ export class PurchaseLedger {
     const totalLimit = parseGrantAmount(input.totalLimit, 'totalLimit'); const singleLimit = parseGrantAmount(input.singleLimit, 'singleLimit');
     if (singleLimit > totalLimit) throw new Error('单笔上限不能大于授权总额。');
     if (input.expiresAt <= now + 60_000 || input.expiresAt > now + 7 * 24 * 60 * 60 * 1000) throw new Error('授权有效期必须在 1 分钟到 7 天之间。');
+    const approvals = confirmation ? this.localGrantApprovals() : undefined;
     return this.atomic(() => {
+      if (confirmation) approvals!.assertPending(confirmation, { input, principal, scope, mode }, now);
       const scopeId = storeMonetaryScope(this.db, monetary);
       this.expireGrants(now);
       const previous = this.db.prepare("UPDATE spend_grants SET status='REVOKED',revoked_at=? WHERE status='ACTIVE' AND card_member_id=? AND monetary_scope_id=? AND resource_id=? RETURNING id").all(now, principal.cardMemberId, scopeId, scope.resourceId);
@@ -379,6 +389,7 @@ export class PurchaseLedger {
         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'ACTIVE',?,?,NULL,?,?)`).run(id, version, principal.cardMemberId, principal.connectionId, principal.connectionGeneration, scope.resourceId, scope.providerId,
         scope.operation, scope.network, scope.assetId, scope.assetDecimals, scope.payTo, scope.paymentScheme, totalLimit, singleLimit, now, input.expiresAt, scopeId, scope.postPolicyHash ?? null);
       this.grantEvent(id, 'grant.CREATED', now);
+      if (confirmation) approvals!.consume(confirmation, id, now);
       return this.latestGrantSummary(now, mode, principal.cardMemberId, monetary, scope.resourceId)!;
     });
   }
@@ -390,6 +401,18 @@ export class PurchaseLedger {
         : this.db.prepare("UPDATE spend_grants SET status='REVOKED',revoked_at=? WHERE status='ACTIVE' RETURNING id").all(now);
       for (const row of rows) this.grantEvent(String(row.id), event, now);
       return rows.length > 0;
+    });
+  }
+  revokeConfirmedLocalGrant(grantId: string, resourceId: string, memberId: string, confirmation: LocalControlReceipt) {
+    const approvals = this.localControlApprovals(), now = this.now();
+    return this.atomic(() => {
+      approvals.assertPending(confirmation, { type: 'revoke_grant', grantId, resourceId }, now);
+      const changed = this.db.prepare("UPDATE spend_grants SET status='REVOKED',revoked_at=? WHERE id=? AND resource_id=? AND card_member_id=? AND status='ACTIVE'")
+        .run(now, grantId, resourceId, memberId).changes;
+      if (changed !== 1) throw new Error('LOCAL_AUTHORIZATION_CONTENT_CHANGED');
+      this.grantEvent(grantId, 'grant.REVOKED', now);
+      approvals.consume(confirmation, now);
+      return true;
     });
   }
   activeSpendGrant(now = this.now(), memberId?: string, mode?: PurchaseExecutionMode, resourceId?: string) {
@@ -487,22 +510,34 @@ export class PurchaseLedger {
     return { dailyBudget: !row || row.daily_limit === null ? null : atomicAmount(row.daily_limit).toString(), paused: row ? Boolean(row.paused) : true,
       singleLimit: scope.environment === 'live_mainnet' ? '0' : DEFAULT_SPENDING_POLICY.singleLimit };
   }
-  setDailyLimit(value: string | null, mode?: PurchaseExecutionMode, scope: MonetaryScope = this.scope(mode)) {
+  setDailyLimit(value: string | null, mode?: PurchaseExecutionMode, scope: MonetaryScope = this.scope(mode), confirmation?: LocalControlReceipt) {
     assertExplicitAuthority(mode, scope.network, scope.assetId);
     const parsed = value === null ? null : atomicAmount(value).toString();
+    const approvals = confirmation ? this.localControlApprovals() : undefined;
     this.atomic(() => {
+      if (confirmation) {
+        if (mode !== 'live_devnet') throw new Error('LOCAL_AUTHORIZATION_OFFLINE_ONLY');
+        approvals!.assertPending(confirmation, { type: 'daily_limit', amount: parsed }, this.now());
+      }
       const id = storeMonetaryScope(this.db, scope);
       this.db.prepare('INSERT INTO monetary_controls VALUES (?,?,?) ON CONFLICT(scope_id) DO UPDATE SET daily_limit=excluded.daily_limit').run(id, parsed, scope.environment === 'live_mainnet' ? 1 : 0);
+      if (confirmation) approvals!.consume(confirmation, this.now());
     });
     return this.controls(mode, scope);
   }
-  setPaused(paused: boolean, mode?: PurchaseExecutionMode, scope: MonetaryScope = this.scope(mode)) {
+  setPaused(paused: boolean, mode?: PurchaseExecutionMode, scope: MonetaryScope = this.scope(mode), confirmation?: LocalControlReceipt) {
     assertExplicitAuthority(mode, scope.network, scope.assetId);
     if (typeof paused !== 'boolean') throw new Error('Paused must be a boolean');
+    const approvals = confirmation ? this.localControlApprovals() : undefined;
     this.atomic(() => {
+      if (confirmation) {
+        if (mode !== 'live_devnet') throw new Error('LOCAL_AUTHORIZATION_OFFLINE_ONLY');
+        approvals!.assertPending(confirmation, { type: 'pause', paused }, this.now());
+      }
       if (paused) this.executionSafety.invalidate();
       const id = storeMonetaryScope(this.db, scope);
       this.db.prepare('INSERT INTO monetary_controls VALUES (?,NULL,?) ON CONFLICT(scope_id) DO UPDATE SET paused=excluded.paused').run(id, paused ? 1 : 0);
+      if (confirmation) approvals!.consume(confirmation, this.now());
     });
     return this.controls(mode, scope);
   }

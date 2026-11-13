@@ -259,6 +259,60 @@ struct BackendLaunchConfigurationTest {
         print(CommandLine.arguments.contains("--skip-fixed-port-tests")
             ? "Fixed installation-port probes skipped; isolated fixture-port admission/rejection checks passed"
             : "Every candidate port conflict rejects startup before credentials or state; owned-child observation remains available")
+        let pluginApp = temporary.appending(path: "Plugins/Yosh Codex Plugin Dev.app")
+        try manager.createDirectory(at: pluginApp.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try manager.copyItem(at: app, to: pluginApp)
+        let pluginInfo = pluginApp.appending(path: "Contents/Info.plist")
+        func writePluginIdentity(id: String = "com.yosh.codex-plugin-dev", flag: Bool = true) throws {
+            let data = try PropertyListSerialization.data(fromPropertyList: ["CFBundleIdentifier": id,
+                "YoshPayDevelopment": true, "YoshCodexPluginDevelopment": flag], format: .xml, options: 0)
+            try data.write(to: pluginInfo)
+        }
+        try writePluginIdentity()
+        check(AppOverview.Service.PurchaseMode.liveDevnet.title(bundleURL: pluginApp) == "Offline · No real funds")
+        check(AppOverview.Service.PurchaseMode.simulated.title(bundleURL: pluginApp) == "Simulation")
+        check(AppOverview.Service.PurchaseMode.liveMainnet.title(bundleURL: pluginApp) == "Mainnet")
+        check(AppOverview.Service.PurchaseMode.liveDevnet.title(bundleURL: app) == "Devnet · Developer",
+            "existing Dev labels retain their original meaning")
+        let plugin = BackendLaunchConfiguration(environment: ["YOSH_DATA_DIR": developmentDirectory.path,
+            "YOSH_PORT": "13449", "YOSH_ENABLE_MAINNET_EXECUTION": "1", "YOSH_PAY_DEV_ENV": "mainnet"],
+            bundleURL: pluginApp, developmentHome: developmentHome)
+        check(plugin.isPayDevelopment, "plugin bundle must use the isolated development launch path")
+        let pluginRoot = try plugin.developmentRoot()
+        check(pluginRoot.path.hasSuffix("/Library/Application Support/Yosh Codex Plugin Dev"))
+        check(try pluginRoot != developmentDirectory && plugin.servicePort() == 14449)
+        check(try plugin.dataDirectory() == pluginRoot)
+        var pluginPortOverride = plugin
+        pluginPortOverride.developmentServicePortOverride = 13449
+        try rejectsConfiguration { _ = try pluginPortOverride.servicePort() }
+        let pluginToken = try plugin.managementToken()
+        check(pluginToken != offlineToken && pluginToken != mainnetToken, "plugin never reuses another profile's management identity")
+        check(try plugin.managementToken() == pluginToken, "plugin restart preserves its own identity")
+        let pluginChild = try plugin.childEnvironment(token: pluginToken)
+        check(pluginChild["PORT"] == "14449" && pluginChild["YOSH_DATA_DIR"] == pluginRoot.path)
+        check(pluginChild["HOME"] == pluginRoot.appending(path: "home").path)
+        check(pluginChild["YOSH_PAY_DEV_ENV"] == "offline" && pluginChild["YOSH_PAY_MCP_MAINNET"] == nil)
+        check(pluginChild["YOSH_ENABLE_MAINNET_EXECUTION"] == "0", "ambient inputs cannot enable plugin Mainnet")
+        check(try plugin.sandboxProfile()?.lastPathComponent == "pay-dev.sb")
+        let pluginLifecycle = NativeServiceRuntime(allowsLaunch: false, environment: [:], bundleURL: pluginApp,
+            managementTokenOverride: pluginToken, diagnosticsDirectory: temporary.appending(path: "plugin-logs"),
+            developmentHome: developmentHome)
+        do { try await pluginLifecycle.switchDevelopmentEnvironment(mainnet); preconditionFailure("plugin accepted Mainnet switch") }
+        catch ServiceRuntimeError.configuration { }
+        do { try await pluginLifecycle.switchDevelopmentEnvironment(customDevnet); preconditionFailure("plugin accepted live Devnet switch") }
+        catch ServiceRuntimeError.configuration { }
+        try YoshPayDevelopment.saveSelection(mainnet, directory: pluginRoot)
+        try rejectsConfiguration { _ = try plugin.dataDirectory() }
+        try rejectsConfiguration { _ = try plugin.childEnvironment(token: pluginToken) }
+        check(!manager.fileExists(atPath: pluginRoot.appending(path: "Mainnet").path), "Mainnet fails before creating or reading signing state")
+        try YoshPayDevelopment.saveSelection(.offline, directory: pluginRoot)
+        try writePluginIdentity(flag: false)
+        check(AppOverview.Service.PurchaseMode.liveDevnet.title(bundleURL: pluginApp) == "Devnet · Developer")
+        try rejectsConfiguration { _ = try plugin.dataDirectory() }
+        try writePluginIdentity(id: "com.yosh.pay-development.v011rc5")
+        try rejectsConfiguration { _ = try plugin.dataDirectory() }
+        try writePluginIdentity()
+        print("Plugin bundle identity, separate state/token/port, Offline default and fail-closed Mainnet/identity admission passed")
         try manager.removeItem(at: runtime.appending(path: "backend/server.js"))
         try rejectsConfiguration { _ = try installed.runtimeDirectory() }
         print("Packaged launch paths, isolated data, private product config, sanitized environment and authenticated health identity passed")

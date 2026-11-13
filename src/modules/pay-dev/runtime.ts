@@ -1,4 +1,5 @@
-import { PAY_DEVELOPMENT_PROFILE } from './profile';
+import { IS_CODEX_PLUGIN_DEVELOPMENT, PAY_DEVELOPMENT_PROFILE } from './profile';
+import { createOfflineResourcePolicy, PLUGIN_OFFLINE_RESOURCE_PATHS } from './offline-resource-policy';
 import { serveDevelopmentRuntime } from './management-server';
 import { randomBytes } from 'node:crypto';
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -23,7 +24,7 @@ function privateFile(path: string) {
 /** Real product AppRuntime and its existing management routes. Only the
  * merchant/chain and isolated offline signer are development facilities. */
 export async function startPayDevelopmentBackend(options: { directory: string; runtimeDirectory: string; port?: number;
-  merchantPort?: number; rpcPort?: number }) {
+  merchantPort?: number; rpcPort?: number; localAuthorizationOnly?: boolean }) {
   if (process.env.YOSH_PAY_DEV !== '1') throw new Error('PAY_DEVELOPMENT_ONLY');
   const directory = resolve(options.directory);
   if (directory !== options.directory || basename(directory) !== PAY_DEVELOPMENT_PROFILE.directoryName) throw new Error('PAY_DEVELOPMENT_DIRECTORY_REQUIRED');
@@ -94,20 +95,23 @@ export async function startPayDevelopmentBackend(options: { directory: string; r
       return authority.takeUnsigned(context);
     } });
   failedExecutor = executor;
-  const app = new AppRuntime(directory, { paymentExecutor: executor.executor, fetcher: localFetch,
+  const offlineResources = IS_CODEX_PLUGIN_DEVELOPMENT ? createOfflineResourcePolicy(directory, origin) : undefined;
+  const app = new AppRuntime(directory, { paymentExecutor: executor.executor, fetcher: localFetch, offlineResources,
     initializeWallet: async () => ({ address: signer.address, reused: true }),
     readWallets: async () => [{ id: 'devnet', label: 'Offline · No real funds', address: signer.address, status: 'available' },
       { id: 'mainnet', label: 'Mainnet disabled', address: null, status: 'missing' }] });
   failedRuntime = app;
   globals.__yosh = { runtime: app };
   const authority: ReturnType<typeof createPayAuthorityAdapter> = createPayAuthorityAdapter({ directory, runtime: () => app,
-    config: () => loadPaymentConfig(process.env, 'live_devnet', signer.address), executor: executor.executor, origin, rpcUrl: simulator.rpcUrl });
+    config: () => loadPaymentConfig(process.env, 'live_devnet', signer.address), executor: executor.executor, origin, rpcUrl: simulator.rpcUrl, offlineResources });
   await app.initializeWallet();
   const descriptor = { version: 1, profile: 'isolated-pay-dev', origin,
-    memberId: app.ledger.defaultCardMember().id, merchantUrl: new URL(paidResource('market-snapshot').path, origin).href };
+    memberId: app.ledger.defaultCardMember().id, merchantUrl: new URL(paidResource('market-snapshot').path, origin).href,
+    ...(offlineResources ? { discoveryUrls: PLUGIN_OFFLINE_RESOURCE_PATHS.map(path => new URL(path, origin).href) } : {}) };
   writeFileSync(join(directory, 'pay-dev-runtime.json'), JSON.stringify(descriptor), { mode: 0o600, flush: true });
   chmodSync(join(directory, 'pay-dev-runtime.json'), 0o600);
-  return await serveDevelopmentRuntime({ app, origin, port, descriptor, authority, simulator, async cleanup() {
+  return await serveDevelopmentRuntime({ app, origin, port, descriptor, authority, simulator,
+    localAuthorizationOnly: options.localAuthorizationOnly, async cleanup() {
     executor.close(); globalThis.fetch = nativeFetch; globals.__yosh = previousRuntime;
     await simulator.close();
   } });

@@ -12,26 +12,30 @@ import { validateDeliveryCapability } from './delivery-capability';
 import { DEVNET_NETWORK, DEVNET_USDC_MINT, MAINNET_NETWORK, MAINNET_USDC_MINT } from '../payment/payment-environment';
 import { PositiveAtomicAmountSchema } from '../authority/atomic-money';
 import { registeredResourceSummary } from './registered-resources';
+import { IS_CODEX_PLUGIN_DEVELOPMENT } from '../pay-dev/profile';
 
 /** Runtime approval stores policy only. Live transaction facts are never registration inputs. */
-export const RuntimeResourceSchema = X402ResourceSchema.safeExtend({
+const RuntimeResourceFields = X402ResourceSchema.safeExtend({
   requestInputs: DeclarativeResourceRequestInputsSchema.optional(),
   resourceId: z.string().regex(/^[a-z0-9][a-z0-9._-]{0,119}$/),
   displayName: z.string().trim().min(1).max(120), providerId: z.string().trim().min(1).max(200),
   recipientSource: z.literal('live_challenge'), recipient: z.never().optional(), amount: z.never().optional(),
   network: z.enum([MAINNET_NETWORK, DEVNET_NETWORK]), mint: z.enum([MAINNET_USDC_MINT, DEVNET_USDC_MINT]),
   maximumAmount: z.string().regex(/^[1-9]\d{0,18}$/).refine(value => PositiveAtomicAmountSchema.safeParse(value).success), baseAmount: z.string().regex(/^[1-9]\d{0,18}$/).refine(value => PositiveAtomicAmountSchema.safeParse(value).success).optional(),
-}).superRefine((resource, ctx) => {
+});
+function validateRuntimeResource(resource: z.infer<typeof RuntimeResourceFields>, ctx: z.RefinementCtx, fixture = false) {
   if (resource.mint !== (resource.network === MAINNET_NETWORK ? MAINNET_USDC_MINT : DEVNET_USDC_MINT))
     ctx.addIssue({ code: 'custom', message: 'RESOURCE_NETWORK_ASSET_MISMATCH' });
-  if (resource.request.access !== 'https') ctx.addIssue({ code: 'custom', message: 'RESOURCE_PUBLIC_HTTPS_REQUIRED' });
+  if (resource.request.access !== (fixture ? 'test_loopback' : 'https')) ctx.addIssue({ code: 'custom', message: 'RESOURCE_PUBLIC_HTTPS_REQUIRED' });
   try { assertSupportedMainnetResourceRequest(resource.request, resourceInputNames(resource.requestInputs?.jsonBody).length > 0); }
   catch (error) { ctx.addIssue({ code: 'custom', message: error instanceof Error ? error.message : 'RESOURCE_BODY_POLICY_INVALID' }); }
   try { assertResourceInputDefinition(resource); }
   catch (error) { ctx.addIssue({ code: 'custom', message: error instanceof Error ? error.message : 'RESOURCE_INPUT_POLICY_INVALID' }); }
   try { validateDeliveryCapability(resource.deliveryRecovery ?? { kind: 'none' }, resource.request); }
   catch { ctx.addIssue({ code: 'custom', message: 'RESOURCE_RECOVERY_INVALID' }); }
-});
+}
+export const RuntimeResourceSchema = RuntimeResourceFields.superRefine((resource, ctx) => validateRuntimeResource(resource, ctx));
+const FixtureRuntimeResourceSchema = RuntimeResourceFields.superRefine((resource, ctx) => validateRuntimeResource(resource, ctx, true));
 const State = z.enum(['ACTIVE', 'DISABLED', 'REMOVED']);
 const Submission = z.object({ cardMemberId: z.string().uuid(), discoveryId: z.string().uuid(),
   discoveredAt: z.number().int(), sample: ResourceRequestInputSchema, documentation: ResourceDocumentationSchema }).strict();
@@ -144,7 +148,8 @@ export class RuntimeResourceRegistry {
     return { ...result, discoveryId, expiresAt, registrationStatus: 'DISCOVERED' as const };
   }
   /** No outbound requests or management delegation. The discovery and insertion are consumed atomically. */
-  addDiscovered(raw: unknown, principal: SpendPrincipal) {
+  addDiscovered(raw: unknown, principal: SpendPrincipal, fixtureAdmission?: (definition: X402Resource) => void) {
+    if (fixtureAdmission && !IS_CODEX_PLUGIN_DEVELOPMENT) throw new ResourceRegistryError('RESOURCE_PUBLIC_HTTPS_REQUIRED');
     const input = AgentResourceRegistrationInput.parse(raw); const actor = SpendPrincipalSchema.parse(principal);
     return this.atomic(() => {
       const row = this.db.prepare('SELECT * FROM resource_discoveries WHERE discovery_id=?').get(input.discoveryId);
@@ -157,8 +162,9 @@ export class RuntimeResourceRegistry {
       }
       if (Number(row.expires_at) < this.now()) throw new ResourceRegistryError('RESOURCE_DISCOVERY_EXPIRED');
       const snapshot = z.object({ proposal: z.unknown(), sample: ResourceRequestInputSchema, documentation: ResourceDocumentationSchema }).parse(JSON.parse(String(row.snapshot)));
-      const definition = RuntimeResourceSchema.parse({ ...z.record(z.string(), z.unknown()).parse(snapshot.proposal),
+      const definition = (fixtureAdmission ? FixtureRuntimeResourceSchema : RuntimeResourceSchema).parse({ ...z.record(z.string(), z.unknown()).parse(snapshot.proposal),
         resourceId: input.resourceId, providerId: input.providerId, displayName: input.displayName });
+      fixtureAdmission?.(definition);
       authorizedRequestInstance(definition, snapshot.sample);
       // A new ID cannot evade existing registrations, including disabled/tombstoned identities.
       const identity = (resource: X402Resource) => {

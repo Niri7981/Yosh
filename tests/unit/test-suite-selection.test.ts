@@ -33,11 +33,12 @@ it('automatically classifies new suites with direct or transitive prepared depen
     ['tests/helpers/indirect.ts', `export * from './artifact';`],
     ['tests/helpers/artifact.ts', `export const binary = 'build.noindex/pay-mcp-target/debug/new-tool';`],
     ['tests/direct.test.ts', `const fixture = '../pay/rust/crates/mcp/tests/fixtures/quote.json';`],
+    ['tests/plugin.test.ts', `const binary = 'build.noindex/codex-plugin-dev/Yosh Codex Plugin Dev.app/Contents/Resources/Runtime/pay-mcp';`],
     ['tests/history.test.ts', `const source = '../round2-baseline/head/src/module.ts';`],
     ['tests/template.test.ts', 'const source = `../round2-baseline/${version}/src/module.ts`;'],
     ['tests/dynamic.test.ts', `await import('./helpers/indirect');`],
     ['tests/ordinary.test.ts', `// build.noindex/pay-mcp-target is only documentation\nexport const value = 1;`],
   ]);
   expect(classifyPayEnvironmentSuites([...sources.keys()].filter(file => file.endsWith('.test.ts')), file => sources.get(file)))
-    .toEqual(['tests/direct.test.ts', 'tests/dynamic.test.ts', 'tests/history.test.ts', 'tests/new.test.ts', 'tests/template.test.ts']);
+    .toEqual(['tests/direct.test.ts', 'tests/dynamic.test.ts', 'tests/history.test.ts', 'tests/new.test.ts', 'tests/plugin.test.ts', 'tests/template.test.ts']);
 });

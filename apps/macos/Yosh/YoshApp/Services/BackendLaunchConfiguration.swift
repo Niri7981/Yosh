@@ -8,11 +8,25 @@ struct BackendLaunchConfiguration {
     let bundleURL: URL
     var developmentHome: URL = FileManager.default.homeDirectoryForCurrentUser
     var developmentServicePortOverride: Int? = nil
-    func developmentRoot() throws -> URL { try YoshPayDevelopment.dataDirectory(home: developmentHome) }
+    func developmentRoot() throws -> URL { try YoshPayDevelopment.dataDirectory(home: developmentHome, bundleURL: bundleURL) }
+
+    func validateDevelopmentSelection(_ selection: PayDevelopmentSelection) throws {
+        try selection.validate()
+        if isCodexPluginDevelopment && ![PayDevelopmentMode.offline, .simulated].contains(selection.environment) {
+            throw ServiceRuntimeError.configuration
+        }
+    }
+
+    func developmentSelection() throws -> PayDevelopmentSelection {
+        let selection = try YoshPayDevelopment.selection(directory: developmentRoot())
+        try validateDevelopmentSelection(selection)
+        return selection
+    }
 
     /// Validate every alias before loading credentials or launching a child. Inherited
     /// management-token aliases are checked too, although production uses Keychain.
     func normalizedEnvironment() throws -> [String: String] {
+        try YoshPayDevelopment.validateIdentity(bundleURL: bundleURL)
         var resolved = environment
         let suffixes = Set(environment.keys.compactMap { key -> String? in
             if key.hasPrefix("YOSH_") { return String(key.dropFirst(5)) }
@@ -38,17 +52,19 @@ struct BackendLaunchConfiguration {
     }
 
     var isPayDevelopment: Bool { YoshPayDevelopment.isEnabled(bundleURL: bundleURL) }
+    var isCodexPluginDevelopment: Bool { YoshPayDevelopment.isPluginEnabled(bundleURL: bundleURL) }
 
     func servicePort() throws -> Int {
+        try YoshPayDevelopment.validateIdentity(bundleURL: bundleURL)
         if let port = developmentServicePortOverride {
-            guard isPayDevelopment, (1024...65535).contains(port),
+            guard isPayDevelopment, !isCodexPluginDevelopment, (1024...65535).contains(port),
                   developmentHome.resolvingSymlinksInPath().standardizedFileURL
                     != FileManager.default.homeDirectoryForCurrentUser.resolvingSymlinksInPath().standardizedFileURL else {
                 throw ServiceRuntimeError.configuration
             }
             return port
         }
-        if isPayDevelopment { return YoshPayDevelopment.backendPort }
+        if isPayDevelopment { return YoshPayDevelopment.ports(bundleURL: bundleURL)[0] }
         let raw = try configuredValue("PORT") ?? "3049"
         guard let port = Int(raw), (1024...65535).contains(port), String(port) == raw else {
             throw ServiceRuntimeError.configuration
@@ -91,9 +107,10 @@ struct BackendLaunchConfiguration {
     }
 
     func dataDirectory() throws -> URL {
+        try YoshPayDevelopment.validateIdentity(bundleURL: bundleURL)
         if isPayDevelopment {
             let root = try developmentRoot()
-            let profile = try YoshPayDevelopment.selection(directory: root)
+            let profile = try developmentSelection()
             let directory: URL
             switch profile.environment {
             case .offline: directory = root
@@ -137,7 +154,7 @@ struct BackendLaunchConfiguration {
             if developmentServicePortOverride != nil {
                 childEnvironment["YOSH_PAY_NATIVE_FIXTURE_PORT"] = String(try servicePort())
             }
-            let profile = try YoshPayDevelopment.selection(directory: developmentRoot())
+            let profile = try developmentSelection()
             childEnvironment["YOSH_PAY_DEV_ENV"] = profile.environment.rawValue
             childEnvironment["YOSH_ENABLE_MAINNET_EXECUTION"] = "0"
             childEnvironment["APP2049_ENABLE_MAINNET_EXECUTION"] = "0"
@@ -197,7 +214,7 @@ struct BackendLaunchConfiguration {
 
     func sandboxProfile() throws -> URL? {
         guard isPayDevelopment else { return nil }
-        let mode = try YoshPayDevelopment.selection(directory: developmentRoot()).environment
+        let mode = try developmentSelection().environment
         let filename: String
         switch mode {
         case .offline: filename = "pay-dev.sb"
@@ -284,20 +301,47 @@ enum YoshPayDevelopment {
     static let merchantPort = 13450
     static let protocolPort = 13451
     static let servicePorts = [backendPort, merchantPort, protocolPort]
+    static let pluginBundleIdentifier = "com.yosh.codex-plugin-dev"
+    static let pluginApplicationSupportName = "Yosh Codex Plugin Dev"
+    static let pluginServicePorts = [14449, 14450, 14451]
+
+    static func isPluginEnabled(bundleURL: URL = Bundle.main.bundleURL) -> Bool {
+        let url = bundleURL.appending(path: "Contents/Info.plist")
+        guard let data = try? Data(contentsOf: url),
+              let info = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] else { return false }
+        return info["CFBundleIdentifier"] as? String == pluginBundleIdentifier
+            && info["YoshCodexPluginDevelopment"] as? Bool == true && info["YoshPayDevelopment"] as? Bool == true
+    }
+
+    static func validateIdentity(bundleURL: URL = Bundle.main.bundleURL) throws {
+        let url = bundleURL.appending(path: "Contents/Info.plist")
+        guard let data = try? Data(contentsOf: url),
+              let info = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] else { return }
+        if info["CFBundleIdentifier"] as? String == pluginBundleIdentifier || info["YoshCodexPluginDevelopment"] as? Bool == true {
+            guard isPluginEnabled(bundleURL: bundleURL) else { throw ServiceRuntimeError.configuration }
+        }
+    }
+
+    static func ports(bundleURL: URL = Bundle.main.bundleURL) -> [Int] {
+        isPluginEnabled(bundleURL: bundleURL) ? pluginServicePorts : servicePorts
+    }
 
     static func isEnabled(bundleURL: URL = Bundle.main.bundleURL) -> Bool {
+        if isPluginEnabled(bundleURL: bundleURL) { return true }
         let url = bundleURL.appending(path: "Contents/Info.plist")
         guard let data = try? Data(contentsOf: url),
               let info = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] else { return false }
         return info["CFBundleIdentifier"] as? String == bundleIdentifier && info["YoshPayDevelopment"] as? Bool == true
     }
 
-    static func dataDirectory(home: URL = FileManager.default.homeDirectoryForCurrentUser) throws -> URL {
+    static func dataDirectory(home: URL = FileManager.default.homeDirectoryForCurrentUser, bundleURL: URL = Bundle.main.bundleURL) throws -> URL {
+        try validateIdentity(bundleURL: bundleURL)
         try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         guard let resolvedHome = Darwin.realpath(home.path, nil) else { throw ServiceRuntimeError.configuration }
         defer { Darwin.free(resolvedHome) }
+        let name = isPluginEnabled(bundleURL: bundleURL) ? pluginApplicationSupportName : applicationSupportName
         let directory = URL(fileURLWithPath: String(cString: resolvedHome), isDirectory: true)
-            .appending(path: "Library/Application Support/\(applicationSupportName)", directoryHint: .isDirectory)
+            .appending(path: "Library/Application Support/\(name)", directoryHint: .isDirectory)
         try ensurePrivateDirectory(directory)
         return directory
     }

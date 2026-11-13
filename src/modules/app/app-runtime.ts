@@ -1,5 +1,9 @@
+import { IS_LOCAL_AUTH_DEVELOPMENT } from '../pay-dev/profile';
+import { LocalControlAction, type LocalControlReceipt } from '../authority/local-control-approval';
 import { dirname, resolve as resolveRuntimePath } from 'node:path';
 import { isPayDevelopmentDirectory } from '../pay-dev/isolation';
+import { IS_CODEX_PLUGIN_DEVELOPMENT } from '../pay-dev/profile';
+import type { OfflineResourcePolicy } from '../pay-dev/offline-resource-policy';
 import { admitDevnetDevelopment, admitSimulatedDevelopment, isDevnetDevelopment, isSimulatedDevelopment, assertDevelopmentStorage, isMainnetDevelopment } from '../pay-dev/environment';
 import { readPayTrace } from '../payment/pay-execution-trace';
 import { join } from 'node:path';
@@ -25,6 +29,7 @@ import { CodexIntegration, type CodexIntegrationOptions } from '../mcp/codex-int
 import { type McpSessionEvent } from '../mcp/session';
 import { ManagementApiError } from './management-auth';
 import { PAID_RESOURCE_PURCHASE_OPERATION, SpendGrantInputSchema, type SpendPrincipal } from '../authority/spend-grant';
+import type { LocalGrantConfirmation } from '../authority/local-grant-approval';
 import { DEMO_MARKET_DATA_PROVIDER_ID } from '../resources/static-resource-registry';
 import { PAID_RESOURCE_SCOPE_ID } from '../resources/paid-resources';
 import { DEVNET_NETWORK } from '../payment/payment-config';
@@ -77,6 +82,13 @@ export class AppRuntime {
   private readonly payDevnet = process.env.YOSH_PAY_MCP_DEVNET === '1';
   private get controlledPay() { return this.payMainnet || this.payDevnet; }
   private get registeredLive() { return this.environment.mode === 'live_mainnet' || this.devDevnet; }
+  private get offlineResources() { return IS_CODEX_PLUGIN_DEVELOPMENT && this.payDevelopment ? this.dependencies.offlineResources : undefined; }
+  private get registeredResourceRequired() { return this.registeredLive || Boolean(this.offlineResources && this.activeResourceDefinitions().length); }
+  private registeredResource(resourceId?: string) {
+    const resource = this.activeResourceDefinitions().find(resource => resource.resourceId === resourceId);
+    if (resource && this.offlineResources) this.offlineResources.assertResource(resource);
+    return resource;
+  }
   private walletProvisioning?: Promise<{ address: string; reused: boolean }>;
   private readonly payMainnet = process.env.YOSH_PAY_MCP_MAINNET === '1';
   private payAuthority?: ReturnType<typeof createPayAuthorityAdapter>;
@@ -103,13 +115,14 @@ export class AppRuntime {
     this.environment = current;
     return current.mode;
   }
-  constructor(readonly directory = runtimeDataDirectory(), private dependencies: { initializeWallet?: () => Promise<{ address: string; reused: boolean }>; readWallets?: () => Promise<WalletInventoryEntry[]>; timeZone?: () => string; now?: () => number; fetcher?: typeof fetch; codex?: CodexIntegrationOptions; paymentExecutor?: PaymentExecutor } = {}) {
+  constructor(readonly directory = runtimeDataDirectory(), private dependencies: { initializeWallet?: () => Promise<{ address: string; reused: boolean }>; readWallets?: () => Promise<WalletInventoryEntry[]>; timeZone?: () => string; now?: () => number; fetcher?: typeof fetch; codex?: CodexIntegrationOptions; paymentExecutor?: PaymentExecutor; offlineResources?: OfflineResourcePolicy } = {}) {
     dependencies = this.dependencies = { ...dependencies };
     resolveYoshConfiguration();
     this.payDevelopment = isPayDevelopmentDirectory(directory);
     this.devMainnet = isMainnetDevelopment(directory);
     this.devDevnet = isDevnetDevelopment(directory);
     this.devSimulated = isSimulatedDevelopment(directory);
+    if (dependencies.offlineResources && (!IS_CODEX_PLUGIN_DEVELOPMENT || !this.payDevelopment)) throw new Error('OFFLINE_RESOURCE_SCOPE_REJECTED');
     if (this.devDevnet) admitDevnetDevelopment(directory);
     if (this.devSimulated) admitSimulatedDevelopment(directory);
     if (this.payDevnet && (!this.devDevnet || this.payMainnet)) throw new Error('PAY_DEVNET_CONFIGURATION_REQUIRED');
@@ -142,8 +155,8 @@ export class AppRuntime {
       if (this.controlledPay) ledger.executionSafety.enable(Date.now());
       dependencies.paymentExecutor?.bindRuntime?.(directory, ledger);
       // Import installation configuration once; subsequent reads use durable product data.
-      if (!ledger.resources.list().length) ledger.resources.initialize(loadRegisteredResources(process.env, this.devDevnet || this.devSimulated ? this.environment : resolvePaymentEnvironment({ YOSH_EXECUTION_MODE: 'live_mainnet' })), (this.devDevnet || this.devSimulated) ? this.environment.network : resolvePaymentEnvironment({ YOSH_EXECUTION_MODE: 'live_mainnet' }).network);
-      else ledger.resources.initialize([], (this.devDevnet || this.devSimulated) ? this.environment.network : resolvePaymentEnvironment({ YOSH_EXECUTION_MODE: 'live_mainnet' }).network);
+      if (!ledger.resources.list().length) ledger.resources.initialize(loadRegisteredResources(process.env, this.devDevnet || this.devSimulated || this.offlineResources ? this.environment : resolvePaymentEnvironment({ YOSH_EXECUTION_MODE: 'live_mainnet' })), (this.devDevnet || this.devSimulated || this.offlineResources) ? this.environment.network : resolvePaymentEnvironment({ YOSH_EXECUTION_MODE: 'live_mainnet' }).network);
+      else ledger.resources.initialize([], (this.devDevnet || this.devSimulated || this.offlineResources) ? this.environment.network : resolvePaymentEnvironment({ YOSH_EXECUTION_MODE: 'live_mainnet' }).network);
       const defaultMemberId = this.ledger.defaultCardMember().id;
       for (const member of this.ledger.cardMembers()) {
         this.memberConnections.set(member.id, new AgentConnection(directory, member.id, id => this.ledger.isCardMemberActive(id), member.id !== defaultMemberId, dependencies.now));
@@ -185,19 +198,21 @@ export class AppRuntime {
     this.purchaseExecutionMode();
     const defaultMemberId = this.ledger.defaultCardMember().id;
     const readiness = this.authority(defaultMemberId).readiness;
-    const resources = this.registeredLive ? this.activeResourceDefinitions().map(resource => resource.resourceId) : [undefined];
+    const resources = this.registeredLive ? this.activeResourceDefinitions().map(resource => resource.resourceId)
+      : this.offlineResources ? [undefined, ...this.activeResourceDefinitions().map(resource => resource.resourceId)] : [undefined];
     const anyEligibleMember = this.ledger.cardMembers().some(member => resources.some(resourceId =>
       this.authority(member.id, resourceId).readiness.transactionExecution.eligible));
     return { mode: this.environment.mode, cluster: this.environment.cluster, network: this.environment.network,
       asset: this.environment.asset, productionExecutionEnabled: this.environment.productionExecutionEnabled,
       spendingAuthorized: anyEligibleMember,
       configurationReady: this.environment.mode === 'simulated' || readiness.paymentConfiguration.ready,
-      transactionExecutionEligible: anyEligibleMember, quotePreflightRequired: this.registeredLive,
+      transactionExecutionEligible: anyEligibleMember, quotePreflightRequired: this.registeredResourceRequired,
       readinessCardMemberId: defaultMemberId, readiness };
   }
   private paymentConfiguration(defaultMode: PurchaseExecutionMode = 'live_devnet') {
     if (this.registeredLive && this.authorityWalletStatus !== 'available') throw new Error('Wallet unavailable');
-    return loadPaymentConfig(this.resourceConfiguration(), defaultMode, this.walletAddress);
+    const config = loadPaymentConfig(this.resourceConfiguration(), defaultMode, this.walletAddress);
+    return this.offlineResources ? { ...config, registeredResources: this.activeResourceDefinitions() } : config;
   }
   private paymentConfigurationSnapshot() {
     if (this.environment.mode === 'simulated') return { config: undefined, code: null };
@@ -398,7 +413,7 @@ export class AppRuntime {
     } catch { this.recoveryStatus = 'pending'; }
     this.scheduleDeliveryRecovery(origin);
     // Renaming an owned MCP entry must never delay or replace original payment recovery.
-    if (this.accepting && this.codexIntegration.needsMigration) {
+    if (this.accepting && !IS_CODEX_PLUGIN_DEVELOPMENT && this.codexIntegration.needsMigration) {
       try {
         await this.codexIntegration.migrateLegacy();
         this.agentConnection.setIntegration(this.accepting && this.codexIntegration.configured, this.codexIntegration.serverName);
@@ -483,7 +498,7 @@ export class AppRuntime {
     const facilitator = inspectFacilitatorConfiguration(this.resourceConfiguration(), this.environment);
     return authoritySurface(this.ledger, this.environment, memberId,
       { address, status: !address ? 'unavailable' : mainnet ? this.authorityWalletStatus : 'available', balance: this.authorityWalletBalance },
-      configuration.config, this.dependencies.now?.() ?? Date.now(), { facilitator, resourceId, registeredLive: this.registeredLive,
+      configuration.config, this.dependencies.now?.() ?? Date.now(), { facilitator, resourceId, registeredLive: this.registeredLive || Boolean(this.offlineResources && this.registeredResource(resourceId ?? this.spendGrantSummary(memberId)?.resourceId)),
         connectionEnabled: this.connectionFor(memberId).principal('request_purchase') !== undefined,
         serviceAccepting: this.accepting, configurationCode: configuration.code });
   }
@@ -509,7 +524,7 @@ export class AppRuntime {
   }
   prepareRegisteredResource(resourceId: string, sample: unknown) {
     this.purchaseExecutionMode();
-    if (!this.registeredLive) throw new Error('UNSUPPORTED_PURCHASE_NETWORK');
+    if (!this.registeredLive && !this.offlineResources) throw new Error('UNSUPPORTED_PURCHASE_NETWORK');
     const resource = this.activeResourceDefinitions().find(item => item.resourceId === resourceId);
     if (!resource) throw new Error('MAINNET_REGISTERED_RESOURCE_REQUIRED');
     return postRequestReview(authorizedRequestInstance(resource, sample), resource);
@@ -517,7 +532,8 @@ export class AppRuntime {
   async quoteRegisteredResource(resourceId: string, sample: unknown, memberId: string) {
     this.ledger.assertCardMemberActive(memberId);
     this.purchaseExecutionMode();
-    if (!this.registeredLive) throw new Error('UNSUPPORTED_PURCHASE_NETWORK');
+    if (!this.registeredLive && !this.offlineResources) throw new Error('UNSUPPORTED_PURCHASE_NETWORK');
+    if (this.offlineResources) await this.performAuthorityBalanceRead();
     const resource = this.activeResourceDefinitions().find(item => item.resourceId === resourceId);
     if (!resource) throw new Error('MAINNET_REGISTERED_RESOURCE_REQUIRED');
     const instance = authorizedRequestInstance(resource, sample);
@@ -532,7 +548,7 @@ export class AppRuntime {
   }
   private async readPaidResourceQuotes(origin: string, memberId: string) {
     this.purchaseExecutionMode();
-    if (this.registeredLive) {
+    if (this.registeredResourceRequired) {
       await this.performAuthorityBalanceRead();
       const registeredResources = this.registeredResources();
       const resources = await Promise.all(this.activeResourceDefinitions().map(async resource => {
@@ -556,6 +572,10 @@ export class AppRuntime {
             resourceUrl: resource.request.url, quoteStatus: 'unavailable' as const, code: 'RESOURCE_QUOTE_UNAVAILABLE' };
         }
       }));
+      if (this.offlineResources) {
+        const legacy = await readPaidResourceQuotes(origin, this.paymentConfiguration(), this.dependencies.fetcher);
+        return { registeredResources, resources: [...legacy.resources, ...resources], testEnvironment: true };
+      }
       return { registeredResources, resources, testEnvironment: !this.environment.isProduction };
     }
     const wallet = await this.initializeWallet();
@@ -600,13 +620,15 @@ export class AppRuntime {
   inspectRegisteredResource(id: string) { return resourceEntrySummary(this.ledger.resources.inspect(id)); }
   async discoverAgentResource(raw: unknown, principal: SpendPrincipal) {
     if (!this.accepting) throw new Error('SERVICE_STOPPING');
-    const result = await this.track(discoverResource(raw, undefined, undefined, this.environment));
+    const fixture = this.offlineResources;
+    const result = await this.track(discoverResource(fixture ? fixture.discoveryInput(raw) : raw,
+      fixture?.readHeaders, undefined, this.environment, fixture));
     if (!this.accepting) throw new Error('SERVICE_STOPPING');
     return this.ledger.resources.recordDiscovery(result, principal);
   }
   registerAgentResource(raw: unknown, principal: SpendPrincipal) {
     if (!this.accepting) throw new Error('SERVICE_STOPPING');
-    const entry = this.ledger.resources.addDiscovered(raw, principal);
+    const entry = this.ledger.resources.addDiscovered(raw, principal, this.offlineResources?.assertResource);
     return { ...resourceEntrySummary(entry), registrationStatus: 'REGISTERED', spendingAuthorityCreated: false,
       paymentSent: false, notice: 'Registered by Agent. Review in Yosh and create a Spend Grant before purchasing.' };
   }
@@ -622,7 +644,7 @@ export class AppRuntime {
   }
   registeredResources() {
     this.purchaseExecutionMode();
-    if (!this.registeredLive) return [];
+    if (!this.registeredLive && !this.offlineResources) return [];
     return this.activeResourceDefinitions().map(resource => {
       const entry = this.ledger.resources.inspect(resource.resourceId);
       return { ...registeredResourceSummary(resource), source: entry.source,
@@ -703,7 +725,7 @@ export class AppRuntime {
       { status: this.accepting ? 'running' : 'stopping', recoveryStatus: this.recoveryStatus },
       this.dependencies.now?.() ?? Date.now(), mode, this.ledger.defaultCardMember().id);
     return { ...overview, purchases: this.visiblePurchases(), authority: this.authority(), service: { ...overview.service, execution: this.execution(), paymentEnabled: mode === 'live_devnet' || (mode === 'live_mainnet' && this.environment.productionExecutionEnabled),
-      registeredResources: this.registeredResources(), registeredResourceRequired: this.registeredLive } };
+      registeredResources: this.registeredResources(), registeredResourceRequired: this.registeredResourceRequired } };
   }
   private connectionFor(memberId: string) {
     const connection = this.memberConnections.get(memberId);
@@ -760,12 +782,12 @@ export class AppRuntime {
     connection.setEnabled(false, '');
     return this.memberOverview(memberId);
   }
-  setDailyLimit(value: string | null) { return this.ledger.setDailyLimit(value, this.purchaseExecutionMode()); }
+  setDailyLimit(value: string | null, confirmation?: LocalControlReceipt) { return this.ledger.setDailyLimit(value, this.purchaseExecutionMode(), undefined, confirmation); }
   spendGrantSummary(memberId = this.ledger.defaultCardMember().id) {
     return this.ledger.spendGrantSummary(this.dependencies.now?.() ?? Date.now(), this.purchaseExecutionMode(), memberId);
   }
-  setPaused(value: boolean) {
-    const controls = this.ledger.setPaused(value, this.purchaseExecutionMode());
+  setPaused(value: boolean, confirmation?: LocalControlReceipt) {
+    const controls = this.ledger.setPaused(value, this.purchaseExecutionMode(), undefined, confirmation);
     if (value) this.dependencies.paymentExecutor?.invalidate?.();
     return controls;
   }
@@ -812,13 +834,131 @@ export class AppRuntime {
     const principal = this.authenticateAgent(request);
     this.connectionFor(principal.cardMemberId).observeSession(event);
   }
-  createSpendGrant(raw: unknown, memberId = this.ledger.defaultCardMember().id) {
+  localAuthorizationEnvironment(): 'offline' | 'devnet' {
+    if (!this.accepting) throw new Error('LOCAL_AUTHORIZATION_OFFLINE_ONLY');
+    if (this.offlineResources) return 'offline';
+    if (IS_LOCAL_AUTH_DEVELOPMENT && this.devDevnet && this.payDevnet) return 'devnet';
+    throw new Error('LOCAL_AUTHORIZATION_OFFLINE_ONLY');
+  }
+  localWalletSetup() {
+    return { available: this.localAuthorizationEnvironment() === 'devnet', slot: 'devnet' as const,
+      network: this.environment.network, assetId: this.environment.asset.mint, assetDecimals: this.environment.asset.decimals };
+  }
+  async reconcileLocalControlSetup(memberId: string) {
+    const environment = this.localAuthorizationEnvironment();
+    const store = this.ledger.localControlApprovals(), claimed = store.claimedRequests(memberId);
+    for (const value of claimed) {
+      const action = value.request.action;
+      if (action.type === 'connection') {
+        if (this.connectionFor(memberId).status().enabled === action.enabled)
+          store.consume({ requestId: value.request.id, digest: value.digest }, this.dependencies.now?.() ?? Date.now());
+      } else if (action.type === 'create_wallet' && environment === 'devnet') {
+        // The live creator owns completion. A concurrent status read must not
+        // consume its receipt between Keychain write and metadata commit.
+        if (this.walletProvisioning) continue;
+        // Read and check the originally approved fixed slot; never create on restart.
+        this.walletInventory = undefined; this.walletInventoryExpiresAt = 0;
+        const wallet = (await this.existingWallets()).find(entry => entry.id === 'devnet');
+        if (wallet?.provisioningState === 'existing' && wallet.address)
+          store.consume({ requestId: value.request.id, digest: value.digest }, this.dependencies.now?.() ?? Date.now());
+      }
+    }
+  }
+
+  private localControlBasis(memberId: string) {
+    this.localAuthorizationEnvironment();
+    this.ledger.assertCardMemberActive(memberId);
+    const state = this.memberOverview(memberId);
+    return hash({ member: state.member, enabled: state.connection.enabled,
+      controls: this.ledger.controls(this.purchaseExecutionMode()), grants: state.grants });
+  }
+  freezeLocalControl(raw: unknown, memberId: string, sessionHash: string) {
+    const action = LocalControlAction.parse(raw), basis = this.localControlBasis(memberId);
+    if (this.ledger.localControlApprovals().claimedRequests(memberId).length) throw new Error('LOCAL_WALLET_RECONCILIATION_REQUIRED');
+    if (action.type === 'revoke_grant' && !this.memberOverview(memberId).grants.some(grant =>
+      grant.id === action.grantId && grant.resourceId === action.resourceId && grant.status === 'ACTIVE'))
+      throw new Error('LOCAL_AUTHORIZATION_CONTENT_CHANGED');
+    if (action.type === 'create_wallet' && this.localAuthorizationEnvironment() !== 'devnet') throw new Error('LOCAL_WALLET_DEVNET_REQUIRED');
+    return this.ledger.localControlApprovals().freeze({ environment: this.localAuthorizationEnvironment(), mode: 'live_devnet',
+      memberId, agentLabel: this.ledger.cardMember(memberId)!.label, sessionHash, basis, action }, this.dependencies.now?.() ?? Date.now());
+  }
+  async commitLocalControl(receipt: LocalControlReceipt, sessionHash: string) {
+    const frozen = this.ledger.localControlApprovals().read(receipt.requestId), request = frozen.request;
+    if (request.sessionHash !== sessionHash) throw new Error('LOCAL_AUTHORIZATION_SESSION_MISMATCH');
+    if (request.basis !== this.localControlBasis(request.memberId)) throw new Error('LOCAL_AUTHORIZATION_CONTENT_CHANGED');
+    const action = request.action;
+    if (action.type === 'create_wallet') {
+      if (this.localAuthorizationEnvironment() !== 'devnet') throw new Error('LOCAL_WALLET_DEVNET_REQUIRED');
+      this.ledger.localControlApprovals().claimExternal(receipt, this.dependencies.now?.() ?? Date.now());
+      await this.createDevelopmentPaymentWallet();
+      this.ledger.localControlApprovals().consume(receipt, this.dependencies.now?.() ?? Date.now());
+    } else if (action.type === 'connection') {
+      this.ledger.localControlApprovals().claimExternal(receipt, this.dependencies.now?.() ?? Date.now());
+      await this.setMemberConnection(action.enabled, `http://127.0.0.1:${resolveYoshConfiguration().port}`, request.memberId);
+      this.ledger.localControlApprovals().consume(receipt, this.dependencies.now?.() ?? Date.now());
+    } else if (action.type === 'pause') this.setPaused(action.paused, receipt);
+    else if (action.type === 'daily_limit') this.setDailyLimit(action.amount, receipt);
+    else this.ledger.revokeConfirmedLocalGrant(action.grantId, action.resourceId, request.memberId, receipt);
+    return this.ledger.localControlApprovals().read(receipt.requestId);
+  }
+  localGrantEnvironment(): 'offline' | 'devnet' | 'mainnet' {
+    if (this.accepting && this.registeredLive && this.purchaseExecutionMode() === 'live_mainnet') return 'mainnet';
+    return this.localAuthorizationEnvironment();
+  }
+  private localGrantResourceHash(resource: unknown) {
+    // Mainnet approval also binds the wallet's monetary identity. Legacy test
+    // requests retain their existing bytes and remain readable after upgrade.
+    return this.localGrantEnvironment() === 'mainnet'
+      ? hash({ resource, monetary: this.ledger.scope('live_mainnet'), wallet: this.walletAddress }) : hash(resource);
+  }
+  async freezeLocalGrant(raw: unknown, memberId: string, sessionHash: string) {
+    const environment = this.localGrantEnvironment();
+    const payerWallet = this.walletAddress;
+    if (environment === 'mainnet' && !payerWallet) throw new Error('LOCAL_AUTHORIZATION_WALLET_UNAVAILABLE');
+    const { resourceId, ...input } = SpendGrantInputSchema.extend({ resourceId: z.string().min(1).max(200) }).strict().parse(raw);
+    const resource = this.registeredResource(resourceId);
+    if (!resource || resource.request.method !== 'GET')
+      throw new Error('LOCAL_AUTHORIZATION_RESOURCE_UNSUPPORTED');
+    const principal = this.connectionFor(memberId).principal('read');
+    const member = this.ledger.cardMember(memberId);
+    if (!principal || !member || !this.ledger.isCardMemberActive(memberId)) throw new Error('LOCAL_AUTHORIZATION_AGENT_UNAVAILABLE');
+    const now = this.dependencies.now?.() ?? Date.now();
+    if (atomicAmount(input.singleLimit) <= 0n || atomicAmount(input.totalLimit) < atomicAmount(input.singleLimit)
+      || input.expiresAt <= now + 60_000 || input.expiresAt > now + 7 * 86_400_000) throw new Error('LOCAL_AUTHORIZATION_LIMIT_INVALID');
+    const resourceHash = this.localGrantResourceHash(resource);
+    const quote = environment === 'mainnet'
+      ? (await fetchResourceChallenge({ ...resource, request: authorizedRequestInstance(resource, {}) }, this.environment, this.dependencies.fetcher)).quote
+      : await this.quoteRegisteredResource(resourceId, {}, memberId);
+    if (atomicAmount(quote.amount) > atomicAmount(input.singleLimit)) throw new Error('LOCAL_AUTHORIZATION_LIMIT_INVALID');
+    if (!this.accepting || this.localGrantResourceHash(this.registeredResource(resourceId) ?? null) !== resourceHash
+      || hash(this.connectionFor(memberId).principal('read') ?? null) !== hash(principal)) throw new Error('LOCAL_AUTHORIZATION_CONTENT_CHANGED');
+    return this.ledger.localGrantApprovals().freeze({ environment, sessionHash, ...(payerWallet ? { payerWallet } : {}),
+      agentLabel: member.label, apiLabel: resource.resourceId, resourceHash,
+      binding: { input, principal, mode: environment === 'mainnet' ? 'live_mainnet' : 'live_devnet', scope: { resourceId, providerId: resource.providerId,
+        operation: PAID_RESOURCE_PURCHASE_OPERATION, network: resource.network, assetId: resource.mint,
+        assetDecimals: resource.decimals, payTo: quote.payTo, paymentScheme: 'exact' } } }, now);
+  }
+  commitLocalGrant(confirmation: LocalGrantConfirmation, sessionHash: string) {
+    const environment = this.localGrantEnvironment();
+    const frozen = this.ledger.localGrantApprovals().read(confirmation.requestId);
+    if (frozen.request.sessionHash !== sessionHash) throw new Error('LOCAL_AUTHORIZATION_SESSION_MISMATCH');
+    if (environment === 'mainnet' && (!frozen.request.payerWallet || frozen.request.payerWallet !== this.walletAddress)) throw new Error('LOCAL_AUTHORIZATION_CONTENT_CHANGED');
+    if (frozen.request.environment !== environment) throw new Error('LOCAL_AUTHORIZATION_CONTENT_CHANGED');
+    if (this.ledger.cardMember(frozen.request.binding.principal.cardMemberId)?.label !== frozen.request.agentLabel)
+      throw new Error('LOCAL_AUTHORIZATION_AGENT_CHANGED');
+    const resource = this.registeredResource(frozen.request.binding.scope.resourceId);
+    if (!resource || this.localGrantResourceHash(resource) !== frozen.request.resourceHash) throw new Error('LOCAL_AUTHORIZATION_RESOURCE_CHANGED');
+    return this.createSpendGrant({ ...frozen.request.binding.input, resourceId: resource.resourceId },
+      frozen.request.binding.principal.cardMemberId, confirmation);
+  }
+  createSpendGrant(raw: unknown, memberId = this.ledger.defaultCardMember().id, confirmation?: LocalGrantConfirmation) {
     // Reject an environment switch before rotating credentials or reading test defaults.
     const mode = this.purchaseExecutionMode();
     const request = SpendGrantInputSchema.extend({ resourceId: z.string().min(1).max(200).optional(), sample: ResourceRequestInputSchema.optional(), postApprovalHash: z.string().regex(/^[a-f0-9]{64}$/).optional() }).strict().parse(raw);
     const { resourceId, sample, postApprovalHash, ...input } = request;
-    const resource = this.registeredLive ? this.activeResourceDefinitions().find(resource => resource.resourceId === resourceId) : undefined;
+    const resource = this.registeredLive || this.offlineResources ? this.registeredResource(resourceId) : undefined;
     if (this.registeredLive && !resource) throw new Error('MAINNET_REGISTERED_RESOURCE_REQUIRED');
+    if (this.offlineResources && resourceId !== undefined && !resource) throw new Error('REGISTERED_RESOURCE_REQUIRED');
     const instance = resource ? authorizedRequestInstance(resource, sample ?? {}) : undefined;
     if (resource && instance) assertPostRequestApproval(instance, postApprovalHash, resource);
     const now = this.dependencies.now?.() ?? Date.now();
@@ -839,6 +979,12 @@ export class AppRuntime {
       const principal = connection.principal('read');
       if (!principal) throw new Error('请先启用 Agent 连接。');
       const payTo = livePayTo ?? resource?.recipient ?? (process.env.DEMO_MERCHANT_PUBLIC_KEY || '4aU7aegXejAjF84J9eu2B6boC1Exa3i6cxP3diDULJbs');
+      if (confirmation) {
+        const frozen = this.ledger.localGrantApprovals().read(confirmation.requestId);
+        if ((mode === 'live_mainnet' && (!frozen.request.payerWallet || frozen.request.payerWallet !== this.walletAddress))
+          || this.localGrantResourceHash(resource) !== frozen.request.resourceHash)
+          throw new Error('LOCAL_AUTHORIZATION_CONTENT_CHANGED');
+      }
       return this.ledger.createSpendGrant(input, principal, {
         resourceId: resource?.resourceId ?? PAID_RESOURCE_SCOPE_ID,
         providerId: resource?.providerId ?? DEMO_MARKET_DATA_PROVIDER_ID,
@@ -849,7 +995,7 @@ export class AppRuntime {
         payTo,
         paymentScheme: 'exact',
         ...(resource?.request.method === 'POST' ? { postPolicyHash: postRequestPolicyHash(resource) } : {}),
-      }, now, mode);
+      }, confirmation ? (this.dependencies.now?.() ?? Date.now()) : now, mode, confirmation);
     };
     if (resource?.recipientSource === 'live_challenge') {
       const initialPrincipal = this.connectionFor(memberId).principal('read');

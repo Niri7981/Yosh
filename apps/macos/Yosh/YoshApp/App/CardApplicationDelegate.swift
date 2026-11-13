@@ -10,6 +10,7 @@ final class CardApplicationDelegate: NSObject, NSApplicationDelegate, NSWindowDe
     func applicationDidFinishLaunching(_ notification: Notification) {
         let isDevelopment = YoshPayDevelopment.isEnabled()
         do {
+            try YoshPayDevelopment.validateIdentity()
             let lockURL = try isDevelopment ? YoshPayDevelopment.dataDirectory().appending(path: "native-app.lock")
                 : FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
                     .appending(path: "2049/native-app.lock") // Production retains the legacy singleton lock.

@@ -20,4 +20,4 @@ swiftc -swift-version 6 -parse-as-library \
   apps/macos/Yosh/YoshApp/Models/PurchasePresentation.swift \
   tests/native/BackendLaunchConfigurationTest.swift \
   -o "$temporary/backend-launch-test"
-"$temporary/backend-launch-test"
+"$temporary/backend-launch-test" "$@"

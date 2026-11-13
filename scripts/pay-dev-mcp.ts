@@ -1,4 +1,4 @@
-import { PAY_DEVELOPMENT_PROFILE } from '../src/modules/pay-dev/profile';
+import { IS_CODEX_PLUGIN_DEVELOPMENT, PAY_DEVELOPMENT_PROFILE } from '../src/modules/pay-dev/profile';
 import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { lstatSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
@@ -11,13 +11,20 @@ import { recordPayTrace } from '../src/modules/payment/pay-execution-trace';
 import { assertDevelopmentOrigin, readDevelopmentEnvironment } from '../src/modules/pay-dev/environment';
 import { DiscoveryInput } from '../src/modules/resources/mainnet-resource-discovery';
 import { AgentResourceRegistrationInput } from '../src/modules/resources/agent-resource-registration';
-import { ResourceRequestInputSchema } from '../src/modules/resources/http-resource';
+import { MAX_SERIALIZED_RESOURCE_DELIVERY_BYTES, ResourceRequestInputSchema } from '../src/modules/resources/http-resource';
 import { AgentRegistrationErrorCodes } from '../src/modules/mcp/server';
+import { AgentPurchaseReadInput, AgentPurchaseSummary } from '../src/modules/mcp/purchase-read-contract';
+import { PLUGIN_OFFLINE_RESOURCE_PATHS } from '../src/modules/pay-dev/offline-resource-policy';
 
 const ManifestSchema = z.object({
   version: z.literal(1), profile: z.enum(['isolated-pay-dev','pay-mcp-simulated','pay-mcp-devnet','pay-mcp-mainnet']),
   origin: ConnectionSchema.shape.origin, memberId: z.string().uuid(),
   merchantUrl: z.url().optional(),
+  discoveryUrls: z.array(z.url().refine(value => {
+    const url = new URL(value);
+    return url.origin === `http://127.0.0.1:${PAY_DEVELOPMENT_PROFILE.backendPort}`
+      && PLUGIN_OFFLINE_RESOURCE_PATHS.some(path => new URL(path, url.origin).href === value);
+  })).max(2).refine(urls => new Set(urls).size === urls.length).optional(),
 }).strict();
 
 function privateJson(path: string): unknown {
@@ -32,7 +39,7 @@ async function main() {
   if (args.length && (args.length !== 2 || args[0] !== '--data-dir')) throw new Error('PAY_DEV_ARGUMENTS_INVALID');
   let directory = args[1] ?? process.env.YOSH_DATA_DIR;
   if (!directory || !isAbsolute(directory)) throw new Error('PAY_DEV_DIRECTORY_REQUIRED');
-  const candidate = PAY_DEVELOPMENT_PROFILE.bundleIdentifier === 'com.yosh.pay-development.v011rc5';
+  const candidate = IS_CODEX_PLUGIN_DEVELOPMENT || PAY_DEVELOPMENT_PROFILE.bundleIdentifier === 'com.yosh.pay-development.v011rc5';
   if (candidate && basename(directory) !== PAY_DEVELOPMENT_PROFILE.directoryName)
     throw new Error('PAY_DEV_DIRECTORY_REQUIRED');
   const development = basename(directory) === PAY_DEVELOPMENT_PROFILE.directoryName ? readDevelopmentEnvironment(directory) : undefined;
@@ -94,6 +101,7 @@ async function main() {
     }
   });
   const listRequests = new Set<string | number>();
+  const purchaseCalls = new Map<string | number, string>();
   const statusTool = {
     name: 'get_spending_status',
     description: mainnet ? 'Read Yosh Mainnet wallet, budget, Grant, Pause and original purchase state. Read only; no payment permission.'
@@ -105,15 +113,65 @@ async function main() {
   };
   // Yosh-only resource lifecycle. Payment calls continue byte-for-byte to Pay;
   // these tools hold only the captured Agent capability, never management access.
-  const resourceTools = live ? [
+  const resourceTools = live || (IS_CODEX_PLUGIN_DEVELOPMENT && !simulated) ? [
     { name: 'discover_x402_resource', path: '/api/agent/discovery', schema: DiscoveryInput,
-      description: 'Inspect a candidate public HTTPS x402 API without payment using Yosh discovery. Returns an Agent-bound discoveryId and immutable registration proposal. Unknown POST requires separate approval in Yosh. Does not register, authorize spending or pay.' },
+      description: live ? 'Inspect a candidate public HTTPS x402 API without payment using Yosh discovery. Returns an Agent-bound discoveryId and immutable registration proposal. Unknown POST requires separate approval in Yosh. Does not register, authorize spending or pay.'
+        : 'Inspect one of the fixed Offline GET fixture URLs returned in get_spending_status.discoveryUrls. Returns an Agent-bound discoveryId. No public network, registration, spending permission or payment.' },
     { name: 'register_x402_resource', path: '/api/agent/resources', schema: AgentResourceRegistrationInput,
       description: 'Register the discoveryId returned by discover_x402_resource in the shared Yosh API list. Only identity labels are accepted; request and economic facts come from the backend-held discovery. Registration creates no Spend Grant. The user must review it in Yosh and explicitly create a Grant before any Pay curl purchase.' },
     { name: 'quote_x402_resource', path: '/api/agent/quote',
       schema: z.object({ resourceId: z.string().min(1).max(200), sample: ResourceRequestInputSchema.optional() }).strict(),
       description: 'Read a fresh unpaid quote for a registered Yosh API and validated sample. Does not reserve budget, sign or pay. Purchases use the Pay curl tool and require a user-created Yosh Spend Grant.' },
   ] : [];
+  const purchaseTools = [
+    { name: 'get_purchase',
+      description: 'Read one original Yosh purchase by operationId or purchaseId, scoped to this Agent. Returns payment and delivery separately, with the original policy reason. Does not sign, pay, reconcile or recover. Preserve the original identifiers when outcome is unknown.',
+      inputSchema: z.toJSONSchema(AgentPurchaseReadInput),
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false } },
+    { name: 'get_purchase_delivery',
+      description: 'Read one bounded chunk of a completed delivery owned by this Agent. Pass the purchaseId from get_purchase. Continue with nextOffset until null and decode base64 chunks in order. Read only; does not recover or pay.',
+      inputSchema: { type: 'object', properties: { purchaseId: { type: 'string' }, offset: { type: 'integer', minimum: 0,
+        maximum: MAX_SERIALIZED_RESOURCE_DELIVERY_BYTES, default: 0 } }, required: ['purchaseId'], additionalProperties: false },
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false } },
+  ];
+  const purchaseReadErrors = ['AGENT_UNAUTHORIZED', 'PURCHASE_NOT_FOUND', 'PURCHASE_READ_INPUT_INVALID',
+    'PURCHASE_READ_UNAVAILABLE', 'DELIVERY_NOT_AVAILABLE', 'INVALID_DELIVERY_CURSOR'];
+  const readAgentJson = async (path: string): Promise<unknown> => {
+    const response = await fetch(`${connection.origin}${path}`, { headers: { authorization: `Bearer ${connection.token}` },
+      redirect: 'error', signal: AbortSignal.timeout(10_000) });
+    const reader = response.body?.getReader();
+    if (!reader) throw new Error('PURCHASE_READ_UNAVAILABLE');
+    const chunks: Uint8Array[] = []; let size = 0;
+    try { for (;;) { const { done, value } = await reader.read(); if (done) break;
+      size += value.length; if (size > 65_536) throw new Error('PURCHASE_READ_UNAVAILABLE'); chunks.push(value);
+    } } finally { await reader.cancel().catch(() => {}); reader.releaseLock(); }
+    const value: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    if (!response.ok) {
+      const parsed = z.object({ code: z.string() }).safeParse(value);
+      throw new Error(response.status === 401 ? 'AGENT_UNAUTHORIZED'
+        : parsed.success && purchaseReadErrors.includes(parsed.data.code) ? parsed.data.code : 'PURCHASE_READ_UNAVAILABLE');
+    }
+    return value;
+  };
+  const purchaseSummary = async (input: z.infer<typeof AgentPurchaseReadInput>) => AgentPurchaseSummary.parse(
+    await readAgentJson(`/api/agent/purchase?${new URLSearchParams(input).toString()}`));
+  const readPurchase = async (id: string | number, params: unknown) => {
+    let result;
+    try {
+      const call = z.object({ name: z.enum(['get_purchase', 'get_purchase_delivery']), arguments: z.unknown(), _meta: z.unknown().optional() }).strict().parse(params);
+      const value = call.name === 'get_purchase' ? await purchaseSummary(AgentPurchaseReadInput.parse(call.arguments)) : await (async () => {
+        const input = z.object({ purchaseId: z.string().regex(/^[a-zA-Z0-9_-]{1,80}$/),
+          offset: z.number().int().min(0).max(MAX_SERIALIZED_RESOURCE_DELIVERY_BYTES).default(0) }).strict().parse(call.arguments);
+        return readAgentJson(`/api/agent/purchases/${encodeURIComponent(input.purchaseId)}/delivery?offset=${input.offset}`);
+      })();
+      result = { content: [{ type: 'text', text: JSON.stringify(value) }] };
+    } catch (error) {
+      const code = error instanceof z.ZodError ? 'PURCHASE_READ_INPUT_INVALID'
+        : error instanceof Error && purchaseReadErrors.includes(error.message) ? error.message : 'PURCHASE_READ_UNAVAILABLE';
+      result = { isError: true, content: [{ type: 'text', text: `${code}: Read only. No payment or recovery was requested; keep the original operation and purchase identifiers.` }] };
+    }
+    if (!closed) process.stdout.write(`${JSON.stringify({ jsonrpc: '2.0', id, result })}\n`);
+  };
   const recoveryTool = { name: 'recover_payment',
     description: 'Resume an existing Yosh operation after a lost controller plan, only if durable evidence proves payment never started. Reuses its original Purchase and reservation. Never creates a new purchase or replaces an unknown payment. Can execute the original payment; use only with user authorization.',
     inputSchema: { type: 'object', properties: { operationId: { type: 'string' } }, required: ['operationId'], additionalProperties: false },
@@ -169,16 +227,20 @@ async function main() {
       const value: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8'));
       if (!response.ok) {
         const code = z.object({ code: z.string() }).safeParse(value);
-        const allowed = [...AgentRegistrationErrorCodes, 'RESOURCE_DISCOVERY_UNAVAILABLE', 'RESOURCE_QUOTE_UNAVAILABLE', 'RESOURCE_POST_APPROVAL_REQUIRED'];
+        const allowed = [...AgentRegistrationErrorCodes, 'RESOURCE_DISCOVERY_UNAVAILABLE', 'RESOURCE_QUOTE_UNAVAILABLE', 'RESOURCE_POST_APPROVAL_REQUIRED',
+          'OFFLINE_RESOURCE_LIFECYCLE_UNAVAILABLE', 'OFFLINE_FIXTURE_INPUT_INVALID', 'OFFLINE_RESOURCE_TOOL_UNAVAILABLE'];
         throw new Error(response.status === 401 ? 'AGENT_UNAUTHORIZED'
           : code.success && allowed.includes(code.data.code) ? code.data.code : 'RESOURCE_REGISTRATION_UNAVAILABLE');
       }
       result = { content: [{ type: 'text', text: JSON.stringify(value) }] };
     } catch (error) {
-      const allowed = [...AgentRegistrationErrorCodes, 'RESOURCE_DISCOVERY_UNAVAILABLE', 'RESOURCE_QUOTE_UNAVAILABLE', 'RESOURCE_POST_APPROVAL_REQUIRED'];
+      const allowed = [...AgentRegistrationErrorCodes, 'RESOURCE_DISCOVERY_UNAVAILABLE', 'RESOURCE_QUOTE_UNAVAILABLE', 'RESOURCE_POST_APPROVAL_REQUIRED',
+        'OFFLINE_RESOURCE_LIFECYCLE_UNAVAILABLE', 'OFFLINE_FIXTURE_INPUT_INVALID', 'OFFLINE_RESOURCE_TOOL_UNAVAILABLE'];
       const code = error instanceof z.ZodError ? 'RESOURCE_TOOL_INPUT_INVALID'
         : error instanceof Error && allowed.includes(error.message) ? error.message : 'RESOURCE_REGISTRATION_UNAVAILABLE';
-      result = { isError: true, content: [{ type: 'text', text: `${code}: No spending permission or payment was created. Review POST requests in Yosh before discovery.` }] };
+      result = { isError: true, content: [{ type: 'text', text: `${code}: No spending permission or payment was created.${code.startsWith('OFFLINE_')
+        ? ' This isolated Offline environment supports fixed fixtures only; public API discovery and registration are unavailable.'
+        : ' Review POST requests in Yosh before discovery.'}` }] };
     }
     if (!closed) process.stdout.write(`${JSON.stringify({ jsonrpc: '2.0', id, result })}\n`);
   };
@@ -200,7 +262,8 @@ async function main() {
         }
       } finally { await reader.cancel().catch(() => {}); reader.releaseLock(); }
       const status: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-      result = { content: [{ type: 'text', text: JSON.stringify({ profile: manifest.profile, realFunds: mainnet, status }) }] };
+      result = { content: [{ type: 'text', text: JSON.stringify({ profile: manifest.profile, realFunds: mainnet, status,
+        ...(IS_CODEX_PLUGIN_DEVELOPMENT && !simulated ? { discoveryUrls: manifest.discoveryUrls ?? [] } : {}) }) }] };
     } catch (error) {
       const code = error instanceof z.ZodError ? 'PAY_DEV_STATUS_INPUT_INVALID'
         : error instanceof Error && error.message === 'PAY_DEV_REVOKED' ? 'PAY_DEV_REVOKED' : 'PAY_DEV_STATUS_UNAVAILABLE';
@@ -269,9 +332,21 @@ async function main() {
             content: [{ type: 'text', text: 'SIMULATED_EXECUTION_DISABLED: Simulation cannot sign, submit or recover payments.' }] } })}\n`);
           return;
         }
+        if (call.success && purchaseTools.some(tool => tool.name === call.data.name)) { void readPurchase(request.data.id, request.data.params); return; }
+        if (call.success && call.data.name === 'curl') {
+          const input = z.object({ arguments: z.object({ operation_id: z.string().regex(/^[a-zA-Z0-9_.:-]{1,128}$/) }).passthrough() }).passthrough().safeParse(request.data.params);
+          if (input.success) purchaseCalls.set(request.data.id, input.data.arguments.operation_id);
+        }
         if (live && call.success && call.data.name === 'recover_payment') { void recoverPayment(request.data.id, request.data.params); return; }
         if (call.success && resourceTools.some(tool => tool.name === call.data.name)) {
           void callResource(request.data.id, request.data.params); return;
+        }
+        if (IS_CODEX_PLUGIN_DEVELOPMENT && (!call.success || call.data.name !== 'curl')) {
+          // Installing Yosh does not delegate Pay's wallet, catalog, sales or
+          // configuration tools. Enforce the same boundary on guessed calls.
+          process.stdout.write(`${JSON.stringify({ jsonrpc: '2.0', id: request.data.id, result: { isError: true,
+            content: [{ type: 'text', text: 'YOSH_PLUGIN_TOOL_UNAVAILABLE: This tool is outside Yosh Dev plugin scope. No action was forwarded.' }] } })}\n`);
+          return;
         }
       }
     }
@@ -283,17 +358,32 @@ async function main() {
     const response = z.object({ id: z.union([z.string(), z.number()]), result: z.object({ tools: z.array(z.unknown()) }).passthrough() }).passthrough().safeParse(JSON.parse(line));
     if (response.success && listRequests.delete(response.data.id)) {
       if (simulated) response.data.result.tools = [];
+      else if (IS_CODEX_PLUGIN_DEVELOPMENT) response.data.result.tools = response.data.result.tools
+        .filter(tool => z.object({ name: z.literal('curl') }).passthrough().safeParse(tool).success);
       response.data.result.tools.push(statusTool);
+      if (!simulated) response.data.result.tools.push(...purchaseTools);
       if (live) response.data.result.tools.push(recoveryTool);
       for (const tool of resourceTools) response.data.result.tools.push({ name: tool.name, description: tool.description,
         inputSchema: z.toJSONSchema(tool.schema), annotations: { readOnlyHint: tool.name === 'quote_x402_resource',
           destructiveHint: tool.name === 'discover_x402_resource', openWorldHint: tool.name !== 'register_x402_resource' } });
       process.stdout.write(`${JSON.stringify(response.data)}\n`);
     } else {
-      const rejection = z.object({ result: z.object({ isError: z.literal(true), content: z.array(z.object({ type: z.literal('text'), text: z.string() })) }).passthrough() }).passthrough().safeParse(JSON.parse(line));
-      if (rejection.success && rejection.data.result.content.some(item => item.text.includes('External spending authority: REJECTED_BEFORE_EXECUTION'))) {
-        rejection.data.result.content = [{ type: 'text', text: 'REJECTED_BEFORE_EXECUTION: Yosh 当前缺少完成该付款所需的确认/授权' }];
-        process.stdout.write(`${JSON.stringify(rejection.data)}\n`);
+      const purchase = z.object({ id: z.union([z.string(), z.number()]), result: z.object({ isError: z.boolean().optional(),
+        content: z.array(z.unknown()) }).passthrough() }).passthrough().safeParse(JSON.parse(line));
+      const operationId = purchase.success ? purchaseCalls.get(purchase.data.id) : undefined;
+      if (purchase.success && operationId) {
+        purchaseCalls.delete(purchase.data.id);
+        // Correlate only to the durable facts of this exact operation. Current
+        // global readiness may have changed and cannot explain an old refusal.
+        void purchaseSummary({ operationId }).then(summary => {
+          if (purchase.data.result.isError && ['DENIED', 'REQUIRES_APPROVAL'].includes(summary.status))
+            purchase.data.result.content = [{ type: 'text', text: `${summary.policyCode}: Yosh ${summary.status.toLowerCase()} this original purchase. Review its recorded scope in the matching Yosh app; no replacement payment was created.` }];
+          purchase.data.result.content.push({ type: 'text', text: JSON.stringify({ yoshPurchase: summary }) });
+          if (!closed) process.stdout.write(`${JSON.stringify(purchase.data)}\n`);
+        }).catch(() => {
+          // No persisted record is not proof of a missing Grant or nonpayment.
+          if (!closed) process.stdout.write(`${line}\n`);
+        });
       } else process.stdout.write(`${line}\n`);
     }
   });

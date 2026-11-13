@@ -31,12 +31,16 @@ export async function unpaidChallengeHeaders(url: string, method: 'GET' | 'POST'
   return response.headers;
 }
 
+/** Internal transport admission; never accepted from DiscoveryInput. */
+export type FixtureDiscoveryAdmission = { assertRequest: (request: import('./http-resource').HttpResourceRequest) => void };
+
 /** Prepare the same concrete instance that will be transmitted, without external I/O. */
-export function prepareDiscovery(raw: unknown, environment: PaymentEnvironment = resolvePaymentEnvironment({ YOSH_EXECUTION_MODE: 'live_mainnet' })) {
+export function prepareDiscovery(raw: unknown, environment: PaymentEnvironment = resolvePaymentEnvironment({ YOSH_EXECUTION_MODE: 'live_mainnet' }), fixture?: FixtureDiscoveryAdmission) {
   const input = DiscoveryInput.parse(raw);
-  const request = HttpResourceRequestSchema.parse({ url: input.url, method: input.method, access: 'https',
+  const request = HttpResourceRequestSchema.parse({ url: input.url, method: input.method, access: fixture ? 'test_loopback' : 'https',
     headers: input.headers ?? (input.method === 'POST' ? { accept: 'application/json', 'content-type': 'application/json' } : { accept: 'application/json' }),
     ...(input.body === undefined ? {} : { body: input.body }) });
+  fixture?.assertRequest(request);
   if (request.method === 'POST') {
     if (request.headers['content-type'] !== 'application/json' || (request.body === undefined && !resourceInputNames(input.requestInputs?.jsonBody).length))
       throw new ResourceRegistryError('RESOURCE_DISCOVERY_UNAVAILABLE');
@@ -45,7 +49,7 @@ export function prepareDiscovery(raw: unknown, environment: PaymentEnvironment =
     }
   }
   validateDeliveryCapability(input.deliveryRecovery ?? { kind: 'none' }, request);
-  if (input.deliveryRecovery && input.deliveryRecovery.kind !== 'none' && !input.documentation?.urls.length)
+  if (!fixture && input.deliveryRecovery && input.deliveryRecovery.kind !== 'none' && !input.documentation?.urls.length)
     throw new ResourceRegistryError('RESOURCE_RECOVERY_DOCUMENTATION_REQUIRED');
   const policy = { resourceId: 'discovery', providerId: 'discovery', request,
     ...(input.requestInputs ? { requestInputs: input.requestInputs } : {}),
@@ -56,11 +60,12 @@ export function prepareDiscovery(raw: unknown, environment: PaymentEnvironment =
 }
 
 /** Approval is a separate trusted management argument, never an Agent input field. */
-export async function discoverResource(raw: unknown, readHeaders: typeof unpaidChallengeHeaders = unpaidChallengeHeaders, approvedHash?: string, selectedEnvironment?: PaymentEnvironment) {
-  const { input, request, environment, policy, instance } = prepareDiscovery(raw, selectedEnvironment);
+export async function discoverResource(raw: unknown, readHeaders: typeof unpaidChallengeHeaders = unpaidChallengeHeaders, approvedHash?: string, selectedEnvironment?: PaymentEnvironment, fixture?: FixtureDiscoveryAdmission) {
+  const { input, request, environment, policy, instance } = prepareDiscovery(raw, selectedEnvironment, fixture);
+  fixture?.assertRequest(instance);
   assertPostRequestApproval(instance, approvedHash);
   try {
-    const headers = readHeaders !== unpaidChallengeHeaders && instance.method === 'GET' && instance.body === undefined
+    const headers = !fixture && readHeaders !== unpaidChallengeHeaders && instance.method === 'GET' && instance.body === undefined
       ? await readHeaders(instance.url, 'GET')
       : await readHeaders(instance.url, instance.method as 'GET' | 'POST', instance.body, instance.headers);
     const encoded = headers.get('payment-required');
