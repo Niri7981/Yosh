@@ -15,6 +15,7 @@ import * as member from '../../app/api/app/members/[memberId]/route';
 import * as memberGrant from '../../app/api/app/members/[memberId]/grant/route';
 import * as memberConnection from '../../app/api/app/members/[memberId]/connection/route';
 import * as lifecycle from '../../app/api/app/lifecycle/route';
+import * as standaloneLifecycle from '../../app/api/app/mainnet-standalone-lifecycle/route';
 import * as executionMode from '../../app/api/app/execution/route';
 import * as balance from '../../app/api/app/balance/route';
 import * as wallets from '../../app/api/app/wallets/route';
@@ -65,6 +66,7 @@ export async function serveDevelopmentRuntime<T extends { memberId: string }>(op
     ['PUT /api/app/settings', settings.PUT], ['PUT /api/app/grant', grant.PUT],
     ['GET /api/app/members', members.GET], ['POST /api/app/members', members.POST],
     ['POST /api/app/lifecycle', lifecycle.POST], ['GET /api/app/execution', executionMode.GET],
+    ['POST /api/app/mainnet-standalone-lifecycle', standaloneLifecycle.POST],
     ['PUT /api/app/execution', executionMode.PUT], ['GET /api/app/balance', balance.GET],
     ['GET /api/app/wallets', wallets.GET], ['POST /api/app/wallets', wallets.POST],
     ['GET /api/app/resources', resources.GET], ['POST /api/app/resources', resources.POST],
