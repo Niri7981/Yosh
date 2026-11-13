@@ -1,12 +1,12 @@
 import { PAY_DEVELOPMENT_PROFILE } from './profile';
-import { AppRuntime } from '../app/app-runtime';
+import { AppRuntime, type AppRuntimeHosting } from '../app/app-runtime';
 import { isMainnetDevelopment } from './environment';
 import { serveDevelopmentRuntime } from './management-server';
 import { resolveYoshConfiguration } from '../app/yosh-configuration';
 
-/** Same Dev App, real product runtime, separate environment storage. Startup
+/** The same Mainnet business runtime and existing environment storage. Startup
  * never provisions a wallet, signs, enables payments or loads an Offline key. */
-export async function startMainnetDevelopmentBackend(options: { directory: string; port?: number }) {
+export async function startMainnetDevelopmentBackend(options: { directory: string; port?: number; hosting?: AppRuntimeHosting }) {
   if (!isMainnetDevelopment(options.directory) || process.env.YOSH_PAY_MCP_MAINNET !== '1') throw new Error('PAY_MAINNET_CONFIGURATION_REQUIRED');
   const port = options.port ?? PAY_DEVELOPMENT_PROFILE.backendPort;
   const configuredPort = resolveYoshConfiguration().port;
@@ -17,7 +17,7 @@ export async function startMainnetDevelopmentBackend(options: { directory: strin
   const origin = `http://127.0.0.1:${port}`;
   const globals = globalThis as typeof globalThis & { __yosh?: { runtime?: AppRuntime } };
   const previous = globals.__yosh;
-  const app = new AppRuntime(options.directory);
+  const app = new AppRuntime(options.directory, { hosting: options.hosting });
   globals.__yosh = { runtime: app };
   const descriptor = { version: 1, profile: 'pay-mcp-mainnet', origin, memberId: app.ledger.defaultCardMember().id };
   try {

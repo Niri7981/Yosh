@@ -1,6 +1,6 @@
 import { IS_LOCAL_AUTH_DEVELOPMENT } from '../pay-dev/profile';
 import { LocalControlAction, type LocalControlReceipt } from '../authority/local-control-approval';
-import { dirname, resolve as resolveRuntimePath } from 'node:path';
+import { basename, dirname, isAbsolute, resolve as resolveRuntimePath } from 'node:path';
 import { isPayDevelopmentDirectory } from '../pay-dev/isolation';
 import { IS_CODEX_PLUGIN_DEVELOPMENT } from '../pay-dev/profile';
 import type { OfflineResourcePolicy } from '../pay-dev/offline-resource-policy';
@@ -67,6 +67,9 @@ function localTimeZone() {
   return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
 }
 
+/** Supplied only by the trusted runtime entry after package verification. */
+export type AppRuntimeHosting = Readonly<{ kind: 'mainnet-standalone'; payMcpPath: string; runtimeDigest: string }>;
+
 export class AppRuntime {
   readonly ledger: PurchaseLedger;
   readonly agentConnection: AgentConnection;
@@ -74,6 +77,7 @@ export class AppRuntime {
   private readonly codexIntegration: CodexIntegration;
   private providerWrite: Promise<unknown> = Promise.resolve();
   private readonly owner: ReturnType<typeof acquireDataDirectoryOwnership>;
+  private readonly hosting?: AppRuntimeHosting;
   private accepting = true;
   private readonly payDevelopment: boolean;
   private readonly devMainnet: boolean;
@@ -115,13 +119,20 @@ export class AppRuntime {
     this.environment = current;
     return current.mode;
   }
-  constructor(readonly directory = runtimeDataDirectory(), private dependencies: { initializeWallet?: () => Promise<{ address: string; reused: boolean }>; readWallets?: () => Promise<WalletInventoryEntry[]>; timeZone?: () => string; now?: () => number; fetcher?: typeof fetch; codex?: CodexIntegrationOptions; paymentExecutor?: PaymentExecutor; offlineResources?: OfflineResourcePolicy } = {}) {
+  constructor(readonly directory = runtimeDataDirectory(), private dependencies: { initializeWallet?: () => Promise<{ address: string; reused: boolean }>; readWallets?: () => Promise<WalletInventoryEntry[]>; timeZone?: () => string; now?: () => number; fetcher?: typeof fetch; codex?: CodexIntegrationOptions; paymentExecutor?: PaymentExecutor; offlineResources?: OfflineResourcePolicy; hosting?: AppRuntimeHosting } = {}) {
     dependencies = this.dependencies = { ...dependencies };
+    this.hosting = dependencies.hosting ? Object.freeze({ ...dependencies.hosting }) : undefined;
     resolveYoshConfiguration();
     this.payDevelopment = isPayDevelopmentDirectory(directory);
     this.devMainnet = isMainnetDevelopment(directory);
     this.devDevnet = isDevnetDevelopment(directory);
     this.devSimulated = isSimulatedDevelopment(directory);
+    if (this.hosting && (this.hosting.kind !== 'mainnet-standalone' || !this.payMainnet || this.payDevnet
+      || this.payDevelopment || dependencies.paymentExecutor || typeof this.hosting.payMcpPath !== 'string'
+      || this.hosting.payMcpPath.includes('\0') || !isAbsolute(this.hosting.payMcpPath)
+      || resolveRuntimePath(this.hosting.payMcpPath) !== this.hosting.payMcpPath || basename(this.hosting.payMcpPath) !== 'pay-mcp'
+      || typeof this.hosting.runtimeDigest !== 'string' || !/^[a-f0-9]{64}$/.test(this.hosting.runtimeDigest)))
+      throw new Error('MAINNET_STANDALONE_HOSTING_REJECTED');
     if (dependencies.offlineResources && (!IS_CODEX_PLUGIN_DEVELOPMENT || !this.payDevelopment)) throw new Error('OFFLINE_RESOURCE_SCOPE_REJECTED');
     if (this.devDevnet) admitDevnetDevelopment(directory);
     if (this.devSimulated) admitSimulatedDevelopment(directory);
@@ -139,6 +150,7 @@ export class AppRuntime {
       const selection = readExecutionSelection(directory);
       if (selection) this.applyExecutionProfile(selection);
       this.environment = resolvePaymentEnvironment();
+      if (this.hosting && this.environment.mode !== 'live_mainnet') throw new Error('MAINNET_STANDALONE_HOSTING_REJECTED');
       this.purchaseExecutionMode();
       if (this.controlledPay) {
         if (this.payMainnet && (this.payDevelopment || this.environment.mode !== 'live_mainnet' || dependencies.paymentExecutor)) throw new Error('PAY_MAINNET_CONFIGURATION_REQUIRED');
@@ -169,8 +181,8 @@ export class AppRuntime {
         if (this.payMainnet) writePayMainnetDescriptor(directory, origin, defaultMemberId);
       }
       this.codexIntegration = new CodexIntegration(directory, defaultMemberId, dependencies.codex);
-      this.agentConnection.setIntegration(this.payDevelopment || this.devMainnet || this.devDevnet || this.devSimulated ? this.agentConnection.status().enabled : this.codexIntegration.configured,
-        this.payDevelopment || this.devMainnet || this.devDevnet || this.devSimulated ? 'yosh-pay-dev' : this.codexIntegration.serverName);
+      this.agentConnection.setIntegration(this.hosting || this.payDevelopment || this.devMainnet || this.devDevnet || this.devSimulated ? this.agentConnection.status().enabled : this.codexIntegration.configured,
+        this.hosting || this.payDevelopment || this.devMainnet || this.devDevnet || this.devSimulated ? 'yosh-pay-dev' : this.codexIntegration.serverName);
       // A verified persisted connection survives a service restart. Host-session
       // liveness is still reset by AgentConnection, and purchase checks remain server-side.
     } catch (error) {
@@ -297,6 +309,8 @@ export class AppRuntime {
   }
   healthStatus() {
     return { coreReady: true,
+      ...(this.hosting ? { hosting: { kind: this.hosting.kind, apiVersion: 1 as const,
+        dataContract: 'existing-mainnet-v1' as const, runtimeDigest: this.hosting.runtimeDigest } } : {}),
       wallet: this.authorityWalletStatus === 'available' ? 'walletAvailable'
         : this.authorityWalletStatus === 'unavailable' ? 'walletUnavailable' : 'walletChecking',
       recovery: this.recoveryStatus === 'running' ? 'recoveryRunning'
@@ -361,7 +375,7 @@ export class AppRuntime {
     await this.start(origin); await this.initializeWallet();
     if (!this.accepting) throw new Error('SERVICE_STOPPING');
     return this.payAuthority.recoverOperation(operationId, principal,
-      resolveRuntimePath(dirname(process.execPath), '../Resources/Runtime/pay-mcp'));
+      this.hosting?.payMcpPath ?? resolveRuntimePath(dirname(process.execPath), '../Resources/Runtime/pay-mcp'));
   }
   async payMcpOperation(action: 'authorize' | 'plan' | 'execute', raw: unknown, principal: SpendPrincipal, origin: string) {
     if (!this.controlledPay || !this.payAuthority) throw new Error('PAY_CONTROLLED_EXECUTION_NOT_ENABLED');
@@ -412,8 +426,9 @@ export class AppRuntime {
       this.recoveryStatus = this.ledger.pendingRecovery().length ? 'pending' : 'complete';
     } catch { this.recoveryStatus = 'pending'; }
     this.scheduleDeliveryRecovery(origin);
-    // Renaming an owned MCP entry must never delay or replace original payment recovery.
-    if (this.accepting && !IS_CODEX_PLUGIN_DEVELOPMENT && this.codexIntegration.needsMigration) {
+    // A standalone owner must not replace the original App's Codex launch entry.
+    // Renaming an App-owned MCP entry must never delay original payment recovery.
+    if (this.accepting && !this.hosting && !IS_CODEX_PLUGIN_DEVELOPMENT && this.codexIntegration.needsMigration) {
       try {
         await this.codexIntegration.migrateLegacy();
         this.agentConnection.setIntegration(this.accepting && this.codexIntegration.configured, this.codexIntegration.serverName);
@@ -801,7 +816,7 @@ export class AppRuntime {
   }
   /** Default member is the existing Codex identity; labels never select providers. */
   setMemberConnection(enabled: boolean, origin: string, memberId: string) {
-    if (this.payDevelopment || this.devMainnet || this.devDevnet || this.devSimulated) {
+    if (this.hosting || this.payDevelopment || this.devMainnet || this.devDevnet || this.devSimulated) {
       // Enable only the existing member capability. The user explicitly starts
       // a separate Codex configuration; this App never edits their host config.
       const connection = this.connectionFor(memberId);
