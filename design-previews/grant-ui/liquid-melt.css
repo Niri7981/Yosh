@@ -1,0 +1,6 @@
+.melt-veil{z-index:2;background:#85765e;opacity:0;pointer-events:none;mix-blend-mode:soft-light}
+.melt-preview #navigation-highlight{visibility:hidden}
+.melt-nav{position:absolute;inset:0;filter:url(#preview-nav-goo);pointer-events:none;z-index:0}
+.melt-nav-drop{position:absolute;left:0;background:#454239;border-radius:12px;pointer-events:none}
+@media(prefers-reduced-motion:reduce){.melt-nav{filter:none}.melt-veil{display:none}}
+@media(forced-colors:active){.melt-preview #navigation-highlight{visibility:visible}.melt-nav{display:none}}
