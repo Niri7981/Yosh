@@ -1,0 +1,29 @@
+.shared-budget-body{padding:18px 0 0}
+.shared-pool{position:relative;padding:0 0 24px}
+.shared-pool-heading{display:flex;align-items:center;gap:9px}
+.shared-pool-label{font-size:11px;color:#bdb7ae}
+.shared-example{font-size:9px;color:#d6b68f;border:1px solid #4d4335;border-radius:4px;padding:1px 5px;line-height:1.5}
+.shared-budget-body .shared-pool-total{display:flex;align-items:baseline;gap:9px;margin:11px 0 0;font:500 32px/1.2 -apple-system,BlinkMacSystemFont,sans-serif;letter-spacing:-.8px;color:#f2eee6;font-variant-numeric:tabular-nums}
+.shared-unit{font-size:12px;font-weight:400;color:#bdb7ae;letter-spacing:0}
+.shared-budget-body .shared-pool-status{position:absolute;right:0;bottom:28px;color:#d6b68f;font-size:11px;margin:0}
+.shared-agents-heading{display:flex;align-items:center;justify-content:space-between;gap:8px;border-top:1px solid var(--line);padding:18px 0 6px}
+.shared-agents-heading h2{font:500 12px/1.5 -apple-system,BlinkMacSystemFont,sans-serif;margin:0;color:#d8d3c8}
+.shared-agents-heading>span{font-size:10px;color:#aaa69f}
+.shared-agent-list{padding:0;margin:0;list-style:none}
+.shared-agent-row{display:flex;align-items:center;gap:12px;min-height:78px;padding:16px 0;border-bottom:1px solid #ffffff09}
+.shared-agent-row:last-child{border-bottom:0}
+.shared-agent-icon{width:36px;height:36px;flex:none;display:grid;place-items:center;color:#f2eee6}
+.shared-agent-icon img{width:24px;height:24px;display:block;object-fit:contain}
+.shared-agent-icon svg{display:block;width:36px;height:36px}
+.shared-agent-icon-gemini img{filter:invert(1)}
+.shared-agent-identity{min-width:0;flex:1}
+.shared-agent-name{display:flex;flex-wrap:wrap;align-items:center;gap:7px;font-size:13px;font-weight:500;color:#f2eee6;line-height:1.4}
+.shared-agent-current{font-size:9px;font-weight:400;color:#bdb7ae;background:#2b2b25;border-radius:4px;padding:1px 5px}
+.shared-budget-body .shared-agent-scope{margin:6px 0 0;font-size:11px;line-height:1.4;color:#bdb7ae;overflow-wrap:anywhere}
+.shared-agent-value{display:flex;flex-direction:column;align-items:flex-end;gap:6px;flex:none}
+.shared-agent-amount{display:flex;align-items:baseline;gap:5px;font-size:16px;font-weight:500;font-variant-numeric:tabular-nums;white-space:nowrap}
+.shared-agent-unit{font-size:10px;font-weight:400;color:#bdb7ae}
+.shared-agent-unset{font-size:16px;color:#aaa69f}
+.shared-agent-value-label{font-size:10px;color:#aaa69f}
+.shared-budget-body .shared-budget-explainer{margin:8px 0 4px;padding-top:14px;border-top:1px solid var(--line);font-size:10px;line-height:1.9;color:#aaa69f}
+@media(max-width:420px){.shared-agent-row{gap:8px}.shared-agent-icon{width:28px;height:28px}.shared-agent-icon svg{width:32px;height:32px}.shared-agent-name{font-size:12px}.shared-budget-body .shared-agent-scope{font-size:10px}.shared-agent-amount{font-size:15px}.shared-agents-heading{align-items:flex-start;flex-direction:column;gap:4px}}
