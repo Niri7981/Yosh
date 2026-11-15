@@ -1,0 +1,46 @@
+#grant-dialog dl.grant-proof{position:relative;display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:0;margin:0;padding:0;border:0}
+#grant-dialog .grant-proof dt,#grant-dialog .grant-proof dd{text-align:left}
+.grant-proof .proof-party{position:relative;display:flex;flex-direction:column;align-items:center;min-width:0;padding:4px 10px 16px;gap:6px}
+#grant-dialog .proof-party .proof-party-label{font-size:10px;color:#aaa69f;order:1}
+#grant-dialog .proof-party dd{display:flex;flex-direction:column;align-items:center;gap:8px;min-width:0;width:100%;order:0;text-align:center}
+.proof-party-icon{display:grid;place-items:center;width:46px;height:46px;flex:none;color:#ece8df}
+.proof-party-agent .proof-party-icon svg{width:58px;height:58px}
+.proof-party-api .proof-party-icon{border:1px solid #45463b;background:#2c2e26;border-radius:13px;color:#c6d1b8}
+.proof-party-api .proof-party-icon svg{width:26px;height:26px}
+.proof-party-name{font-size:13px;line-height:1.5;font-weight:500;overflow-wrap:anywhere;max-width:100%}
+.grant-proof::before{content:'→';position:absolute;left:50%;top:15px;transform:translateX(-50%);font-size:18px;font-weight:300;color:#77766c}
+.grant-proof .proof-hero{grid-column:1/-1;padding:18px 0 20px;border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+#grant-dialog .proof-hero .proof-hero-label{text-align:center;font-size:11px;color:#bdb7ae;margin-bottom:13px}
+#grant-dialog .proof-hero .proof-money{display:flex;align-items:center;justify-content:center;gap:11px;text-align:center;flex-wrap:wrap}
+.proof-token{display:block;width:36px;height:36px;object-fit:contain;flex:none}
+.proof-money-number{font-size:44px;line-height:1.15;font-weight:500;letter-spacing:-1.5px;font-variant-numeric:tabular-nums;overflow-wrap:anywhere;max-width:100%}
+.proof-money-unit{font-size:12px;color:#c9c4bb;align-self:center}
+#grant-dialog .proof-hero .proof-money-caption{font-size:10px;text-align:center;color:#aaa69f;margin-top:12px;line-height:1.6}
+.proof-constraint{padding:16px 0 12px;min-width:0}
+.proof-constraint:nth-of-type(5){padding-left:20px}
+#grant-dialog .proof-constraint dt{display:flex;align-items:center;gap:6px;font-size:10px;color:#bdb7ae;margin-bottom:12px}
+.proof-constraint dt svg{width:14px;height:14px;flex:none}
+#grant-dialog .proof-limit-value{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px;font-size:21px;font-weight:500;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+.proof-limit-value>span:first-child{min-width:0;max-width:100%;overflow-wrap:anywhere}
+.proof-small-unit{font-size:10px;font-weight:400;color:#bdb7ae}
+#grant-dialog .proof-expiry{display:flex;flex-direction:column;gap:7px;font-variant-numeric:tabular-nums}
+.proof-expiry-date{font-size:14px;font-weight:500;line-height:1.7}
+.proof-expiry-time{font-size:10px;color:#aaa69f;line-height:1.5}
+.proof-network{grid-column:1/-1;padding:5px 0 10px}
+#grant-dialog .proof-network dd{display:flex;align-items:center;justify-content:center;gap:7px;font-size:10px;color:#bdb7ae}
+.proof-network svg{width:15px;height:14px;flex:none}
+.proof-sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}
+#grant-dialog.graphical-grant-review #review .proof-scroll>details{border-top:1px solid var(--line);margin-top:0;padding:10px 0 0}
+#grant-dialog.graphical-grant-review #review .proof-scroll>details>summary{display:flex;align-items:center;gap:8px;font-size:11px;min-height:36px}
+#grant-dialog.graphical-grant-review #review .proof-scroll>details>summary>svg{width:15px;height:15px;flex:none}
+#grant-dialog.graphical-grant-review #review .proof-scroll>details>summary::after{margin-left:auto}
+#grant-dialog.graphical-grant-review #details{font-size:10px;line-height:1.8}
+@media(max-width:420px){.proof-money-number{font-size:37px}.proof-token{width:32px;height:32px}.proof-party-name{font-size:12px}.grant-proof .proof-party{padding-inline:4px}.proof-party-agent .proof-party-icon svg{width:54px;height:54px}.proof-constraint:nth-of-type(5){padding-left:12px}.proof-expiry-date{font-size:12px}#grant-dialog .proof-limit-value{font-size:19px}}
+
+/* Keep the decision controls outside the scrolling review body. */
+#grant-dialog{min-height:min(650px,calc(100dvh - 40px))}
+#grant-dialog.graphical-grant-review:has(#review:not([hidden])) #grant-body{overflow:hidden}
+#grant-dialog.graphical-grant-review .dialog-heading{flex:none}
+#grant-body #review{min-height:0}
+#review .proof-scroll{flex:1;min-height:0;overflow:auto;overscroll-behavior:contain;scrollbar-width:thin;scrollbar-color:#55554b transparent}
+#grant-body #review .action-bar{flex:none;margin-top:0;padding-top:16px}
