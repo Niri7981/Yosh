@@ -137,6 +137,16 @@ The first command verifies an artifact already produced by `build-standalone-dep
 
 Run `npm run typecheck`, `npm run lint`, `npm run build` and the relevant tests before delivery. Mainnet acceptance is separate from fixture testing and requires explicit purchase authorization. [Standalone acceptance](docs/architecture/mainnet-standalone-runtime-20261113.md) documents the host checks and evidence boundaries. Native App builds retain their [stable release process](docs/releases/v0.1.1.md).
 
+### Grant UI design preview
+
+The latest frontend design can be opened independently of Yosh.app or a payment runtime:
+
+```sh
+node --import tsx design-previews/grant-ui/serve.ts
+```
+
+This preview includes the asset portfolio, per-Agent Grant summary, liquid transitions and graphical authorization review. All financial data is synthetic and confirmation is disabled. See the [preview guide](design-previews/grant-ui/README.md) for the boundary between live frontend source and design-only overlays; real portfolio and cross-Agent data integration remain separate work.
+
 ## Documentation
 
 - [Documentation index](docs/README.md)
