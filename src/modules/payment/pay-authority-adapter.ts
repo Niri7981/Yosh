@@ -5,7 +5,8 @@ import { z } from 'zod';
 import type { AppRuntime } from '../app/app-runtime';
 import type { SpendPrincipal } from '../authority/spend-grant';
 import { requestPaidResourcePurchase } from '../purchases/request-paid-resource-purchase';
-import { executeApprovedPayment, recoverApprovedPayment } from '../purchases/approved-payment';
+import { recoverApprovedPayment } from '../purchases/approved-payment';
+import { routeApprovedPayment } from './payment-router';
 import { hash } from '../purchases/spending-policy';
 import { paidResource } from '../resources/paid-resources';
 import { X402ChallengeSchema, assertAuthorizedRequestInstance, resourceInputNames } from '../resources/http-resource';
@@ -293,7 +294,7 @@ export function createPayAuthorityAdapter(options: { directory: string; runtime:
         attempt.phase = 'executing';
         unsigned.set(record.approvalId, value);
         try {
-          await executeApprovedPayment(options.runtime().ledger, record.approvalId, config, attempt.facts.request.url, undefined, options.executor, attempt.permit);
+          await routeApprovedPayment([options.runtime().ledger, record.approvalId, config, attempt.facts.request.url, undefined, options.executor, attempt.permit]);
           attempt.phase = 'done';
           return response(attempt, principal);
         } finally { unsigned.delete(record.approvalId); }
