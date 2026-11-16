@@ -13,23 +13,28 @@ afterEach(() => { for (const directory of directories.splice(0)) rmSync(director
 const ProfileSchema = z.object({ bundleIdentifier: z.string(), directoryName: z.string(),
   backendPort: z.number(), merchantPort: z.number(), rpcPort: z.number(), keychainNamespace: z.string() });
 
-function compiled(entry: string, rc3?: boolean) {
+function compiled(entry: string, rc5?: boolean) {
   return buildSync({ entryPoints: [resolve(entry)], bundle: true, write: false, platform: 'node', format: 'cjs',
-    packages: 'external', minifySyntax: true, ...(rc3 === undefined ? {} : { define: { __YOSH_RC5__: String(rc3) } }) }).outputFiles[0].text;
+    // Match the explicit mainnet profile in build-standalone-dev.py. Leaving
+    // newer profile flags dynamic retains unrelated fallback branches even
+    // though the runtime identity is correct, invalidating the artifact check.
+    packages: 'external', minifySyntax: true, define: { __YOSH_LOCAL_AUTH_DEV__: 'false',
+      __YOSH_PLUGIN_DEV__: 'false', __YOSH_STANDALONE_DEV__: 'false',
+      ...(rc5 === undefined ? {} : { __YOSH_RC5__: String(rc5) }) } }).outputFiles[0].text;
 }
-function load(entry: string, rc3?: boolean): unknown {
-  return runInNewContext(`${compiled(entry, rc3)}\nmodule.exports`, { module: { exports: {} }, require: requireDependency, URL, Error,
+function load(entry: string, rc5?: boolean): unknown {
+  return runInNewContext(`${compiled(entry, rc5)}\nmodule.exports`, { module: { exports: {} }, require: requireDependency, URL, Error,
     process: { getuid: process.getuid, env: { YOSH_RC3: '1', YOSH_KEYCHAIN_NAMESPACE: 'untrusted.namespace' } } });
 }
-function profile(rc3?: boolean) {
-  return z.object({ PAY_DEVELOPMENT_PROFILE: ProfileSchema }).parse(load('src/modules/pay-dev/profile.ts', rc3)).PAY_DEVELOPMENT_PROFILE;
+function profile(rc5?: boolean) {
+  return z.object({ PAY_DEVELOPMENT_PROFILE: ProfileSchema }).parse(load('src/modules/pay-dev/profile.ts', rc5)).PAY_DEVELOPMENT_PROFILE;
 }
 function parent() {
   const directory = realpathSync(mkdtempSync(join(tmpdir(), 'yosh-candidate-profile-')));
   directories.push(directory); return directory;
 }
 
-it('retains the existing Dev identity unless the compiler explicitly selects rc.4', () => {
+it('retains the existing Dev identity unless the compiler explicitly selects rc.5', () => {
   const legacy = { bundleIdentifier: 'com.yosh.pay-development', directoryName: 'Yosh Pay Dev',
     backendPort: 13049, merchantPort: 13050, rpcPort: 13051, keychainNamespace: 'com.yosh.pay-development' };
   expect(profile()).toEqual(legacy);
@@ -40,7 +45,7 @@ it('retains the existing Dev identity unless the compiler explicitly selects rc.
   expect(candidateSource).not.toMatch(/\b13049\b|\b13050\b|\b13051\b|["']Yosh Pay Dev["']|["']com\.yosh\.pay-development["']/);
 });
 
-it('rc.4 environment configuration rejects the old directory, aliases and old service origin', () => {
+it('rc.5 environment configuration rejects the old directory, aliases and old service origin', () => {
   const environment = z.object({
     readDevelopmentEnvironment: z.custom<(directory: string) => unknown>(value => typeof value === 'function'),
     assertDevelopmentOrigin: z.custom<(origin: string) => void>(value => typeof value === 'function'),

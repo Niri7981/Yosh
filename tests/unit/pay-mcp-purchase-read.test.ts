@@ -16,7 +16,7 @@ afterEach(() => { for (const directory of directories.splice(0)) rmSync(director
 const code = buildSync({ entryPoints: [resolve('scripts/pay-dev-mcp.ts')], bundle: true, write: false,
   platform: 'node', format: 'cjs', packages: 'external', define: { __YOSH_PLUGIN_DEV__: 'true' }, minifySyntax: true }).outputFiles[0].text;
 
-function fixture(policyCode: string, missing = false) {
+function fixture(policyCode: string, missing = false, mppError?: string) {
   const parent = realpathSync(mkdtempSync(join(tmpdir(), 'yosh-purchase-read-'))); directories.push(parent);
   const directory = join(parent, 'Yosh Codex Plugin Dev'); mkdirSync(directory, { mode: 0o700 });
   const memberId = randomUUID(); const token = 'a'.repeat(43); const origin = 'http://127.0.0.1:14449';
@@ -38,6 +38,8 @@ function fixture(policyCode: string, missing = false) {
       return missing ? Response.json({ code: 'PURCHASE_NOT_FOUND' }, { status: 404 }) : Response.json(summary);
     if (input.includes('/api/agent/purchases/pay_original/delivery?offset=0'))
       return Response.json({ purchaseId: 'pay_original', offset: 0, nextOffset: null, chunk: 'e30=', totalBytes: 2 });
+    if (input.endsWith('/api/agent/mpp/purchases')) return mppError
+      ? Response.json({ code: mppError }, { status: 409 }) : Response.json(summary);
     if (input.endsWith('/api/agent/discovery')) return Response.json({ code: 'OFFLINE_RESOURCE_LIFECYCLE_UNAVAILABLE' }, { status: 409 });
     throw new Error('UNEXPECTED_AGENT_READ');
   });
@@ -64,7 +66,7 @@ it('the plugin lists only upstream curl and blocks guessed upstream tools before
   const f = fixture('PAYMENTS_PAUSED');
   try {
     expect(f.listTools()).toEqual(['curl', 'get_spending_status', 'get_purchase', 'get_purchase_delivery',
-      'discover_x402_resource', 'register_x402_resource', 'quote_x402_resource']);
+      'request_mpp_purchase', 'discover_x402_resource', 'register_x402_resource', 'quote_x402_resource']);
     const before = f.forwarded.length;
     const forbidden = ['create_skill', 'get_balance', 'get_catalog_entry', 'list_catalog', 'search_catalog',
       'sell_inference', 'topup', 'recover_payment', 'future_upstream_tool'];
@@ -129,6 +131,52 @@ it('reports the explicit offline discovery boundary without forwarding to Pay or
     await vi.waitFor(() => expect(f.responses).toHaveLength(1));
     expect(f.result(1).isError).toBe(true);
     expect(f.result(1).content[0].text).toContain('OFFLINE_RESOURCE_LIFECYCLE_UNAVAILABLE');
+    expect(f.forwarded).toHaveLength(0);
+  } finally { f.close(); }
+});
+
+it('dispatches MPP purchases only to the authenticated local backend and preserves the stable request ID', async () => {
+  const f = fixture('SPEND_GRANT_REQUIRED');
+  const input = { requestId: 'mpp_original', resourceId: 'registered-mpp-resource', reason: 'Retrieve the registered fixture' };
+  try {
+    f.send(1, 'request_mpp_purchase', input);
+    await vi.waitFor(() => expect(f.responses).toHaveLength(1));
+    expect(f.result(1).isError).toBeUndefined();
+    expect(JSON.parse(f.result(1).content[0].text)).toEqual(f.summary);
+    expect(f.fetcher).toHaveBeenCalledOnce();
+    expect(f.fetcher.mock.calls[0][0]).toBe('http://127.0.0.1:14449/api/agent/mpp/purchases');
+    expect(f.fetcher.mock.calls[0][1]).toMatchObject({ method: 'POST', redirect: 'error',
+      headers: { 'content-type': 'application/json' } });
+    expect(JSON.parse(String(f.fetcher.mock.calls[0][1].body))).toEqual(input);
+    expect(f.forwarded).toHaveLength(0);
+  } finally { f.close(); }
+});
+
+it('rejects MPP injected payment/approval fields before any local request or Pay forwarding', async () => {
+  const f = fixture('SPEND_GRANT_REQUIRED');
+  const input = { requestId: 'mpp_original', resourceId: 'registered-mpp-resource', reason: 'Read fixture' };
+  try {
+    for (const [index, injected] of [{ approved: true }, { url: 'https://attacker.invalid/pay' },
+      { amount: '1', payTo: 'untrusted-recipient' }, { transaction: 'unsigned-wire' },
+      { credential: 'Payment supplied-by-agent' }, { requestId: '../replacement' }].entries()) {
+      f.send(index + 1, 'request_mpp_purchase', { ...input, ...injected });
+      await vi.waitFor(() => expect(f.responses).toHaveLength(index + 1));
+      expect(f.result(index + 1)).toMatchObject({ isError: true,
+        content: [{ type: 'text', text: expect.stringContaining('RESOURCE_TOOL_INPUT_INVALID') }] });
+    }
+    expect(f.fetcher).not.toHaveBeenCalled(); expect(f.forwarded).toHaveLength(0);
+  } finally { f.close(); }
+});
+
+it('preserves the MPP activation refusal and original-purchase recovery guidance', async () => {
+  const f = fixture('SPEND_GRANT_REQUIRED', false, 'MPP_MAINNET_ACCEPTANCE_REQUIRED');
+  try {
+    f.send(1, 'request_mpp_purchase', { requestId: 'mpp_original', resourceId: 'registered-mpp-resource', reason: 'Read fixture' });
+    await vi.waitFor(() => expect(f.responses).toHaveLength(1));
+    expect(f.result(1)).toMatchObject({ isError: true,
+      content: [{ type: 'text', text: expect.stringContaining('MPP_MAINNET_ACCEPTANCE_REQUIRED') }] });
+    expect(f.result(1).content[0].text).toContain('Read the original purchase ID');
+    expect(f.result(1).content[0].text).not.toContain('No spending permission or payment was created');
     expect(f.forwarded).toHaveLength(0);
   } finally { f.close(); }
 });
