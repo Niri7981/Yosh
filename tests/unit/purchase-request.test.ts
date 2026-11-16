@@ -344,6 +344,8 @@ it('persists a structured DENIED request when the grant is already revoked', asy
     });
     expect(denied).not.toHaveProperty('resource');
     const record = ledger.getOwned('revoked-during-quote', cardMemberId);
+    if (!record) throw new Error('Expected denied x402 purchase');
+    assertX402Purchase(record);
     expect(record).toMatchObject({ status: 'DENIED', executionMode: 'live_devnet', paymentPayloadPresent: false });
     expect(record).not.toHaveProperty('transaction');
     expect(record).not.toHaveProperty('data');
@@ -370,3 +372,4 @@ it('persists a structured DENIED request when the grant is already revoked', asy
     rmSync(directory, { recursive: true, force: true });
   }
 });
+import { assertX402Purchase } from '../../src/modules/purchases/purchase-contract';

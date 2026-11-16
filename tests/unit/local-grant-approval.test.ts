@@ -132,3 +132,23 @@ it('keeps mainnet receipts and legacy native App grants usable across restart wi
     expect(reopened.listForAdministration()).toEqual([]);
   } finally { reopened.close(); }
 });
+
+it('freezes explicit MPP fee consent and rejects missing or changed fee limits without consuming the confirmation', () => {
+  const { ledger, approvals } = open();
+  const mppScope = { ...scope, paymentScheme: 'mpp_charge', maximumNetworkFeeLamports: '10001' };
+  const frozen = approvals.freeze({ environment: 'devnet', agentLabel: 'Codex', apiLabel: 'MPP API',
+    sessionHash: 'a'.repeat(64), resourceHash: 'b'.repeat(64), binding: { ...binding, scope: mppScope } }, now);
+  const confirmation = { requestId: frozen.request.id, digest: frozen.digest };
+  expect(frozen.request.binding.scope.maximumNetworkFeeLamports).toBe('10001');
+  for (const maximumNetworkFeeLamports of [undefined, '10002', '0', '1.5', '1e4']) {
+    expect(() => ledger.createSpendGrant(input, principal, { ...mppScope, maximumNetworkFeeLamports }, now,
+      'live_devnet', confirmation)).toThrow();
+    expect(approvals.read(confirmation.requestId).state).toBe('PENDING');
+  }
+  expect(localGrantDigest({ ...frozen.request, binding: { ...binding,
+    scope: { ...mppScope, maximumNetworkFeeLamports: '10002' } } })).not.toBe(frozen.digest);
+  const grant = ledger.createSpendGrant(input, principal, mppScope, now, 'live_devnet', confirmation);
+  expect(grant.maximumNetworkFeeLamports).toBe('10001');
+  expect(approvals.read(confirmation.requestId)).toMatchObject({ state: 'CONSUMED', grantId: grant.id });
+  expect(ledger.listForAdministration()).toEqual([]);
+});

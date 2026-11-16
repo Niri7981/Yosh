@@ -49,6 +49,7 @@ function validatedResource(declared: X402Resource, environment: PaymentEnvironme
   const { mode, cluster, genesisHash, rpcUrl, network, asset, isProduction, productionExecutionEnabled } = environment;
   const validated = validatePaymentEnvironment({ mode, cluster, genesisHash, rpcUrl, network, asset, isProduction, productionExecutionEnabled });
   const resource = X402ResourceSchema.parse(declared);
+  if (resource.paymentProtocol === 'mpp_solana_charge') throw new Error('PAYMENT_PROTOCOL_MISMATCH');
   if (validated.isProduction) assertSupportedMainnetResourceRequest(resource.request);
   if (resource.deliveryRecovery) validateDeliveryCapability(resource.deliveryRecovery, resource.request);
   if (resource.network !== validated.network || resource.mint !== validated.asset.mint || resource.decimals !== validated.asset.decimals

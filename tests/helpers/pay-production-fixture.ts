@@ -343,7 +343,9 @@ export async function productionPayFixture(options: { hooks?: ExecutionOptions['
       async callPay(client: Client, operation: string, freshOffer = false) {
         // Recovery tests must present the original offer. A fresh memo is a
         // different accepted offer and must now conflict, not silently replay.
-        payProbeOffer = freshOffer ? undefined : app?.ledger.getOwned(authority!.purchaseId(memberId, operation), memberId)?.quote;
+        const original = freshOffer ? undefined : app?.ledger.getOwned(authority!.purchaseId(memberId, operation), memberId);
+        if (original) assertX402Purchase(original);
+        payProbeOffer = original?.quote;
         return client.callTool({ name: 'curl', arguments: { operation_id: operation, url: new URL(paidResource('market-snapshot').path, origin).href } });
       },
       record(requestId: string) { return app?.ledger.getOwned(requestId, memberId); },
@@ -429,3 +431,4 @@ export async function productionPayFixture(options: { hooks?: ExecutionOptions['
     throw error;
   }
 }
+import { assertX402Purchase } from '../../src/modules/purchases/purchase-contract';

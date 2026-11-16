@@ -14,6 +14,7 @@ import { AgentResourceRegistrationInput } from '../src/modules/resources/agent-r
 import { MAX_SERIALIZED_RESOURCE_DELIVERY_BYTES, ResourceRequestInputSchema } from '../src/modules/resources/http-resource';
 import { AgentRegistrationErrorCodes } from '../src/modules/mcp/server';
 import { AgentPurchaseReadInput, AgentPurchaseSummary } from '../src/modules/mcp/purchase-read-contract';
+import { PurchaseRequestInputSchema } from '../src/modules/purchases/purchase-request-input';
 import { PLUGIN_OFFLINE_RESOURCE_PATHS } from '../src/modules/pay-dev/offline-resource-policy';
 
 const ManifestSchema = z.object({
@@ -114,6 +115,8 @@ async function main() {
   // Yosh-only resource lifecycle. Payment calls continue byte-for-byte to Pay;
   // these tools hold only the captured Agent capability, never management access.
   const resourceTools = live || (IS_CODEX_PLUGIN_DEVELOPMENT && !simulated) ? [
+    { name: 'request_mpp_purchase', path: '/api/agent/mpp/purchases', schema: PurchaseRequestInputSchema,
+      description: 'Request a registered MPP Solana Charge using a stable requestId. Requires a separate mpp_charge Spend Grant and explicit SOL fee cap. Currently available only in the isolated development runtime; Mainnet activation is blocked pending acceptance. Unknown outcomes must retain the same purchase ID; never retry with a new ID or another protocol.' },
     { name: 'discover_x402_resource', path: '/api/agent/discovery', schema: DiscoveryInput,
       description: live ? 'Inspect a candidate public HTTPS x402 API without payment using Yosh discovery. Returns an Agent-bound discoveryId and immutable registration proposal. Unknown POST requires separate approval in Yosh. Does not register, authorize spending or pay.'
         : 'Inspect one of the fixed Offline GET fixture URLs returned in get_spending_status.discoveryUrls. Returns an Agent-bound discoveryId. No public network, registration, spending permission or payment.' },
@@ -214,7 +217,7 @@ async function main() {
       const args = tool.schema.parse(input.arguments ?? {});
       const response = await fetch(`${connection.origin}${tool.path}`, { method: 'POST',
         headers: { authorization: `Bearer ${connection.token}`, 'content-type': 'application/json' },
-        body: JSON.stringify(args), redirect: 'error', signal: AbortSignal.timeout(20_000) });
+        body: JSON.stringify(args), redirect: 'error', signal: AbortSignal.timeout(tool.name === 'request_mpp_purchase' ? 120_000 : 20_000) });
       const reader = response.body?.getReader();
       if (!reader) throw new Error('RESOURCE_REGISTRATION_UNAVAILABLE');
       const chunks: Uint8Array[] = []; let size = 0;
@@ -228,17 +231,24 @@ async function main() {
       if (!response.ok) {
         const code = z.object({ code: z.string() }).safeParse(value);
         const allowed = [...AgentRegistrationErrorCodes, 'RESOURCE_DISCOVERY_UNAVAILABLE', 'RESOURCE_QUOTE_UNAVAILABLE', 'RESOURCE_POST_APPROVAL_REQUIRED',
-          'OFFLINE_RESOURCE_LIFECYCLE_UNAVAILABLE', 'OFFLINE_FIXTURE_INPUT_INVALID', 'OFFLINE_RESOURCE_TOOL_UNAVAILABLE'];
+          'OFFLINE_RESOURCE_LIFECYCLE_UNAVAILABLE', 'OFFLINE_FIXTURE_INPUT_INVALID', 'OFFLINE_RESOURCE_TOOL_UNAVAILABLE',
+          'MPP_MAINNET_ACCEPTANCE_REQUIRED', 'MPP_ISOLATED_RUNTIME_REQUIRED', 'MPP_PROTOCOL_UNAVAILABLE', 'MPP_REGISTERED_RESOURCE_REQUIRED',
+          'MPP_RESOURCE_UNSUPPORTED', 'MPP_QUOTE_BINDING_INVALID', 'MPP_CHALLENGE_REQUIRED', 'MPP_CHALLENGE_ALREADY_USED', 'MPP_PURCHASE_REQUEST_FAILED', 'REQUEST_ID_CONFLICT'];
         throw new Error(response.status === 401 ? 'AGENT_UNAUTHORIZED'
           : code.success && allowed.includes(code.data.code) ? code.data.code : 'RESOURCE_REGISTRATION_UNAVAILABLE');
       }
       result = { content: [{ type: 'text', text: JSON.stringify(value) }] };
     } catch (error) {
       const allowed = [...AgentRegistrationErrorCodes, 'RESOURCE_DISCOVERY_UNAVAILABLE', 'RESOURCE_QUOTE_UNAVAILABLE', 'RESOURCE_POST_APPROVAL_REQUIRED',
-        'OFFLINE_RESOURCE_LIFECYCLE_UNAVAILABLE', 'OFFLINE_FIXTURE_INPUT_INVALID', 'OFFLINE_RESOURCE_TOOL_UNAVAILABLE'];
+        'OFFLINE_RESOURCE_LIFECYCLE_UNAVAILABLE', 'OFFLINE_FIXTURE_INPUT_INVALID', 'OFFLINE_RESOURCE_TOOL_UNAVAILABLE',
+          'MPP_MAINNET_ACCEPTANCE_REQUIRED', 'MPP_ISOLATED_RUNTIME_REQUIRED', 'MPP_PROTOCOL_UNAVAILABLE', 'MPP_REGISTERED_RESOURCE_REQUIRED',
+          'MPP_RESOURCE_UNSUPPORTED', 'MPP_QUOTE_BINDING_INVALID', 'MPP_CHALLENGE_REQUIRED', 'MPP_CHALLENGE_ALREADY_USED', 'MPP_PURCHASE_REQUEST_FAILED', 'REQUEST_ID_CONFLICT'];
       const code = error instanceof z.ZodError ? 'RESOURCE_TOOL_INPUT_INVALID'
         : error instanceof Error && allowed.includes(error.message) ? error.message : 'RESOURCE_REGISTRATION_UNAVAILABLE';
-      result = { isError: true, content: [{ type: 'text', text: `${code}: No spending permission or payment was created.${code.startsWith('OFFLINE_')
+      const mppCall = z.object({ name: z.literal('request_mpp_purchase') }).passthrough().safeParse(params).success;
+      result = { isError: true, content: [{ type: 'text', text: mppCall
+        ? `${code}: Request interrupted. Read the original purchase ID; do not assume no payment and do not create a replacement.`
+        : `${code}: No spending permission or payment was created.${code.startsWith('OFFLINE_')
         ? ' This isolated Offline environment supports fixed fixtures only; public API discovery and registration are unavailable.'
         : ' Review POST requests in Yosh before discovery.'}` }] };
     }
@@ -365,7 +375,7 @@ async function main() {
       if (live) response.data.result.tools.push(recoveryTool);
       for (const tool of resourceTools) response.data.result.tools.push({ name: tool.name, description: tool.description,
         inputSchema: z.toJSONSchema(tool.schema), annotations: { readOnlyHint: tool.name === 'quote_x402_resource',
-          destructiveHint: tool.name === 'discover_x402_resource', openWorldHint: tool.name !== 'register_x402_resource' } });
+          destructiveHint: ['discover_x402_resource', 'request_mpp_purchase'].includes(tool.name), openWorldHint: tool.name !== 'register_x402_resource' } });
       process.stdout.write(`${JSON.stringify(response.data)}\n`);
     } else {
       const purchase = z.object({ id: z.union([z.string(), z.number()]), result: z.object({ isError: z.boolean().optional(),

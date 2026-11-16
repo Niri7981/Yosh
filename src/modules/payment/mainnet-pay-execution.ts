@@ -11,6 +11,7 @@ import { assertUnsignedPaymentBindings, decodeOriginalTransaction } from './orig
 import { X402ChallengeSchema, SolanaPublicKeySchema } from '../resources/http-resource';
 import type { PurchaseLedger } from '../purchases/purchase-ledger';
 import { isDevnetDevelopment } from '../pay-dev/environment';
+import { assertX402Purchase } from '../purchases/purchase-contract';
 
 export async function readPayMainnetLifetime(config: PaymentConfig) {
   return readPayLifetime(config, 'mainnet');
@@ -74,6 +75,7 @@ export function createPayExecution(options: {
       claims.set(context.record.approvalId, { context, generation, started: false });
     },
     async prepare(context) {
+      assertX402Purchase(context.record);
       let stage: PaymentFailureStage = 'preparation';
       try {
         if (!ledger) throw new Error('PAY_RUNTIME_REQUIRED');

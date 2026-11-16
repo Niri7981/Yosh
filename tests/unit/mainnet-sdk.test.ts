@@ -38,6 +38,7 @@ it('the real locked official x402 SDK constructs and signs Mainnet USDC using fi
     const intent = createX402SpendIntent({ idempotencyKey: 'real-sdk-fixture', resource, challenge, environment, buyer: signer.address,
       authority: ledger.spendAuthority(principal, PAID_RESOURCE_PURCHASE_OPERATION, now, 'live_mainnet'), now });
     const record = ledger.reserve(intent, challenge.accepts[1], now, 'live_mainnet', principal.cardMemberId, ledger.paymentScope(config, 'live_mainnet'));
+    assertX402Purchase(record);
     ledger.claim(record.approvalId, now, undefined, 'live_mainnet');
     const mintBytes = Buffer.alloc(MintLayout.span);
     MintLayout.encode({ mintAuthorityOption: 0, mintAuthority: new PublicKey(signer.address), supply: 1_000_000n,
@@ -80,3 +81,4 @@ it('the real locked official x402 SDK constructs and signs Mainnet USDC using fi
     expect(methods).toEqual(['getGenesisHash', 'getMultipleAccounts', 'getBalance', 'getAccountInfo', 'getLatestBlockhash', 'simulateTransaction']);
   } finally { ledger.close(); }
 });
+import { assertX402Purchase } from '../../src/modules/purchases/purchase-contract';

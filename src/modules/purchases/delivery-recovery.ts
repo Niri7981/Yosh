@@ -8,6 +8,7 @@ import { readBoundedResourceDelivery, readBoundedResourceJson, readMarketSnapsho
 import type { HttpResourceRequest } from '../resources/http-resource';
 import { safeResourceFetch } from '../resources/safe-resource-fetch';
 import type { PurchaseLedger, PurchaseRecord } from './purchase-ledger';
+import { assertX402Purchase } from './purchase-contract';
 
 /** Receipt observation is independent of both chain accounting and delivered data. */
 export function observeDeliveryReceipt(ledger: PurchaseLedger, record: PurchaseRecord, response: Response, config: PaymentConfig) {
@@ -52,6 +53,7 @@ export async function receiveOriginalDelivery(ledger: PurchaseLedger, record: Pu
  * settlement API. It can only replay the saved bytes or query a declared cache. */
 export async function recoverPaidDelivery(ledger: PurchaseLedger, record: PurchaseRecord, config: PaymentConfig, endpoint: string,
   validate: (record: PurchaseRecord) => void, trace: Trace = () => {}, fetcher?: typeof fetch) {
+  assertX402Purchase(record);
   if (record.status !== 'PAID' || !['live_devnet', 'live_mainnet'].includes(record.executionMode) || record.deliveryStatus !== 'PENDING') return;
   const capability = ledger.deliveryCapability(record.approvalId);
   if (capability.kind === 'none') { ledger.blockDeliveryRecovery(record.approvalId, 'DELIVERY_RECOVERY_UNSUPPORTED'); return; }

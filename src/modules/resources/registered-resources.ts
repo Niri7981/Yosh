@@ -22,7 +22,7 @@ export function loadRegisteredResources(env: Record<string, string | undefined>,
 export function registeredResourceSummary(resource: ReturnType<typeof loadRegisteredResources>[number]) {
   const number = (amount: string | undefined) => amount === undefined ? null
     : `${BigInt(amount) / 1_000_000n}.${String(BigInt(amount) % 1_000_000n).padStart(6, '0').replace(/0+$/, '').padEnd(2, '0')} ${resource.network === DEVNET_NETWORK ? 'Test USDC' : 'USDC'}`;
-  return { resourceId: resource.resourceId, providerId: resource.providerId, name: resource.displayName ?? resource.resourceId,
+  return { ...(resource.paymentProtocol ? { paymentProtocol: resource.paymentProtocol } : {}), resourceId: resource.resourceId, providerId: resource.providerId, name: resource.displayName ?? resource.resourceId,
     url: resource.request.url, method: resource.request.method, recipient: resource.recipient ?? null,
     requestInputs: resource.requestInputs ?? null,
     recipientSource: resource.recipientSource ?? 'registered', network: resource.network,

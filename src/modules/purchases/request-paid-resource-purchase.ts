@@ -1,7 +1,6 @@
 import type { ExternalExecutionFacts } from './execution-safety';
 import { requestRegisteredResourcePurchase } from './request-registered-resource-purchase';
 import { randomUUID } from 'node:crypto';
-import { z } from 'zod';
 import { SpendIntentSchema } from '../authority/spend-intent';
 import { PAID_RESOURCE_PURCHASE_OPERATION, SpendPrincipalSchema, type SpendPrincipal } from '../authority/spend-grant';
 import { assertPaymentConfigExecutionEnabled, type PaymentConfig } from '../payment/payment-config';
@@ -16,15 +15,8 @@ import { resourcePaymentBinding } from '../payment/resource-challenge';
 import { TEST_CACHED_DELIVERY } from '../resources/delivery-capability';
 import { IS_CODEX_PLUGIN_DEVELOPMENT } from '../pay-dev/profile';
 
-export const PurchaseRequestInputSchema = z.object({
-  requestId: z.string().regex(/^[a-zA-Z0-9_-]{1,80}$/),
-  resourceId: z.string().min(1).max(200),
-  reason: z.string().trim().min(1).max(240),
-  query: z.string().trim().min(1).max(300).optional(),
-  request: z.object({ query: z.record(z.string(), z.string().min(1).max(300)).optional(),
-    jsonBody: z.record(z.string(), z.json()).optional() }).strict().optional(),
-}).strict();
-export type PurchaseRequestInput = z.infer<typeof PurchaseRequestInputSchema>;
+export { PurchaseRequestInputSchema, type PurchaseRequestInput } from './purchase-request-input';
+import { PurchaseRequestInputSchema, type PurchaseRequestInput } from './purchase-request-input';
 
 export type PurchaseRequestResult = {
   purchaseId: string; resourceId: PurchaseRequestInput['resourceId']; amount: string; display: string; status: PurchaseStatus;

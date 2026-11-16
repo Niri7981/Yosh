@@ -13,7 +13,7 @@ const label = z.string().min(1).max(200).regex(/^[^\p{Cc}\p{Cf}]+$/u);
 export const LocalGrantBinding = z.object({
   input: SpendGrantInputSchema,
   principal: SpendPrincipalSchema,
-  scope: SpendGrantScopeSchema.extend({ resourceId: label, providerId: label, operation: label,
+  scope: SpendGrantScopeSchema.safeExtend({ resourceId: label, providerId: label, operation: label,
     network: label, assetId: label, payTo: label, paymentScheme: label }),
   mode: z.enum(['live_devnet', 'live_mainnet']),
 }).strict();

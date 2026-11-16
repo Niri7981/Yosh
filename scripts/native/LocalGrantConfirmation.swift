@@ -12,6 +12,7 @@ private struct Scope: Decodable {
     let resourceId: String; let providerId: String; let operation: String
     let network: String; let assetId: String; let assetDecimals: Int
     let payTo: String; let paymentScheme: String
+    let maximumNetworkFeeLamports: String?
 }
 private struct Binding: Decodable { let input: GrantInput; let principal: Principal; let scope: Scope; let mode: String }
 private struct GrantRequest: Decodable {
@@ -106,10 +107,22 @@ struct LocalGrantConfirmation {
                   wallet.allSatisfy({ "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz".contains($0) }) else { throw Failure.rejected }
         }
         let total = try amount(request.binding.input.totalLimit, mainnet: mainnet), single = try amount(request.binding.input.singleLimit, mainnet: mainnet)
+        let fee: String
+        if request.binding.scope.paymentScheme == "mpp_charge" {
+            guard !mainnet, let raw = request.binding.scope.maximumNetworkFeeLamports,
+                  raw.first != "0", raw.allSatisfy({ $0 >= "0" && $0 <= "9" }),
+                  let integer = UInt64(raw), integer > 0, integer <= UInt64(Int64.max) else { throw Failure.rejected }
+            fee = "\(integer / 1_000_000_000).\(String(format: "%09llu", integer % 1_000_000_000)) SOL（\(raw) lamports）"
+        } else {
+            guard request.binding.scope.maximumNetworkFeeLamports == nil else { throw Failure.rejected }
+            fee = ""
+        }
+        let feeDetails = fee.isEmpty ? "" : "\n每笔 SOL 网络手续费上限：\(fee)\n由付款钱包承担，独立于 USDC 消费额度。"
         let expiry = Date(timeIntervalSince1970: Double(request.binding.input.expiresAt) / 1000)
             .formatted(date: .abbreviated, time: .standard)
-        let details = "Agent：\(request.agentLabel)\nAPI：\(request.apiLabel)\n环境：\(request.environment) · \(mainnet ? "真实资金授权" : "隔离测试")\n付款钱包：\(request.payerWallet ?? "离线测试身份")\n总额度：\(total)\n单笔上限：\(single)\n授权到期：\(expiry)\n\n网络：\(request.binding.scope.network)\n资产：\(request.binding.scope.assetId)\n收款方：\(request.binding.scope.payTo)\n付款方式：\(request.binding.scope.paymentScheme)\n\nAgent ID：\(request.binding.principal.cardMemberId)\n连接：\(request.binding.principal.connectionId) / \(request.binding.principal.connectionGeneration)\nAPI ID：\(request.binding.scope.resourceId)\n用途：\(request.binding.scope.operation)\n申请：\(request.id)\n摘要：\(digest)"
-        return Presentation(authenticationReason: "确认 Yosh 对 \(request.agentLabel) 的\(mainnet ? "主网真实资金授权" : "测试网授权")（\(digest.prefix(8))）", title: mainnet ? "核对 Yosh 主网授权" : "核对 Yosh 测试授权", details: details, challenge: request.challenge,
+        let details = "Agent：\(request.agentLabel)\nAPI：\(request.apiLabel)\n环境：\(request.environment) · \(mainnet ? "真实资金授权" : "隔离测试")\n付款钱包：\(request.payerWallet ?? "离线测试身份")\n总额度：\(total)\n单笔上限：\(single)\(feeDetails)\n授权到期：\(expiry)\n\n网络：\(request.binding.scope.network)\n资产：\(request.binding.scope.assetId)\n收款方：\(request.binding.scope.payTo)\n付款方式：\(request.binding.scope.paymentScheme)\n\nAgent ID：\(request.binding.principal.cardMemberId)\n连接：\(request.binding.principal.connectionId) / \(request.binding.principal.connectionGeneration)\nAPI ID：\(request.binding.scope.resourceId)\n用途：\(request.binding.scope.operation)\n申请：\(request.id)\n摘要：\(digest)"
+        let feeReason = fee.isEmpty ? "" : "；每笔 SOL 网络手续费上限 \(fee)"
+        return Presentation(authenticationReason: "确认 Yosh 对 \(request.agentLabel) 的\(mainnet ? "主网真实资金授权" : "测试网授权")\(feeReason)（\(digest.prefix(8))）", title: mainnet ? "核对 Yosh 主网授权" : "核对 Yosh 测试授权", details: details, challenge: request.challenge,
             expiresAt: request.expiresAt, agentLabel: request.agentLabel)
     }
     private static func confirm() throws {

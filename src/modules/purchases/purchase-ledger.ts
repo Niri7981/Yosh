@@ -1,11 +1,15 @@
 import { LocalControlApprovals, type LocalControlReceipt } from '../authority/local-control-approval';
 import { ExecutionSafety, type ExternalExecutionFacts, type ExternalExecutionPermit } from './execution-safety';
 import { LocalGrantApprovals, type LocalGrantConfirmation } from '../authority/local-grant-approval';
-import type { SpendReservation, PurchaseRecord } from './purchase-contract';
+import { assertX402Purchase, type SpendReservation, type PurchaseRecord, type PurchaseQuote } from './purchase-contract';
+import { MppChargeQuoteSchema, MppStoredPaymentSchema, type MppStoredPayment } from '../payment/mpp-contract';
+import { validateMppSignedPaymentIdentity } from '../payment/mpp-payment-evidence';
+import { migrateMppGrantConsent } from './mpp-grant-migration';
 export type { SpendReservation, PurchaseRecord } from './purchase-contract';
 import { TransactionSignatureSchema, validateSignedPaymentIdentity } from '../payment/original-payment-evidence';
 import { OriginalPaymentRecordSchema, OriginalPaymentStateSchema, type OriginalPaymentRecord, type StoredOriginalPayment } from './original-payment-record';
 import { migrateOriginalPaymentEvidence } from './original-payment-migration';
+import { ensureMppOriginalTransactionOwnership, migrateMppOriginalTransactionOwnership } from './mpp-original-payment-migration';
 import { PaymentReconciliation } from './payment-reconciliation';
 import { migrateHttpPurchaseBindings } from './http-binding-migration';
 import { migrateDeliveryRecovery } from './delivery-migration';
@@ -24,7 +28,7 @@ import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { address } from '@solana/kit';
-import type { PaymentPayload, PaymentRequirements } from '@x402/core/types';
+import type { PaymentPayload } from '@x402/core/types';
 import { CardMemberSchema, type CardMember } from '../authority/card-member';
 import { DEFAULT_SPENDING_POLICY, evaluateSpendAuthority, parseStoredAuthorityDecision, type AuthorityDecision, type SpendingControls } from '../authority/authority-policy';
 import { parseStoredSpendIntent, type SpendIntent } from '../authority/spend-intent';
@@ -62,6 +66,7 @@ export type SpendGrantSummary = {
   id: string; version: number; status: SpendGrant['status']; resourceId: string; providerId: string; operation: string;
   network: string; assetId: string; assetDecimals: number; payTo: string; paymentScheme: string; totalLimit: string; singleLimit: string;
   committed: string; remaining: string; createdAt: number; expiresAt: number; revokedAt: number | null;
+  maximumNetworkFeeLamports?: string;
 };
 function storedExecutionMode(value: unknown): StoredPurchaseExecutionMode {
   const parsed = PurchaseExecutionModeSchema.safeParse(value);
@@ -157,7 +162,7 @@ export class PurchaseLedger {
       this.db.prepare('INSERT OR IGNORE INTO app_budget_clock (id,spending_day,time_zone,next_boundary,last_seen) VALUES (1,?,?,?,?)')
         .run(spendingDay(now, zone), zone, nextSpendingDayBoundary(now, zone), now);
     }
-    try { migrateMonetaryLedger(this.db, this.managed, this.walletIdentity, this.now()); migrateOriginalPaymentEvidence(this.db, this.now()); migrateHttpPurchaseBindings(this.db, this.now()); migrateDeliveryRecovery(this.db, this.now()); migrateMainnetAuthority(this.db, this.managed, this.now()); this.migrateResourceScopedGrants(); this.migratePostGrantConsent(); this.resources = new RuntimeResourceRegistry(this.db, this.now); this.reconciliation = new PaymentReconciliation(this.db, this.now); this.delivery = new PurchaseDeliveryStore(this.db, this.now); this.walletLibrary = new WalletLibrary(this.db); this.walletAccounts = new WalletAccounts(this.db, this.now, approvalId => this.walletHistoricalPayer(approvalId)); }
+    try { migrateMonetaryLedger(this.db, this.managed, this.walletIdentity, this.now()); migrateOriginalPaymentEvidence(this.db, this.now()); migrateMppOriginalTransactionOwnership(this.db, this.now()); migrateHttpPurchaseBindings(this.db, this.now()); migrateDeliveryRecovery(this.db, this.now()); migrateMainnetAuthority(this.db, this.managed, this.now()); this.migrateResourceScopedGrants(); this.migratePostGrantConsent(); this.resources = new RuntimeResourceRegistry(this.db, this.now); this.reconciliation = new PaymentReconciliation(this.db, this.now); this.delivery = new PurchaseDeliveryStore(this.db, this.now); this.walletLibrary = new WalletLibrary(this.db); this.walletAccounts = new WalletAccounts(this.db, this.now, approvalId => this.walletHistoricalPayer(approvalId)); }
     catch (error) { this.db.close(); this.executionSafety.close(); throw error; }
   }
   scope(mode: StoredPurchaseExecutionMode = this.defaultMode, network?: string, asset?: string, decimals = 6,
@@ -298,11 +303,16 @@ export class PurchaseLedger {
     for (const row of rows) this.grantEvent(String(row.id), 'grant.EXPIRED', now);
   }
   private parseGrantRow(row: Record<string, unknown>): SpendGrant {
+    if (row.payment_scheme === 'mpp_charge' && !this.db.prepare("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='mpp_grant_terms'").get())
+      throw new Error('MPP_NETWORK_FEE_CONSENT_REQUIRED');
+    const fee = row.payment_scheme === 'mpp_charge'
+      ? this.db.prepare('SELECT maximum_network_fee_lamports FROM mpp_grant_terms WHERE grant_id=?').get(String(row.id)) : undefined;
     return SpendGrantSchema.parse({
       id: String(row.id), version: Number(row.version), cardMemberId: String(row.card_member_id), connectionId: String(row.connection_id), connectionGeneration: Number(row.connection_generation),
       resourceId: String(row.resource_id), providerId: String(row.provider_id), operation: String(row.operation), network: String(row.network), assetId: String(row.asset_id),
       assetDecimals: Number(row.asset_decimals), payTo: String(row.pay_to), paymentScheme: String(row.payment_scheme), totalLimit: String(row.total_limit), singleLimit: String(row.single_limit), status: String(row.status),
       ...(typeof row.post_policy_hash === 'string' ? { postPolicyHash: row.post_policy_hash } : {}),
+      ...(fee ? { maximumNetworkFeeLamports: String(fee.maximum_network_fee_lamports) } : {}),
       createdAt: Number(row.created_at), expiresAt: Number(row.expires_at), revokedAt: row.revoked_at === null ? null : Number(row.revoked_at),
     });
   }
@@ -388,6 +398,11 @@ export class PurchaseLedger {
       this.db.prepare(`INSERT INTO spend_grants (id,version,card_member_id,connection_id,connection_generation,resource_id,provider_id,operation,network,asset_id,asset_decimals,pay_to,payment_scheme,total_limit,single_limit,status,created_at,expires_at,revoked_at,monetary_scope_id,post_policy_hash)
         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'ACTIVE',?,?,NULL,?,?)`).run(id, version, principal.cardMemberId, principal.connectionId, principal.connectionGeneration, scope.resourceId, scope.providerId,
         scope.operation, scope.network, scope.assetId, scope.assetDecimals, scope.payTo, scope.paymentScheme, totalLimit, singleLimit, now, input.expiresAt, scopeId, scope.postPolicyHash ?? null);
+      if (scope.paymentScheme === 'mpp_charge') {
+        migrateMppGrantConsent(this.db, now);
+        this.db.prepare('INSERT INTO mpp_grant_terms(grant_id,maximum_network_fee_lamports) VALUES (?,?)')
+          .run(id, scope.maximumNetworkFeeLamports!);
+      }
       this.grantEvent(id, 'grant.CREATED', now);
       if (confirmation) approvals!.consume(confirmation, id, now);
       return this.latestGrantSummary(now, mode, principal.cardMemberId, monetary, scope.resourceId)!;
@@ -481,6 +496,7 @@ export class PurchaseLedger {
     const grant = this.parseGrantRow(row); const committed = this.grantCommitted(grant.id, scope);
     return { id: grant.id, version: grant.version, status: grant.status, resourceId: grant.resourceId, providerId: grant.providerId, operation: grant.operation,
       network: grant.network, assetId: grant.assetId, assetDecimals: grant.assetDecimals, payTo: grant.payTo, paymentScheme: grant.paymentScheme,
+      ...(grant.maximumNetworkFeeLamports === undefined ? {} : { maximumNetworkFeeLamports: grant.maximumNetworkFeeLamports }),
       totalLimit: String(grant.totalLimit), singleLimit: String(grant.singleLimit),
       committed: String(committed), remaining: remainingAtomic(grant.totalLimit, committed).toString(), createdAt: grant.createdAt, expiresAt: grant.expiresAt, revokedAt: grant.revokedAt };
   }
@@ -669,6 +685,8 @@ export class PurchaseLedger {
     if (!row) return undefined;
     const ownerCardMemberId = row.owner_card_member_id ? String(row.owner_card_member_id) : undefined;
     const intent = parseStoredSpendIntent(JSON.parse(String(row.purchase)), ownerCardMemberId);
+    const quote = JSON.parse(String(row.quote));
+    this.assertProtocolQuote(intent, quote);
     const monetary = this.recordScope(String(row.monetary_scope_id));
     if (atomicAmount(row.amount).toString() !== intent.amount || monetary.network !== intent.network || monetary.assetId !== intent.assetId || monetary.assetDecimals !== intent.assetDecimals) throw new Error('MONETARY_SCOPE_MISMATCH');
     const paymentPayloadPresent = typeof row.payload === 'string' && row.payload.length > 0;
@@ -683,7 +701,7 @@ export class PurchaseLedger {
       try { this.assertSafeDelivery(String(row.approval_id), stored); data = stored; }
       catch { /* Historical reflected data remains in the ledger but never leaves it. */ }
     }
-    return { monetaryScope: monetary, intent, quote: JSON.parse(String(row.quote)), approvalId: String(row.approval_id), decision: parseStoredAuthorityDecision(JSON.parse(String(row.decision))), status: parseStoredPurchaseStatus(row.status),
+    return { monetaryScope: monetary, intent, quote, approvalId: String(row.approval_id), decision: parseStoredAuthorityDecision(JSON.parse(String(row.decision))), status: parseStoredPurchaseStatus(row.status),
       deliveryStatus: delivery.status, receiptStatus: delivery.receiptStatus, deliveryRecovery: delivery,
       executionMode: storedExecutionMode(row.execution_mode), paymentPayloadPresent,
       ...(paymentPayloadHash ? { paymentPayloadHash } : {}), ...(storedPaymentEvidence(row.payment_evidence) ? { paymentEvidence: storedPaymentEvidence(row.payment_evidence) } : {}),
@@ -693,10 +711,21 @@ export class PurchaseLedger {
       ...(data === undefined ? {} : { data }) };
   }
   private assertSafeDelivery(approvalId: string, data: unknown) {
-    const payload = this.savedPayload(approvalId);
+    const mpp = this.savedMppPayment(approvalId);
+    const payload = mpp ? undefined : this.savedPayload(approvalId);
     const row = this.db.prepare('SELECT o.evidence FROM original_payments o JOIN purchases p ON p.id=o.purchase_id WHERE p.approval_id=?').get(approvalId);
     const original = row ? OriginalPaymentRecordSchema.parse(JSON.parse(String(row.evidence))) : undefined;
-    assertCredentialFreeDelivery(data, payload, original?.identity.buyerSignature);
+    assertCredentialFreeDelivery(data, payload, mpp && original?.identity.protocol === 'mpp' ? undefined : original?.identity.buyerSignature,
+      mpp ? [mpp.credential, mpp.credential.slice('Payment '.length), mpp.transaction,
+        JSON.stringify(mpp), Buffer.from(JSON.stringify(mpp)).toString('base64')] : []);
+  }
+  private assertProtocolQuote(intent: SpendIntent, rawQuote: unknown): asserts rawQuote is PurchaseQuote {
+    if (intent.mpp) {
+      const quote = MppChargeQuoteSchema.parse(rawQuote);
+      if (hash(quote) !== hash(intent.mpp) || hash(quote) !== intent.quoteFingerprint) throw new Error('MPP_QUOTE_BINDING_MISMATCH');
+    } else if (rawQuote && typeof rawQuote === 'object' && ('protocol' in rawQuote || ('scheme' in rawQuote && rawQuote.scheme === 'mpp_charge'))) {
+      throw new Error('MPP_BINDING_REQUIRED');
+    }
   }
   private hasVerifiedPaymentProof(record: SpendReservation) {
     const evidence = record.paymentEvidence;
@@ -737,12 +766,15 @@ export class PurchaseLedger {
     }
     return false;
   }
-  reserve(intent: SpendIntent, quote: PaymentRequirements, now = Date.now(), mode: StoredPurchaseExecutionMode = this.defaultMode, ownerCardMemberId?: string, monetary?: MonetaryScope, external?: ExternalExecutionFacts): SpendReservation {
+  reserve(intent: SpendIntent, quote: PurchaseQuote, now = Date.now(), mode: StoredPurchaseExecutionMode = this.defaultMode, ownerCardMemberId?: string, monetary?: MonetaryScope, external?: ExternalExecutionFacts): SpendReservation {
     if (mode === 'live_mainnet' && (!this.managed || !this.requireSpendGrant)) throw new Error('MAINNET_AUTHORITY_REQUIRED');
     assertExplicitAuthority(mode, intent.network, intent.assetId);
     assertExplicitAuthority(mode, quote.network, quote.asset);
     if (mode !== 'UNKNOWN') PurchaseExecutionModeSchema.parse(mode);
     intent = parseStoredSpendIntent(intent, ownerCardMemberId);
+    this.assertProtocolQuote(intent, quote);
+    if (intent.mpp && (!this.managed || !this.requireSpendGrant)) throw new Error('MPP_AUTHORITY_REQUIRED');
+    if (intent.mpp && this.executionSafety.active && !external) throw new Error('MPP_EXTERNAL_PROVENANCE_REQUIRED');
     monetary = MonetaryScopeSchema.parse(monetary ?? this.scope(mode, intent.network, intent.assetId, intent.assetDecimals));
     if (monetary.environment !== (mode === 'UNKNOWN' ? 'legacy_test' : mode) || monetary.network !== intent.network || monetary.assetId !== intent.assetId || monetary.assetDecimals !== intent.assetDecimals) throw new Error('MONETARY_SCOPE_MISMATCH');
     if (mode === 'live_mainnet' && monetaryScopeId(monetary) !== monetaryScopeId(this.scope('live_mainnet'))) throw new Error('MONETARY_SCOPE_MISMATCH');
@@ -751,6 +783,8 @@ export class PurchaseLedger {
       const memberId = ownerCardMemberId ?? intent.authority?.cardMemberId;
       const existing = (memberId ? this.getOwned(intent.idempotencyKey, memberId) : this.getLegacy(intent.idempotencyKey));
       if (existing) {
+        if (Boolean(existing.intent.mpp) !== Boolean(intent.mpp)) throw new Error('PURCHASE_PROTOCOL_MISMATCH');
+        if (intent.mpp && hash(existing.intent.mpp) !== hash(intent.mpp)) throw new Error('MPP_QUOTE_BINDING_MISMATCH');
         if (monetaryScopeId(existing.monetaryScope) !== monetaryScopeId(monetary)) throw new Error('MONETARY_SCOPE_MISMATCH');
         if (this.requireSpendGrant && existing.ownerCardMemberId !== (ownerCardMemberId ?? intent.authority?.cardMemberId)) {
           throw new Error('PURCHASE_REQUEST_OWNER_MISMATCH');
@@ -773,6 +807,18 @@ export class PurchaseLedger {
       this.db.prepare('INSERT INTO purchases (id,task_id,approval_id,purchase,quote,decision,status,amount,owner_card_member_id,execution_mode,monetary_scope_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)')
         .run(intent.id, intent.idempotencyKey, randomUUID(), JSON.stringify(intent), JSON.stringify(quote), JSON.stringify(decision), decision.decision, intent.amount,
           ownerCardMemberId ?? intent.authority?.cardMemberId ?? null, mode === 'UNKNOWN' ? null : mode, storeMonetaryScope(this.db, monetary));
+      if (intent.mpp && decision.decision === 'APPROVED') {
+        migrateMppGrantConsent(this.db, now);
+        const scopeId = monetaryScopeId(monetary), merchantOrigin = new URL(intent.httpRequest!.url).origin;
+        const { realm, id } = intent.mpp.challenge;
+        // The same merchant challenge cannot buy a second signature under a new
+        // client request ID. This claim and the budget reservation share one lock;
+        // even conclusive failure never recycles a single-use challenge.
+        if (this.db.prepare('SELECT 1 FROM mpp_challenge_claims WHERE scope_id=? AND merchant_origin=? AND realm=? AND challenge_id=?')
+          .get(scopeId, merchantOrigin, realm, id)) throw new Error('MPP_CHALLENGE_ALREADY_USED');
+        this.db.prepare('INSERT INTO mpp_challenge_claims(scope_id,merchant_origin,realm,challenge_id,challenge_hash,purchase_id) VALUES (?,?,?,?,?,?)')
+          .run(scopeId, merchantOrigin, realm, id, hash(intent.mpp.challengeHeader), intent.id);
+      }
       this.delivery.initialize({ id: intent.id, purchase: JSON.stringify(intent), owner: ownerCardMemberId ?? intent.authority?.cardMemberId,
         status: decision.decision, delivered: false, receiptConfirmed: false });
       this.executionSafety.reserve((memberId ? this.getOwned(intent.idempotencyKey, memberId) : this.getLegacy(intent.idempotencyKey))!, external, now);
@@ -852,6 +898,11 @@ export class PurchaseLedger {
   savePayload(approvalId: string, payload: unknown, validate?: (record: PurchaseRecord) => void, original?: OriginalPaymentRecord, permit?: ExternalExecutionPermit) {
     this.atomic(() => {
       this.assertCanSign(approvalId, undefined, validate, permit);
+      const record = this.recordForApproval(approvalId);
+      if (record.intent.mpp) {
+        payload = MppStoredPaymentSchema.parse(payload);
+        if (!original || hash(payload) !== original.payloadHash) throw new Error('MPP_ORIGINAL_PAYMENT_REQUIRED');
+      } else if (payload && typeof payload === 'object' && 'protocol' in payload) throw new Error('MPP_BINDING_REQUIRED');
       if (this.db.prepare("UPDATE purchases SET payload=? WHERE approval_id=? AND status='PAYING' AND payload IS NULL").run(JSON.stringify(payload), approvalId).changes !== 1) throw new Error('Payment already signed or inactive');
       if (original) this.storeOriginalPayment(approvalId, original, false);
       this.executionSafety.phase(this.recordForApproval(approvalId), 'SIGNED');
@@ -863,6 +914,18 @@ export class PurchaseLedger {
     return record;
   }
   private assertOriginalBindings(record: PurchaseRecord, original: OriginalPaymentRecord) {
+    if (record.intent.mpp) {
+      const payload = this.savedMppPayment(record.approvalId);
+      if (!payload || original.purchaseId !== record.intent.id || original.requestId !== record.intent.idempotencyKey
+        || original.scopeId !== monetaryScopeId(record.monetaryScope) || original.executionBinding !== record.intent.executionBinding
+        || original.quoteFingerprint !== record.intent.quoteFingerprint || hash(payload.quote) !== original.quoteFingerprint
+        || hash(payload.quote) !== hash(record.intent.mpp) || original.payloadHash !== hash(payload)
+        || original.identity.amount !== record.intent.amount || original.identity.recipient !== record.intent.payTo
+        || original.identity.mint !== record.intent.assetId || original.identity.network !== record.intent.network
+        || original.identity.decimals !== record.intent.assetDecimals || !validateMppSignedPaymentIdentity(payload, original.identity))
+        throw new Error('ORIGINAL_PAYMENT_BINDING_MISMATCH');
+      return;
+    }
     const payload = this.savedPayload(record.approvalId);
     if (!payload || original.purchaseId !== record.intent.id || original.requestId !== record.intent.idempotencyKey
       || original.scopeId !== monetaryScopeId(record.monetaryScope) || original.executionBinding !== record.intent.executionBinding
@@ -880,6 +943,16 @@ export class PurchaseLedger {
     const original = OriginalPaymentRecordSchema.parse(raw); const record = this.recordForApproval(approvalId);
     if (!isLiveMode(record.executionMode)) throw new Error('PURCHASE_EXECUTION_MODE_MISMATCH');
     this.assertOriginalBindings(record, original);
+    if (record.intent.mpp) {
+      ensureMppOriginalTransactionOwnership(this.db, this.now());
+      // This check and the unique index share savePayload's write transaction.
+      // A collision rolls back the second payload before any credential egress.
+      const owner = this.db.prepare(`SELECT purchase_id FROM original_payments
+        WHERE json_extract(evidence,'$.identity.protocol')='mpp'
+          AND json_extract(evidence,'$.identity.network')=? AND json_extract(evidence,'$.identity.knownSignature')=?`)
+        .get(original.identity.network, original.identity.knownSignature!);
+      if (owner && owner.purchase_id !== record.intent.id) throw new Error('MPP_ORIGINAL_TRANSACTION_ALREADY_USED');
+    }
     const state = legacy ? (record.status === 'PAID' ? 'CONFIRMED' : 'OUTCOME_UNKNOWN') : 'SIGNED_NOT_SUBMITTED';
     this.db.prepare('INSERT INTO original_payments VALUES (?,?,?,NULL,?)').run(record.intent.id, JSON.stringify(original), state, original.identity.knownSignature ?? null);
   }
@@ -958,8 +1031,15 @@ export class PurchaseLedger {
     });
   }
   savedPayload(approvalId: string): PaymentPayload | undefined {
-    const row = this.db.prepare('SELECT payload FROM purchases WHERE approval_id=?').get(approvalId);
+    const row = this.db.prepare('SELECT payload,purchase,owner_card_member_id FROM purchases WHERE approval_id=?').get(approvalId);
+    if (row && parseStoredSpendIntent(JSON.parse(String(row.purchase)), row.owner_card_member_id ? String(row.owner_card_member_id) : undefined).mpp)
+      throw new Error('MPP_PAYMENT_REQUIRES_PROTOCOL_API');
     return row?.payload ? JSON.parse(String(row.payload)) : undefined;
+  }
+  savedMppPayment(approvalId: string): MppStoredPayment | undefined {
+    const row = this.db.prepare('SELECT payload,purchase,owner_card_member_id FROM purchases WHERE approval_id=?').get(approvalId);
+    if (!row || !parseStoredSpendIntent(JSON.parse(String(row.purchase)), row.owner_card_member_id ? String(row.owner_card_member_id) : undefined).mpp || !row.payload) return undefined;
+    return MppStoredPaymentSchema.parse(JSON.parse(String(row.payload)));
   }
   failUnsubmitted(approvalId: string) {
     this.atomic(() => {
@@ -991,6 +1071,7 @@ export class PurchaseLedger {
     const row = this.db.prepare('SELECT task_id,owner_card_member_id,payload,payment_evidence,status,execution_mode FROM purchases WHERE approval_id=?').get(approvalId);
     if (!row) throw new Error('Unknown approval');
     const record = this.recordForApproval(approvalId);
+    assertX402Purchase(record);
     if (!record || record.executionMode === 'simulated' || !row.payload) throw new Error('LIVE_PAYMENT_EVIDENCE_INVALID');
     let payload: unknown;
     try { payload = JSON.parse(String(row.payload)); } catch { throw new Error('LIVE_PAYMENT_EVIDENCE_INVALID'); }

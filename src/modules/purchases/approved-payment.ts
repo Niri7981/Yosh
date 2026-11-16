@@ -24,6 +24,7 @@ import { assertProductionPaymentGate } from './production-execution-gate';
 import { purchaseSigningAuthorization } from './purchase-signing-authorization';
 import { observeDeliveryReceipt, receiveOriginalDelivery, recoverPaidDelivery } from './delivery-recovery';
 import type { ReconciliationCode } from './payment-reconciliation';
+import { assertX402Purchase } from './purchase-contract';
 
 export function paymentEndpoint(origin: string, offerId?: string) {
   const url = new URL(origin);
@@ -50,6 +51,7 @@ export function paymentBinding(config: PaymentConfig, endpoint: string, quote?: 
   return hash(quote ? [...facts, 'GET', quote] : facts);
 }
 export function checkPaymentBinding(record: PurchaseRecord, config: PaymentConfig, endpoint: string) {
+  assertX402Purchase(record);
   const intent = record.intent;
   if (intent.httpRequest && intent.x402Challenge) {
     if (intent.paymentRequiredHeader && hash(readPaymentRequiredHeader(intent.paymentRequiredHeader,
@@ -77,6 +79,7 @@ export function checkPaymentBinding(record: PurchaseRecord, config: PaymentConfi
   }
 }
 function originalEvidence(record: PurchaseRecord, payload: PaymentPayload, config: PaymentConfig, lifetime?: OriginalPaymentLifetime) {
+  assertX402Purchase(record);
   const identity = createSignedPaymentIdentity(payload, config, {
     payer: config.buyer, recipient: record.intent.payTo, mint: record.intent.assetId,
     amount: record.intent.amount, decimals: record.intent.assetDecimals,
@@ -103,14 +106,15 @@ export async function reconcileApprovedPayment(ledger: PurchaseLedger, taskId: s
   try {
     options.signal?.throwIfAborted();
     trace('RECOVERY_STARTED');
-    const payload = ledger.savedPayload(record.approvalId);
+    const payload = record.intent.mpp ? ledger.savedMppPayment(record.approvalId) : ledger.savedPayload(record.approvalId);
     if (!payload) { code = 'EVIDENCE_UNAVAILABLE'; return { status: 'UNKNOWN' }; } // Initial signer might still own the claim.
     let original = ledger.savedOriginalPayment(record.approvalId);
     if (!original) {
+      if (record.intent.mpp) { code = 'EVIDENCE_UNAVAILABLE'; return { status: 'UNKNOWN' }; }
       // Signed legacy rows have no trustworthy send marker. Validate their original
       // bytes, retain possible submission, and never infer failure from that absence.
       try {
-        ledger.attachLegacyOriginalPayment(record.approvalId, originalEvidence(record, payload, { ...config, merchant: record.intent.payTo }));
+        ledger.attachLegacyOriginalPayment(record.approvalId, originalEvidence(record, ledger.savedPayload(record.approvalId)!, { ...config, merchant: record.intent.payTo }));
         original = ledger.savedOriginalPayment(record.approvalId);
       } catch { code = 'BINDING_MISMATCH'; return { status: 'UNKNOWN' }; }
     }
@@ -138,6 +142,7 @@ export async function reconcileApprovedPayment(ledger: PurchaseLedger, taskId: s
 
 async function prepareJavaScriptPayment(context: PaymentExecutionContext): Promise<PreparedPayment> {
   const { config, record, endpoint, beforeSign, production } = context;
+  assertX402Purchase(record);
   const signer = await loadBuyerSigner(config.buyer, process.env, config);
   beforeSign();
   let lifetime: OriginalPaymentLifetime | undefined;
@@ -169,6 +174,7 @@ export async function executeApprovedPayment(ledger: PurchaseLedger, approvalId:
     assertProductionPaymentGate(ledger, record, config, endpoint);
   };
   const record = ledger.claim(approvalId, undefined, validate, config.mode, permit);
+  assertX402Purchase(record);
   // Recipient is approved data, never a product/Demo default for a generic resource.
   const signerConfig = record.intent.httpRequest ? { ...config, merchant: record.intent.payTo } : config;
   const beforeSign = () => ledger.assertCanSign(approvalId, undefined, validate, permit);
@@ -243,6 +249,10 @@ export async function recoverApprovedPayment(ledger: PurchaseLedger, taskId: str
   options: { fetcher?: typeof fetch; automatic?: boolean; signal?: AbortSignal } = {}) {
   let record = memberId ? ledger.getOwned(taskId, memberId) : ledger.getLegacy(taskId);
   if (!record || !['live_devnet', 'live_mainnet'].includes(record.executionMode)) return;
+  if (record.intent.mpp) {
+    const { recoverMppCharge } = await import('./recover-mpp-charge');
+    return recoverMppCharge(ledger, record, config, endpoint, options);
+  }
   if (record.executionMode === 'live_mainnet' || config.mode === 'live_mainnet') {
     ledger.assertReplayAllowed(record, config.mode);
     ledger.assertReplayAllowed(record, config.mode, ledger.paymentScope(config, config.mode));

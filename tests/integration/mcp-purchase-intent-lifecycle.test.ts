@@ -187,6 +187,8 @@ it('separates authenticated MCP purchase intents from SpendGrant authority acros
     });
     expect(revokedResult).not.toHaveProperty('resource');
     const denied = app.ledger.getOwned('intent-revoked', first.cardMemberId);
+    if (!denied) throw new Error('Expected denied x402 purchase');
+    assertX402Purchase(denied);
     expect(denied).toMatchObject({ status: 'DENIED', paymentPayloadPresent: false });
     expect(denied).not.toHaveProperty('transaction');
     expect(denied).not.toHaveProperty('data');
@@ -238,3 +240,4 @@ it('separates authenticated MCP purchase intents from SpendGrant authority acros
     rmSync(directory, { recursive: true, force: true });
   }
 }, 30_000);
+import { assertX402Purchase } from '../../src/modules/purchases/purchase-contract';

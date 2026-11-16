@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { assertX402Purchase } from '../src/modules/purchases/purchase-contract';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { loadPaymentConfig } from '../src/modules/payment/payment-config';
 import { runPaymentPreflight } from '../src/modules/payment/payment-preflight';
@@ -59,6 +60,7 @@ async function main() {
       console.log(JSON.stringify({ run: i, taskId, status: 'PAID', answerStatus: 'COMPLETE', fresh: !('reused' in result), retryPassed: true, transaction: result.transaction }));
     }
     const first = ledger.getLegacy(`${prefix}-1`)!;
+    assertX402Purchase(first);
     const payload = ledger.savedPayload(first.approvalId)!;
     assert(payload);
     // Reconstruct a crashed client in an isolated in-memory ledger. Original production

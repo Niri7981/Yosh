@@ -7,9 +7,11 @@ import { monetaryScopeId } from './monetary-scope';
 import type { PurchaseLedger, PurchaseRecord } from './purchase-ledger';
 import { PAID_RESOURCE_PURCHASE_OPERATION } from '../authority/spend-grant';
 import { assertSupportedMainnetResourceRequest } from '../resources/supported-resource-request';
+import { assertX402Purchase } from './purchase-contract';
 
 /** Policy gate only. Wire format and transaction construction stay in the official SDK. */
 export function assertProductionPaymentGate(ledger: PurchaseLedger, record: PurchaseRecord, config: PaymentConfig, endpoint: string) {
+  assertX402Purchase(record);
   assertPaymentConfigExecutionEnabled(config);
   if (config.mode !== 'live_mainnet') return;
   if (record.executionMode !== 'live_mainnet'

@@ -40,6 +40,29 @@ struct LocalGrantPresentationTest {
         let devnet = try render(request)
         precondition(devnet.authenticationReason.contains("测试网授权"))
         precondition(!devnet.authenticationReason.contains("主网真实资金"))
+        scope["paymentScheme"] = "mpp_charge"
+        binding["scope"] = scope; request["binding"] = binding
+        do { _ = try render(request); fatalError("Missing MPP fee consent accepted") } catch { }
+        for invalid in ["0", "01", "1.5", "1e4", "-1", "9223372036854775808"] {
+            scope["maximumNetworkFeeLamports"] = invalid
+            binding["scope"] = scope; request["binding"] = binding
+            do { _ = try render(request); fatalError("Invalid MPP fee accepted") } catch { }
+        }
+        scope["maximumNetworkFeeLamports"] = "10001"
+        binding["scope"] = scope; request["binding"] = binding
+        let mpp = try render(request)
+        precondition(mpp.details.contains("每笔 SOL 网络手续费上限：0.000010001 SOL（10001 lamports）"))
+        precondition(mpp.authenticationReason.contains("0.000010001 SOL（10001 lamports）"))
+        scope["maximumNetworkFeeLamports"] = "10002"
+        binding["scope"] = scope; request["binding"] = binding
+        let changedMpp = try render(request)
+        precondition(changedMpp.details.contains("0.000010002 SOL（10002 lamports）"))
+        precondition(!changedMpp.details.contains("10001 lamports"))
+        request["environment"] = "mainnet"; binding["mode"] = "live_mainnet"
+        scope["network"] = "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"
+        scope["assetId"] = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+        binding["scope"] = scope; request["binding"] = binding
+        do { _ = try render(request); fatalError("Mainnet MPP confirmation accepted") } catch { }
         let control: [String: Any] = ["version": 1, "kind": "control", "id": UUID().uuidString,
             "challenge": String(repeating: "a", count: 64), "sessionHash": String(repeating: "b", count: 64),
             "basis": String(repeating: "c", count: 64), "createdAt": now, "expiresAt": now + 300_000,
@@ -47,6 +70,6 @@ struct LocalGrantPresentationTest {
             "agentLabel": "Fixture", "action": ["type": "pause", "paused": true]]
         let controlPresentation = try render(control)
         precondition(controlPresentation.authenticationReason.contains("测试设置"))
-        print("Native presentation: Mainnet wallet and reason, missing/invalid wallet rejection, Devnet/control labels passed. No UI or authentication invoked.")
+        print("Native presentation: wallet/reason, MPP exact fee details and system reason, missing/invalid fee and Mainnet MPP rejection passed. No UI or authentication invoked.")
     }
 }
