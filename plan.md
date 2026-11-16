@@ -1,5 +1,7 @@
 # Yosh macOS 第一版实施计划
 
+2026-11-16 MPP Solana Charge：按用户本轮实现授权，在独立 `codex/mpp-solana-charge` 工作树扩展明确的 onchain 协议路由；复用原钱包身份、Grant、共享额度与账本。首阶段为原生 USDC/GET/Charge 的隔离实现与 Mock 验收，包含单独 SOL 网络费同意与原付款恢复；不支持真实银行卡、Session，不解除正式 Mainnet 门禁。范围、官方 SDK 来源、验收与限制见 [MPP Solana Charge](docs/architecture/mpp-solana-charge.md)。本段仅更新当前开发范围，不更改下面历史验收事实。
+
 2026-11-05 相关修复归档：按用户明确授权，将当前 Grant 授权修复、受限安装来源校验、Demo 规则及此前积累的原生窗口/Authority/Grant/Execution/滚动修复按主题拆分提交至 `origin/main`。本轮当前验证、00:00 Mainnet 只读状态及未解决的证据边界见 [修复归档](docs/architecture/revision-archive-20261105.md)；不新增付款、安装或生产设置变更。
 
 2026-11-04 Spend Grant 购买授权修复：按用户明确要求，新 Mainnet Pay 购买使用共享购买服务在原子预占时绑定当前有效的 Agent/Resource Grant，不再被历史 CLI 单笔验收文件阻挡。进行中购买保留原 Grant ID/version，禁止自动换绑或复活旧购买；签名前的 Grant、额度、Pause、请求/报价与生产 guard 保留。旧 CLI 验收记录是历史工具数据，不构成新的消费权。范围和本次测试/交付边界见 [Grant purchase authorization](docs/architecture/grant-purchase-authorization-20261104.md)。用户随后明确要求应用正式版并重启，已通过既有安装脚本完成同路径更新、重启与实际 MCP 只读核验；未自动付款、未改变生产执行设置。
