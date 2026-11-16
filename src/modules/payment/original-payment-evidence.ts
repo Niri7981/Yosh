@@ -6,6 +6,7 @@ import { z } from 'zod';
 import { PositiveAtomicAmountSchema } from '../authority/atomic-money';
 import { TOKEN_PROGRAM, validatePaymentEnvironment } from './payment-environment';
 import type { PaymentConfig } from './payment-config';
+import { matchesMppSignedPaymentIdentity } from './mpp-payment-evidence';
 
 const ASSOCIATED_TOKEN_PROGRAM = new PublicKey('ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL');
 const MEMO_PROGRAM = 'MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr';
@@ -18,16 +19,22 @@ export const TransactionSignatureSchema = z.string().refine(value => {
 });
 const amount = z.string().refine(value => PositiveAtomicAmountSchema.safeParse(value).success);
 export const SignedPaymentIdentitySchema = z.object({
-  version: z.literal(1), payer: publicKey, recipient: publicKey, mint: publicKey,
+  version: z.literal(1), protocol: z.literal('mpp').optional(), payer: publicKey, recipient: publicKey, mint: publicKey,
   amount, decimals: z.number().int().min(0).max(255), network: z.templateLiteral(['solana:', z.string().min(1).max(193)]),
   genesisHash: publicKey.nullable(), tokenProgram: z.literal(TOKEN_PROGRAM),
   sourceTokenAccount: publicKey, recipientTokenAccount: publicKey,
   messageHash: hash, wireHash: hash, buyerSignature: TransactionSignatureSchema,
   buyerSignerIndex: z.number().int().min(0).max(31), feePayer: publicKey,
-  actualMemo: z.string().min(1).refine(value => Buffer.byteLength(value, 'utf8') <= 256),
+  actualMemo: z.string().refine(value => Buffer.byteLength(value, 'utf8') <= 256),
   recentBlockhash: publicKey, lastValidBlockHeight: z.string().regex(/^(0|[1-9]\d*)$/).max(20).optional(),
   knownSignature: TransactionSignatureSchema.optional(),
-}).strict();
+}).strict().superRefine((identity, ctx) => {
+  // Legacy x402 evidence still requires the SDK memo. Only MPP's explicitly
+  // identified, fully buyer-signed charge may have no memo at all.
+  if (identity.protocol === 'mpp'
+    ? identity.buyerSignerIndex !== 0 || identity.feePayer !== identity.payer || identity.knownSignature !== identity.buyerSignature
+    : identity.actualMemo.length === 0) ctx.addIssue({ code: 'custom', message: 'INVALID_ORIGINAL_PAYMENT_IDENTITY' });
+});
 export type SignedPaymentIdentity = Readonly<z.infer<typeof SignedPaymentIdentitySchema>>;
 export type AuthorizedTransfer = Readonly<{
   payer: string; recipient: string; mint: string; amount: string; decimals: number; feePayer?: string;
@@ -180,6 +187,7 @@ export function validateSignedPaymentIdentity(payload: PaymentPayload, stored: S
 
 /** Fee-payer signature completion may change wire bytes, never the buyer-signed message. */
 export function matchesSignedPaymentIdentity(wire: string, identity: SignedPaymentIdentity, config: PaymentConfig, signature: string) {
+  if (identity.protocol === 'mpp') return matchesMppSignedPaymentIdentity(wire, identity, config, signature);
   try {
     const decoded = decodeOriginalTransaction(wire).transaction;
     const derived = createSignedPaymentIdentity({ x402Version: 2, resource: { url: 'original-payment-reconciliation' },
