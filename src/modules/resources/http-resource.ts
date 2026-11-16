@@ -100,6 +100,8 @@ type InputPolicy = z.infer<typeof ResourceRequestInputsSchema>['jsonBody'];
 export function resourceInputNames(policy: InputPolicy) { return policy === undefined ? [] : Array.isArray(policy) ? policy : Object.keys(policy); }
 
 export const X402ResourceSchema = z.object({
+  /** Absent on historical x402 registrations; never inferred from a network. */
+  paymentProtocol: z.literal('mpp_solana_charge').optional(),
   resourceId: z.string().min(1).max(200), providerId: z.string().min(1).max(200),
   displayName: z.string().min(1).max(120).optional(),
   request: HttpResourceRequestSchema, deliveryRecovery: DeliveryRecoveryCapabilitySchema.optional(),
