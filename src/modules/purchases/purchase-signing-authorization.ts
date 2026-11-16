@@ -4,6 +4,7 @@ import type { PaymentSigningAuthorization } from '../payment/solana-payment';
 import type { PurchaseLedger } from './purchase-ledger';
 import { assertProductionPaymentGate } from './production-execution-gate';
 import type { ExternalExecutionPermit } from './execution-safety';
+import { assertX402Purchase } from './purchase-contract';
 
 /** Rechecks the original reserved purchase synchronously at each signing boundary. */
 export function purchaseSigningAuthorization(
@@ -13,6 +14,7 @@ export function purchaseSigningAuthorization(
     assertCanSign(requirement, authorized) {
       if (ledger.savedPayload(approvalId)) throw new Error('MAINNET_PAYMENT_ALREADY_SIGNED');
       ledger.assertCanSign(approvalId, undefined, record => {
+        assertX402Purchase(record);
         assertProductionPaymentGate(ledger, record, config, endpoint);
         if (hash(record.quote) !== hash(requirement) || hash(record.intent.x402Challenge) !== hash(authorized.challenge)
           || record.intent.amount !== authorized.amount || record.intent.httpRequest?.url !== authorized.resource) {

@@ -12,6 +12,7 @@ import { DEVNET_NETWORK, DEVNET_USDC_MINT, type PaymentConfig } from './payment-
 import { assertUnsignedPaymentBindings, decodeOriginalTransaction } from './original-payment-evidence';
 import type { PaymentExecutionContext, PaymentExecutor } from './payment-execution-contract';
 import { solanaRpc } from './solana-payment';
+import { assertX402Purchase } from '../purchases/purchase-contract';
 
 const owners = new Map<string, symbol>();
 
@@ -130,6 +131,7 @@ export function createIsolatedPayExecution(options: {
       prepared.set(context.record.approvalId, { generation, context, phase: 'claimed' });
     },
     async prepare(context) {
+      assertX402Purchase(context.record);
       if (!ledger) throw new Error('PAY_EXECUTOR_RUNTIME_BINDING_REQUIRED');
       eligibility(context.config, ledger);
       const endpoint = loopback(context.endpoint);

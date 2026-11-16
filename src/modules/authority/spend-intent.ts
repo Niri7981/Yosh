@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { SpendAuthorityBindingSchema } from './spend-grant';
 import { PositiveAtomicAmountSchema } from './atomic-money';
 import { HttpResourceRequestSchema, X402ChallengeSchema, DeliveryRecoveryCapabilitySchema, ResourceDeliveryPolicySchema } from '../resources/http-resource';
+import { MppChargeQuoteSchema } from '../payment/mpp-contract';
 
 const boundedIdentifier = z.string().min(1).max(200);
 
@@ -22,6 +23,8 @@ export const SpendIntentSchema = z.object({
   /** New approvals bind the full HTTP request and challenge; old rows remain readable. */
   httpRequest: HttpResourceRequestSchema.optional(),
   x402Challenge: X402ChallengeSchema.optional(),
+  /** The original SDK-validated Charge quote; never encoded as x402 evidence. */
+  mpp: MppChargeQuoteSchema.optional(),
   /** Original bounded wire header, retained alongside the SDK-normalized V2 DTO. */
   paymentRequiredHeader: z.string().min(1).max(16_384).optional(),
   deliveryRecovery: DeliveryRecoveryCapabilitySchema.optional(),
@@ -42,6 +45,14 @@ export const SpendIntentSchema = z.object({
   executionBinding: z.string().min(1),
   authority: SpendAuthorityBindingSchema.optional(),
 }).strict().superRefine((intent, ctx) => {
+  if (intent.mpp) {
+    if (!intent.httpRequest || intent.x402Challenge || intent.paymentRequiredHeader || intent.resourcePath || intent.resourceScopeId || intent.offerId
+      || intent.paymentScheme !== 'mpp_charge' || intent.network !== intent.mpp.network || intent.assetId !== intent.mpp.asset
+      || intent.payTo !== intent.mpp.payTo || intent.amount !== intent.mpp.amount || intent.assetDecimals !== 6
+      || intent.expiresAt !== intent.mpp.expiresAt) ctx.addIssue({ code: 'custom', message: 'INVALID_MPP_BINDING' });
+    return;
+  }
+  if (intent.paymentScheme === 'mpp_charge') ctx.addIssue({ code: 'custom', message: 'MPP_BINDING_REQUIRED' });
   if (Boolean(intent.httpRequest) !== Boolean(intent.x402Challenge)) ctx.addIssue({ code: 'custom', message: 'INCOMPLETE_X402_BINDING' });
 });
 
