@@ -16,6 +16,9 @@ import { DEVNET_USDC_MINT, inspectFacilitatorConfiguration, loadPaymentConfig, P
 import { PurchaseLedger } from '../purchases/purchase-ledger';
 import { executeApprovedPayment, paymentEndpointForIntent, recoverApprovedPayment, reconcileApprovedPayment } from '../purchases/approved-payment';
 import type { PaymentExecutor } from '../payment/payment-execution-contract';
+import type { MppChargeDependencies } from '../purchases/approved-mpp-charge';
+import { requestMppResourcePurchase } from '../purchases/request-mpp-resource-purchase';
+import { fetchMppResourceQuote } from '../payment/mpp-resource-charge';
 import { assertIsolatedPaymentDirectory } from '../payment/isolated-pay-execution';
 import { createPayExecution } from '../payment/mainnet-pay-execution';
 import { createPayAuthorityAdapter } from '../payment/pay-authority-adapter';
@@ -119,7 +122,7 @@ export class AppRuntime {
     this.environment = current;
     return current.mode;
   }
-  constructor(readonly directory = runtimeDataDirectory(), private dependencies: { initializeWallet?: () => Promise<{ address: string; reused: boolean }>; readWallets?: () => Promise<WalletInventoryEntry[]>; timeZone?: () => string; now?: () => number; fetcher?: typeof fetch; codex?: CodexIntegrationOptions; paymentExecutor?: PaymentExecutor; offlineResources?: OfflineResourcePolicy; hosting?: AppRuntimeHosting } = {}) {
+  constructor(readonly directory = runtimeDataDirectory(), private dependencies: { initializeWallet?: () => Promise<{ address: string; reused: boolean }>; readWallets?: () => Promise<WalletInventoryEntry[]>; timeZone?: () => string; now?: () => number; fetcher?: typeof fetch; codex?: CodexIntegrationOptions; paymentExecutor?: PaymentExecutor; mpp?: MppChargeDependencies; offlineResources?: OfflineResourcePolicy; hosting?: AppRuntimeHosting } = {}) {
     dependencies = this.dependencies = { ...dependencies };
     this.hosting = dependencies.hosting ? Object.freeze({ ...dependencies.hosting }) : undefined;
     resolveYoshConfiguration();
@@ -368,6 +371,32 @@ export class AppRuntime {
   runExternalPaymentOperation<T>(operation: () => Promise<T>): Promise<T> {
     if (!this.accepting) return Promise.reject(new Error('SERVICE_STOPPING'));
     return this.track(operation());
+  }
+  private mppDependencies(): MppChargeDependencies {
+    // This phase has only isolated acceptance. Do not expose a new SOL-fee
+    // spending path in an installed Mainnet runtime before separate host acceptance.
+    if (this.environment.isProduction) throw new Error('MPP_MAINNET_ACCEPTANCE_REQUIRED');
+    if (!isDevnetDevelopment(this.directory)) throw new Error('MPP_ISOLATED_RUNTIME_REQUIRED');
+    const binary = this.dependencies.mpp?.binary ?? process.env.YOSH_MPP_PROTOCOL_ENGINE;
+    if (!binary || !isAbsolute(binary)) throw new Error('MPP_PROTOCOL_UNAVAILABLE');
+    return this.dependencies.mpp ?? { binary, fetcher: this.dependencies.fetcher };
+  }
+  requestMppPurchase(input: unknown, origin: string, principal: SpendPrincipal) {
+    const dependencies = this.mppDependencies();
+    return this.runExternalPaymentOperation(async () => {
+      await this.start(origin);
+      const config = this.paymentConfiguration('simulated');
+      return requestMppResourcePurchase(input, { config, ledger: this.ledger, principal, dependencies,
+        assertAccepting: () => { if (!this.accepting) throw new Error('SERVICE_STOPPING'); } });
+    });
+  }
+  quoteMppResource(resourceId: string, sample: unknown, memberId: string) {
+    const dependencies = this.mppDependencies();
+    this.ledger.assertCardMemberActive(memberId);
+    const resource = this.registeredResource(resourceId);
+    if (!resource) throw new Error('MPP_REGISTERED_RESOURCE_REQUIRED');
+    const instance = { ...resource, request: authorizedRequestInstance(resource, sample) };
+    return this.track(fetchMppResourceQuote(instance, this.paymentConfiguration('simulated'), dependencies.binary, dependencies.fetcher));
   }
   async payMcpRecovery(raw: unknown, principal: SpendPrincipal, origin: string) {
     if (!this.controlledPay || !this.payAuthority) throw new Error('PAY_CONTROLLED_EXECUTION_NOT_ENABLED');
@@ -930,7 +959,8 @@ export class AppRuntime {
     const environment = this.localGrantEnvironment();
     const payerWallet = this.walletAddress;
     if (environment === 'mainnet' && !payerWallet) throw new Error('LOCAL_AUTHORIZATION_WALLET_UNAVAILABLE');
-    const { resourceId, ...input } = SpendGrantInputSchema.extend({ resourceId: z.string().min(1).max(200) }).strict().parse(raw);
+    const { resourceId, maximumNetworkFeeLamports, ...input } = SpendGrantInputSchema.extend({ resourceId: z.string().min(1).max(200),
+      maximumNetworkFeeLamports: z.string().regex(/^[1-9]\d*$/).max(20).optional() }).strict().parse(raw);
     const resource = this.registeredResource(resourceId);
     if (!resource || resource.request.method !== 'GET')
       throw new Error('LOCAL_AUTHORIZATION_RESOURCE_UNSUPPORTED');
@@ -940,8 +970,10 @@ export class AppRuntime {
     const now = this.dependencies.now?.() ?? Date.now();
     if (atomicAmount(input.singleLimit) <= 0n || atomicAmount(input.totalLimit) < atomicAmount(input.singleLimit)
       || input.expiresAt <= now + 60_000 || input.expiresAt > now + 7 * 86_400_000) throw new Error('LOCAL_AUTHORIZATION_LIMIT_INVALID');
+    const mpp = resource.paymentProtocol === 'mpp_solana_charge';
+    if (mpp !== (maximumNetworkFeeLamports !== undefined)) throw new Error('MPP_NETWORK_FEE_CONSENT_REQUIRED');
     const resourceHash = this.localGrantResourceHash(resource);
-    const quote = environment === 'mainnet'
+    const quote = mpp ? await this.quoteMppResource(resourceId, {}, memberId) : environment === 'mainnet'
       ? (await fetchResourceChallenge({ ...resource, request: authorizedRequestInstance(resource, {}) }, this.environment, this.dependencies.fetcher)).quote
       : await this.quoteRegisteredResource(resourceId, {}, memberId);
     if (atomicAmount(quote.amount) > atomicAmount(input.singleLimit)) throw new Error('LOCAL_AUTHORIZATION_LIMIT_INVALID');
@@ -951,7 +983,8 @@ export class AppRuntime {
       agentLabel: member.label, apiLabel: resource.resourceId, resourceHash,
       binding: { input, principal, mode: environment === 'mainnet' ? 'live_mainnet' : 'live_devnet', scope: { resourceId, providerId: resource.providerId,
         operation: PAID_RESOURCE_PURCHASE_OPERATION, network: resource.network, assetId: resource.mint,
-        assetDecimals: resource.decimals, payTo: quote.payTo, paymentScheme: 'exact' } } }, now);
+        assetDecimals: resource.decimals, payTo: quote.payTo, paymentScheme: mpp ? 'mpp_charge' : 'exact',
+        ...(mpp ? { maximumNetworkFeeLamports } : {}) } } }, now);
   }
   commitLocalGrant(confirmation: LocalGrantConfirmation, sessionHash: string) {
     const environment = this.localGrantEnvironment();
@@ -963,17 +996,22 @@ export class AppRuntime {
       throw new Error('LOCAL_AUTHORIZATION_AGENT_CHANGED');
     const resource = this.registeredResource(frozen.request.binding.scope.resourceId);
     if (!resource || this.localGrantResourceHash(resource) !== frozen.request.resourceHash) throw new Error('LOCAL_AUTHORIZATION_RESOURCE_CHANGED');
-    return this.createSpendGrant({ ...frozen.request.binding.input, resourceId: resource.resourceId },
+    return this.createSpendGrant({ ...frozen.request.binding.input, resourceId: resource.resourceId,
+      ...(frozen.request.binding.scope.maximumNetworkFeeLamports ? { maximumNetworkFeeLamports: frozen.request.binding.scope.maximumNetworkFeeLamports } : {}) },
       frozen.request.binding.principal.cardMemberId, confirmation);
   }
   createSpendGrant(raw: unknown, memberId = this.ledger.defaultCardMember().id, confirmation?: LocalGrantConfirmation) {
     // Reject an environment switch before rotating credentials or reading test defaults.
     const mode = this.purchaseExecutionMode();
-    const request = SpendGrantInputSchema.extend({ resourceId: z.string().min(1).max(200).optional(), sample: ResourceRequestInputSchema.optional(), postApprovalHash: z.string().regex(/^[a-f0-9]{64}$/).optional() }).strict().parse(raw);
-    const { resourceId, sample, postApprovalHash, ...input } = request;
+    const request = SpendGrantInputSchema.extend({ resourceId: z.string().min(1).max(200).optional(), sample: ResourceRequestInputSchema.optional(), postApprovalHash: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+      maximumNetworkFeeLamports: z.string().regex(/^[1-9]\d*$/).max(20).optional() }).strict().parse(raw);
+    const { resourceId, sample, postApprovalHash, maximumNetworkFeeLamports, ...input } = request;
     const resource = this.registeredLive || this.offlineResources ? this.registeredResource(resourceId) : undefined;
     if (this.registeredLive && !resource) throw new Error('MAINNET_REGISTERED_RESOURCE_REQUIRED');
     if (this.offlineResources && resourceId !== undefined && !resource) throw new Error('REGISTERED_RESOURCE_REQUIRED');
+    const mpp = resource?.paymentProtocol === 'mpp_solana_charge';
+    if (mpp !== (maximumNetworkFeeLamports !== undefined)) throw new Error('MPP_NETWORK_FEE_CONSENT_REQUIRED');
+    if (mpp) this.mppDependencies();
     const instance = resource ? authorizedRequestInstance(resource, sample ?? {}) : undefined;
     if (resource && instance) assertPostRequestApproval(instance, postApprovalHash, resource);
     const now = this.dependencies.now?.() ?? Date.now();
@@ -1008,7 +1046,8 @@ export class AppRuntime {
         assetId: resource?.mint ?? DEVNET_USDC_MINT,
         assetDecimals: 6,
         payTo,
-        paymentScheme: 'exact',
+        paymentScheme: mpp ? 'mpp_charge' : 'exact',
+        ...(mpp ? { maximumNetworkFeeLamports } : {}),
         ...(resource?.request.method === 'POST' ? { postPolicyHash: postRequestPolicyHash(resource) } : {}),
       }, confirmation ? (this.dependencies.now?.() ?? Date.now()) : now, mode, confirmation);
     };
@@ -1021,7 +1060,8 @@ export class AppRuntime {
         await this.refreshMainnetWallet();
         if (this.authorityWalletStatus !== 'available') throw new Error('Mainnet wallet unavailable');
         if (!instance) throw new Error('RESOURCE_REQUEST_INPUT_REQUIRED');
-        const { quote } = await fetchResourceChallenge({ ...resource, request: instance }, this.environment, this.dependencies.fetcher);
+        const quote = mpp ? await this.quoteMppResource(resource.resourceId, sample ?? {}, memberId)
+          : (await fetchResourceChallenge({ ...resource, request: instance }, this.environment, this.dependencies.fetcher)).quote;
         if (BigInt(quote.amount) > single) throw new Error('SPEND_GRANT_SAMPLE_PRICE_EXCEEDS_SINGLE_LIMIT');
         if (hash(this.connectionFor(memberId).principal('read') ?? null) !== hash(initialPrincipal)) throw new Error('GRANT_CONNECTION_CHANGED');
         return commit(quote.payTo);
