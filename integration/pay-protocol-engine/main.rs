@@ -1,4 +1,6 @@
-//! Internal, zero-custody protocol process. It never accepts a signer or payment proof.
+//! Internal protocol process. It never accepts a signer or submits a payment.
+//! MPP credential encoding accepts signed wire bytes only to format the SDK envelope;
+//! all MPP operations are offline and the host retains authorization and egress.
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::str::FromStr;
@@ -19,6 +21,19 @@ const TOKEN_PROGRAM: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 #[derive(Deserialize)]
 #[serde(tag = "operation", rename_all = "lowercase", deny_unknown_fields)]
 enum Input {
+    #[serde(rename = "mpp_parse")]
+    MppParse { header: String },
+    #[serde(rename = "mpp_prepare")]
+    MppPrepare {
+        header: String,
+        payer: String,
+        #[serde(rename = "hostValidatedLifetime")]
+        host_validated_lifetime: HostValidatedLifetime,
+    },
+    #[serde(rename = "mpp_encode")]
+    MppEncode { header: String, transaction: String },
+    #[serde(rename = "mpp_receipt")]
+    MppReceipt { header: String },
     Quote {
         url: String,
         method: String,
@@ -36,6 +51,13 @@ enum Input {
         status: u16,
         headers: BTreeMap<String, String>,
     },
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct HostValidatedLifetime {
+    recent_blockhash: String,
+    last_valid_block_height: String,
 }
 
 type SafeResult<T> = Result<T, &'static str>;
@@ -360,8 +382,182 @@ fn interpret(status: u16, headers: BTreeMap<String, String>) -> SafeResult<Value
     Ok(json!({"receipt":receipt,"repeatedPaymentRequired":status == 402}))
 }
 
+// This is a policy guard over the SDK parser, not a replacement parser. In
+// particular the pinned SDK drops the newer `header` selector, so reject it
+// before parsing instead of silently sending a credential to the wrong field.
+fn mpp_parameter_policy(header: &str) -> SafeResult<()> {
+    if header.len() > 24_576 || header.contains(['\r', '\n']) {
+        return Err("MPP_INVALID_CHALLENGE");
+    }
+    let bytes = header.as_bytes();
+    if bytes.len() < 8 || !bytes[..7].eq_ignore_ascii_case(b"Payment") || bytes[7] != b' ' {
+        return Err("MPP_INVALID_CHALLENGE");
+    }
+    let mut index = 8;
+    while index < bytes.len() {
+        while index < bytes.len() && bytes[index].is_ascii_whitespace() { index += 1; }
+        let start = index;
+        while index < bytes.len() && bytes[index].is_ascii_alphabetic() { index += 1; }
+        let key = &header[start..index];
+        if !["id", "realm", "method", "intent", "request", "expires", "description", "opaque"].contains(&key)
+            || bytes.get(index) != Some(&b'=') || bytes.get(index + 1) != Some(&b'"') {
+            return Err("MPP_UNSUPPORTED_CHALLENGE_PARAMETER");
+        }
+        index += 2;
+        let mut closed = false;
+        while index < bytes.len() {
+            match bytes[index] {
+                b'\\' => { index += 2; }
+                b'"' => { index += 1; closed = true; break; }
+                _ => index += 1,
+            }
+        }
+        if !closed { return Err("MPP_INVALID_CHALLENGE"); }
+        while index < bytes.len() && bytes[index].is_ascii_whitespace() { index += 1; }
+        if index == bytes.len() { break; }
+        if bytes[index] != b',' { return Err("MPP_INVALID_CHALLENGE"); }
+        index += 1;
+        if index == bytes.len() { return Err("MPP_INVALID_CHALLENGE"); }
+    }
+    Ok(())
+}
+
+fn mpp_challenge(header: &str) -> SafeResult<(pay_kit::mpp::PaymentChallenge, pay_kit::mpp::ChargeRequest, pay_kit::mpp::protocol::solana::MethodDetails)> {
+    mpp_parameter_policy(header)?;
+    let challenge = pay_kit::mpp::parse_www_authenticate(header).map_err(|_| "MPP_INVALID_CHALLENGE")?;
+    if challenge.method.as_str() != "solana" || challenge.intent.as_str() != "charge" {
+        return Err("MPP_UNSUPPORTED_METHOD_INTENT");
+    }
+    let expires = challenge.expires.as_deref().ok_or("MPP_EXPIRY_REQUIRED")?;
+    // Admit UTC RFC3339 seconds or milliseconds only, then let the SDK validate
+    // the calendar/time and reject expired values. This bounds the quote window.
+    if ![20, 24].contains(&expires.len()) || !expires.is_ascii() || !expires.ends_with('Z')
+        || challenge.is_expired() || expires[..19] > pay_kit::mpp::expires::seconds(600)[..19] {
+        return Err("MPP_INVALID_EXPIRY");
+    }
+    let request_value: Value = challenge.request.decode().map_err(|_| "MPP_INVALID_REQUEST")?;
+    let object = request_value.as_object().ok_or("MPP_INVALID_REQUEST")?;
+    if object.keys().any(|key| !["amount", "currency", "recipient", "description", "externalId", "methodDetails"].contains(&key.as_str())) {
+        return Err("MPP_UNSUPPORTED_REQUEST_FIELD");
+    }
+    let request: pay_kit::mpp::ChargeRequest = serde_json::from_value(request_value).map_err(|_| "MPP_INVALID_REQUEST")?;
+    let amount = request.amount.parse::<u64>().map_err(|_| "MPP_INVALID_AMOUNT")?;
+    if amount == 0 || amount.to_string() != request.amount { return Err("MPP_INVALID_AMOUNT"); }
+    let details_value = request.method_details.as_ref().ok_or("MPP_METHOD_DETAILS_REQUIRED")?;
+    let details_object = details_value.as_object().ok_or("MPP_INVALID_METHOD_DETAILS")?;
+    if details_object.keys().any(|key| !["network", "decimals", "tokenProgram", "feePayer", "recentBlockhash", "transactionVersions"].contains(&key.as_str())) {
+        return Err("MPP_UNSUPPORTED_METHOD_DETAILS");
+    }
+    let details: pay_kit::mpp::protocol::solana::MethodDetails = serde_json::from_value(details_value.clone()).map_err(|_| "MPP_INVALID_METHOD_DETAILS")?;
+    let mint = match details.network.as_deref() {
+        Some("mainnet") => MAINNET_USDC,
+        Some("devnet") => DEVNET_USDC,
+        _ => return Err("MPP_UNSUPPORTED_NETWORK"),
+    };
+    if request.currency != mint || details.decimals != Some(6) || details.token_program.as_deref() != Some(TOKEN_PROGRAM)
+        || details.fee_payer == Some(true) || details_object.get("feePayer").is_some_and(Value::is_null)
+        || details.transaction_versions.as_ref().is_some_and(|versions| versions.as_slice() != [pay_kit::core::tx::TxVersion::V0])
+        || details_object.get("transactionVersions").is_some_and(Value::is_null) {
+        return Err("MPP_UNSUPPORTED_PAYMENT_TERMS");
+    }
+    let recipient = request.recipient.as_deref().ok_or("MPP_RECIPIENT_REQUIRED")?;
+    solana_pubkey::Pubkey::from_str(recipient).map_err(|_| "MPP_INVALID_RECIPIENT")?;
+    if let Some(memo) = request.external_id.as_deref() {
+        if memo.is_empty() || memo.len() > 256 { return Err("MPP_INVALID_MEMO"); }
+    }
+    if let Some(blockhash) = details.recent_blockhash.as_deref() {
+        solana_pubkey::Pubkey::from_str(blockhash).map_err(|_| "MPP_INVALID_BLOCKHASH")?;
+    }
+    Ok((challenge, request, details))
+}
+
+fn mpp_parse(header: String) -> SafeResult<Value> {
+    let (challenge, request, _) = mpp_challenge(&header)?;
+    Ok(json!({"header":header,"challenge":challenge,"request":request}))
+}
+
+/// This sender attests only the host-provided lifetime, already validated by
+/// Yosh against its configured network. It has no HTTP transport or fallback.
+struct HostValidatedBlockhashSender(String);
+impl pay_kit::mpp::solana_rpc_client::rpc_sender::RpcSender for HostValidatedBlockhashSender {
+    fn send<'life0, 'async_trait>(
+        &'life0 self,
+        request: pay_kit::mpp::solana_rpc_client::api::request::RpcRequest,
+        params: Value,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = pay_kit::mpp::solana_rpc_client::api::client_error::Result<Value>> + Send + 'async_trait>>
+    where 'life0: 'async_trait, Self: 'async_trait {
+        Box::pin(async move {
+            use pay_kit::mpp::solana_rpc_client::api::{client_error::ErrorKind, request::RpcRequest};
+            if request != RpcRequest::IsBlockhashValid || params != json!([self.0, {"commitment":"confirmed"}]) {
+                return Err(ErrorKind::Custom("HOST_VALIDATED_RPC_REQUEST_FORBIDDEN".into()).into());
+            }
+            Ok(json!({"context":{"slot":0},"value":true}))
+        })
+    }
+    fn get_transport_stats(&self) -> pay_kit::mpp::solana_rpc_client::rpc_sender::RpcTransportStats { Default::default() }
+    fn url(&self) -> String { "host-validated-lifetime:no-network".into() }
+}
+
+fn mpp_prepare(header: String, payer: String, lifetime: HostValidatedLifetime) -> SafeResult<Value> {
+    let (_, request, mut details) = mpp_challenge(&header)?;
+    let payer = solana_pubkey::Pubkey::from_str(&payer).map_err(|_| "MPP_INVALID_PAYER")?;
+    solana_pubkey::Pubkey::from_str(&lifetime.recent_blockhash).map_err(|_| "MPP_INVALID_BLOCKHASH")?;
+    let height = lifetime.last_valid_block_height.parse::<u64>().map_err(|_| "MPP_INVALID_LIFETIME")?;
+    if height == 0 || height > 9_007_199_254_740_991 || height.to_string() != lifetime.last_valid_block_height
+        || details.recent_blockhash.as_ref().is_some_and(|value| value != &lifetime.recent_blockhash) {
+        return Err("MPP_INVALID_LIFETIME");
+    }
+    details.recent_blockhash = Some(lifetime.recent_blockhash.clone());
+    let rpc = pay_kit::mpp::solana_rpc_client::rpc_client::RpcClient::new_sender(
+        HostValidatedBlockhashSender(lifetime.recent_blockhash.clone()), Default::default());
+    let options = pay_kit::mpp::client::BuildChargeTransactionOptions {
+        max_tx_version: Some(pay_kit::core::tx::TxVersion::V0),
+        external_id: request.external_id.clone(),
+        payer_funded_ata_creation: pay_kit::mpp::client::PayerFundedAtaCreation::Decline,
+        ..Default::default()
+    };
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|_| "RUNTIME_UNAVAILABLE")?;
+    let prepared = runtime.block_on(pay_kit::mpp::client::build_prepared_charge(payer, &rpc,
+        request.amount.parse().map_err(|_| "MPP_INVALID_AMOUNT")?, &request.currency,
+        request.recipient.as_deref().ok_or("MPP_RECIPIENT_REQUIRED")?, &details, &options))
+        .map_err(|_| "MPP_UNSIGNED_PREPARE_FAILED")?;
+    if prepared.transaction.signatures.iter().any(|signature| signature.as_ref().iter().any(|byte| *byte != 0)) {
+        return Err("SIGNED_TRANSACTION_FORBIDDEN");
+    }
+    let transaction = pay_kit::core::tx::encode(&prepared.transaction).map_err(|_| "WIRE_ENCODING_FAILED")?;
+    Ok(json!({"transaction":transaction,"recentBlockhash":lifetime.recent_blockhash,"lastValidBlockHeight":lifetime.last_valid_block_height}))
+}
+
+fn mpp_encode(header: String, transaction: String) -> SafeResult<Value> {
+    let (challenge, _, _) = mpp_challenge(&header)?;
+    if transaction.len() > 1644 { return Err("MPP_INVALID_TRANSACTION"); }
+    let bytes = base64::engine::general_purpose::STANDARD.decode(&transaction).map_err(|_| "MPP_INVALID_TRANSACTION")?;
+    if bytes.len() > 1232 || base64::engine::general_purpose::STANDARD.encode(&bytes) != transaction {
+        return Err("MPP_INVALID_TRANSACTION");
+    }
+    pay_kit::core::tx::decode_bytes(&bytes).map_err(|_| "MPP_INVALID_TRANSACTION")?;
+    let credential = pay_kit::mpp::PaymentCredential::new(challenge.to_echo(),
+        pay_kit::mpp::protocol::solana::CredentialPayload::Transaction { transaction });
+    let authorization = pay_kit::mpp::format_authorization(&credential).map_err(|_| "MPP_CREDENTIAL_ENCODING_FAILED")?;
+    Ok(json!({"authorization":authorization}))
+}
+
+fn mpp_receipt(header: String) -> SafeResult<Value> {
+    if header.len() > 16_384 { return Err("MPP_INVALID_RECEIPT"); }
+    let parsed = pay_kit::mpp::parse_receipt(&header).map_err(|_| "MPP_INVALID_RECEIPT")?;
+    let pay_kit::mpp::ReceiptKind::Charge(receipt) = parsed else { return Err("MPP_UNSUPPORTED_RECEIPT"); };
+    if receipt.method.as_str() != "solana" || !receipt.is_success() || receipt.reference.is_empty() || receipt.reference.len() > 128 {
+        return Err("MPP_INVALID_RECEIPT");
+    }
+    Ok(json!({"receipt":{"method":"solana","status":"success","timestamp":receipt.timestamp,"reference":receipt.reference}}))
+}
+
 fn execute(input: Input) -> SafeResult<Value> {
     match input {
+        Input::MppParse { header } => mpp_parse(header),
+        Input::MppPrepare { header, payer, host_validated_lifetime } => mpp_prepare(header, payer, host_validated_lifetime),
+        Input::MppEncode { header, transaction } => mpp_encode(header, transaction),
+        Input::MppReceipt { header } => mpp_receipt(header),
         Input::Quote {
             url,
             method,
@@ -406,6 +602,34 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn host_validated_sender_accepts_only_the_pinned_hash_and_commitment() {
+        use pay_kit::mpp::solana_rpc_client::{api::request::RpcRequest, rpc_sender::RpcSender};
+        let sender = HostValidatedBlockhashSender("11111111111111111111111111111111".into());
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        assert!(runtime.block_on(sender.send(RpcRequest::IsBlockhashValid,
+            json!(["11111111111111111111111111111111", {"commitment":"confirmed"}]))).is_ok());
+        for (request, params) in [
+            (RpcRequest::GetLatestBlockhash, json!([])),
+            (RpcRequest::GetAccountInfo, json!([])),
+            (RpcRequest::SendTransaction, json!(["forbidden"])),
+            (RpcRequest::IsBlockhashValid, json!(["other", {"commitment":"confirmed"}])),
+            (RpcRequest::IsBlockhashValid, json!(["11111111111111111111111111111111", {"commitment":"processed"}])),
+        ] {
+            assert!(runtime.block_on(sender.send(request, params)).is_err());
+        }
+    }
+
+    #[test]
+    fn mpp_does_not_accept_an_rpc_url_or_a_signer() {
+        for field in ["rpcUrl", "signer", "privateKey"] {
+            let mut input = json!({"operation":"mpp_prepare","header":"Payment x", "payer":"public",
+                "hostValidatedLifetime":{"recentBlockhash":"public", "lastValidBlockHeight":"1"}});
+            input[field] = json!("forbidden");
+            assert!(serde_json::from_value::<Input>(input).is_err());
+        }
+    }
 
     #[test]
     fn external_and_credentialed_urls_are_rejected() {
