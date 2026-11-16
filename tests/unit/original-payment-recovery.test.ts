@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
 import { ComputeBudgetProgram, Keypair, PublicKey, TransactionInstruction, TransactionMessage, VersionedTransaction } from '@solana/web3.js';
-import { createKeyPairSignerFromBytes, getBase58Decoder } from '@solana/kit';
+import { createKeyPairSignerFromBytes, getBase58Decoder, getBase58Encoder } from '@solana/kit';
 import type { PaymentPayload, PaymentRequirements } from '@x402/core/types';
 import { afterEach, expect, it, vi } from 'vitest';
 import { z } from 'zod';
@@ -401,4 +401,21 @@ it('adds reconciliation metadata to an old ledger without rewriting purchase or 
     expect(verified.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
     expect(reopened.reconciliation.state(f.record.intent.id)).toMatchObject({ attempts: 0, nextAttemptAt: 0, claimed: false });
   } finally { verified.close(); }
+});
+
+it('keeps x402 buyer partial-signature and wire reflection blocked while permitting its distinct public transaction ID', async () => {
+  const f = await fixture(); saveOriginal(f);
+  f.ledger.confirmOriginalPayment(f.record.approvalId, f.signature, 'confirmed');
+  const delivery = f.ledger.claimDelivery(f.record.approvalId, 'initial')!;
+  const identity = createSignedPaymentIdentity(f.payload, f.config, undefined, f.lifetime);
+  expect(identity.buyerSignature).not.toBe(f.signature);
+  const signatureBytes = getBase58Encoder().encode(identity.buyerSignature);
+  for (const reflected of [identity.buyerSignature, Buffer.from(signatureBytes).toString('base64'),
+    Buffer.from(signatureBytes).toString('hex'), f.payload.payload.transaction]) {
+    expect(() => f.ledger.finish(f.record.approvalId, { transaction: f.signature, data: { reflected } }, undefined, delivery))
+      .toThrow('PAY_CREDENTIAL_REFLECTION_REJECTED');
+  }
+  const data = { result: 'x402 fixture delivered', transaction: f.signature };
+  f.ledger.finish(f.record.approvalId, { transaction: f.signature, data }, undefined, delivery);
+  expect(f.ledger.getLegacy('original-request')).toMatchObject({ status: 'PAID', deliveryStatus: 'COMPLETE', data });
 });
