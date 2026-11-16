@@ -7,7 +7,7 @@ import { SpendGrantInputSchema } from './spend-grant';
 const Identity = z.object({ memberId: z.uuid(), sessionHash: z.string().regex(/^[a-f0-9]{64}$/) });
 const Input = z.discriminatedUnion('action', [
   Identity.extend({ action: z.literal('state') }).strict(),
-  Identity.extend({ action: z.literal('freeze'), draft: SpendGrantInputSchema.extend({ resourceId: z.string().min(1).max(200) }).strict() }).strict(),
+  Identity.extend({ action: z.literal('freeze'), draft: SpendGrantInputSchema.extend({ resourceId: z.string().min(1).max(200), maximumNetworkFeeLamports: z.string().regex(/^[1-9]\d*$/).max(20).optional() }).strict() }).strict(),
   Identity.extend({ action: z.enum(['read', 'cancel', 'commit']), id: z.uuid(), digest: z.string().regex(/^[a-f0-9]{64}$/).optional() }).strict(),
 ]);
 
@@ -25,7 +25,7 @@ export function mainnetLocalGrants(request: Request, app: AppRuntime) {
         return Response.json({ environment: 'mainnet', realFunds: true, controlsAvailable: false,
           walletSetup: { available: false }, member: { id: state.member.id, label: state.member.label },
           connection: { enabled: state.connection.enabled, state: state.connection.integration?.state ?? 'disconnected' },
-          budget: state.budget, resources: app.registeredResources().map(r => ({ resourceId: r.resourceId, displayName: r.name })),
+          budget: state.budget, resources: app.registeredResources().map(r => ({ resourceId: r.resourceId, displayName: r.name, ...(r.paymentProtocol ? { paymentProtocol: r.paymentProtocol } : {}) })),
           wallets: (await app.existingWallets()).filter(w => w.id === 'mainnet').map(w => ({ id: w.id, address: w.address, status: w.status })),
           grants: state.grants, purchases: state.purchases.map(p => ({ purchaseId: p.purchaseId, resourceId: p.resourceId, amount: p.amount, paymentStatus: p.status, deliveryStatus: p.deliveryStatus })),
         });

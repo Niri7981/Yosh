@@ -212,3 +212,41 @@ it.each(['access_denied_or_locked', 'identity_conflict', 'restore_required'])('d
   expect(nodes.some(node => node.textContent === 'test-address')).toBe(true);
   expect(calls).toEqual([]);
 });
+
+it('shows the fee input only for MPP and submits integer lamports while reviewing the backend-frozen fee', async () => {
+  const { elements, context } = activityHarness('devnet');
+  const requests: unknown[] = [];
+  const frozen = { request: { id: 'frozen-mpp', agentLabel: 'Codex', apiLabel: 'MPP API',
+    binding: { input: { totalLimit: '1000000', singleLimit: '10000', expiresAt: Date.now() + 3600_000 },
+      scope: { paymentScheme: 'mpp_charge', maximumNetworkFeeLamports: '10001', network: 'devnet', assetId: 'test-usdc', payTo: 'merchant' } } }, digest: 'frozen-digest' };
+  context.fetch = async (path: string, options?: { body?: string }) => {
+    if (path === '/requests') { requests.push(JSON.parse(options?.body ?? '{}')); return { ok: true, json: async () => frozen }; }
+    return { ok: true, json: async () => ({ environment: 'devnet', member: { label: 'Codex' }, budget: { paused: true, remaining: null },
+      connection: { enabled: true }, grants: [], wallets: [], purchases: [], resources: [
+        { resourceId: 'exact-api', displayName: 'Existing API' }, { resourceId: 'mpp-api', displayName: 'MPP API', paymentProtocol: 'mpp_solana_charge' },
+      ] }) };
+  };
+  await runInNewContext('refresh(true)', context);
+  expect(elements.get('network-fee-field')!.hidden).toBe(true);
+  expect(elements.get('network-fee')!.disabled).toBe(true);
+  elements.get('resource')!.value = 'mpp-api';
+  await elements.get('resource')!.handlers.get('change')!();
+  expect(elements.get('network-fee-field')!.hidden).toBe(false);
+  expect(elements.get('network-fee')!.disabled).toBe(false);
+  elements.get('network-fee')!.value = '99999';
+  await elements.get('network-fee')!.handlers.get('input')!();
+  expect(elements.get('network-fee-preview')!.textContent).toBe('0.000099999 SOL（99999 lamports）');
+  elements.get('total')!.value = '1'; elements.get('single')!.value = '0.01'; elements.get('hours')!.value = '24';
+  await runInNewContext('element("editor").handlers.get("submit")({preventDefault(){},submitter:element("review-continue")})', context);
+  expect(requests).toEqual([{ resourceId: 'mpp-api', total: '1', single: '0.01', hours: 24, maximumNetworkFeeLamports: '99999' }]);
+  const values = elements.get('facts')!.children.map(child => child.textContent);
+  expect(values).toContain('每笔 SOL 网络手续费上限');
+  expect(values).toContain('0.000010001 SOL（10001 lamports）');
+  expect(values).not.toContain('0.000099999 SOL（99999 lamports）');
+  elements.get('network-fee')!.value = '500000';
+  expect(elements.get('facts')!.children.map(child => child.textContent)).toEqual(values);
+  elements.get('resource')!.value = 'exact-api';
+  await elements.get('resource')!.handlers.get('change')!();
+  expect(elements.get('network-fee-field')!.hidden).toBe(true);
+  expect(elements.get('network-fee')!.value).toBe('');
+});

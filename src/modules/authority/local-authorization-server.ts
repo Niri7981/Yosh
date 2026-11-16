@@ -8,6 +8,7 @@ import { z } from 'zod';
 import type { AppRuntime } from '../app/app-runtime';
 import type { ConfirmLocalControl, ConfirmLocalGrant } from './native-grant-confirmation';
 import { authorizationPage, authorizationScript, authorizationStyle } from './local-authorization-view';
+import { PositiveAtomicAmountSchema } from './atomic-money';
 
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 const hex = z.string().regex(/^[a-f0-9]{64}$/);
@@ -17,7 +18,8 @@ function atomic(value: string) {
   return (BigInt(whole) * 1_000_000n + BigInt(fraction.padEnd(6, '0'))).toString();
 }
 const Draft = z.object({ resourceId: z.string().min(1).max(200), total: Amount, single: Amount,
-  hours: z.number().int().min(1).max(168) }).strict();
+  hours: z.number().int().min(1).max(168), maximumNetworkFeeLamports: z.string().regex(/^[1-9]\d*$/)
+    .refine(value => PositiveAtomicAmountSchema.safeParse(value).success).optional() }).strict();
 const RequestId = z.object({ id: z.uuid() }).strict();
 
 /** This first C probe is Offline-only. It never sends a browser the existing
@@ -91,7 +93,8 @@ export async function startLocalAuthorization(options: {
           const draft = Draft.parse(input), revision = ++session.revision;
           if (session.pendingMainnet) await call({ action: 'cancel', id: session.pendingMainnet });
           const frozen = z.object({ request: LocalGrantRequest, digest: hex, state: z.literal('PENDING') }).passthrough().parse(await call({ action: 'freeze',
-            draft: { resourceId: draft.resourceId, totalLimit: atomic(draft.total), singleLimit: atomic(draft.single), expiresAt: now + draft.hours * 3_600_000 } }));
+            draft: { resourceId: draft.resourceId, totalLimit: atomic(draft.total), singleLimit: atomic(draft.single), expiresAt: now + draft.hours * 3_600_000,
+              ...(draft.maximumNetworkFeeLamports === undefined ? {} : { maximumNetworkFeeLamports: draft.maximumNetworkFeeLamports }) } }));
           if (session.revision !== revision) {
             await call({ action: 'cancel', id: frozen.request.id });
             throw new Error('LOCAL_AUTHORIZATION_CONTENT_CHANGED');
@@ -124,7 +127,8 @@ export async function startLocalAuthorization(options: {
           connection: { enabled: state.connection.enabled, state: state.connection.integration?.state ?? 'disconnected' },
           wallets: (await app.existingWallets()).map(wallet => ({ id: wallet.id, address: wallet.address,
             status: wallet.status, provisioningState: wallet.provisioningState })),
-          resources: app.registeredResources().map(resource => ({ resourceId: resource.resourceId, displayName: resource.name })),
+          resources: app.registeredResources().map(resource => ({ resourceId: resource.resourceId, displayName: resource.name,
+            ...(resource.paymentProtocol ? { paymentProtocol: resource.paymentProtocol } : {}) })),
           grants: state.grants, purchases: state.purchases.map(purchase => readAgentPurchase(app.ledger, memberId, { purchaseId: purchase.purchaseId })).filter(Boolean) }));
       }
       if (url.pathname.startsWith('/controls/')) {
@@ -162,7 +166,8 @@ export async function startLocalAuthorization(options: {
         const revision = ++session.revision;
         if (session.pending) approvals.cancel(session.pending, sessionHash);
         const frozen = await app.freezeLocalGrant({ resourceId: draft.resourceId, totalLimit: atomic(draft.total),
-          singleLimit: atomic(draft.single), expiresAt: now + draft.hours * 3_600_000 }, memberId, sessionHash);
+          singleLimit: atomic(draft.single), expiresAt: now + draft.hours * 3_600_000,
+          ...(draft.maximumNetworkFeeLamports === undefined ? {} : { maximumNetworkFeeLamports: draft.maximumNetworkFeeLamports }) }, memberId, sessionHash);
         if (session.revision !== revision) {
           approvals.cancel(frozen.request.id, sessionHash);
           throw new Error('LOCAL_AUTHORIZATION_CONTENT_CHANGED');
@@ -187,7 +192,9 @@ export async function startLocalAuthorization(options: {
       }
       send(404, JSON.stringify({ code: 'LOCAL_WEB_NOT_FOUND' }));
     } catch (error) {
-      const code = error instanceof Error && /^LOCAL_[A-Z_]+$/.test(error.message) ? error.message : 'LOCAL_WEB_REQUEST_REJECTED';
+      const code = error instanceof Error && error.message === 'MPP_NETWORK_FEE_CONSENT_REQUIRED' ? 'LOCAL_AUTHORIZATION_NETWORK_FEE_REQUIRED'
+        : error instanceof Error && error.message === 'MPP_MAINNET_ACCEPTANCE_REQUIRED' ? 'LOCAL_AUTHORIZATION_MPP_MAINNET_UNAVAILABLE'
+          : error instanceof Error && /^LOCAL_[A-Z_]+$/.test(error.message) ? error.message : 'LOCAL_WEB_REQUEST_REJECTED';
       send(400, JSON.stringify({ code }));
     }
   });
