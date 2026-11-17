@@ -132,10 +132,10 @@ it('Mainnet grant reports registered API, commitment, expiration and inactive st
   } finally { ledger.close(); }
 });
 
-it('keeps registry and Grant ready when only facilitator configuration is invalid', async () => {
+it.each(['x402', 'mpp_solana_charge'] as const)('keeps %s registry and Grant ready when only facilitator configuration is invalid', async paymentProtocol => {
   const buyer = await generateKeyPairSigner(); const payee = await generateKeyPairSigner();
   const environment = resolvePaymentEnvironment({ YOSH_EXECUTION_MODE: 'live_mainnet', YOSH_ENABLE_MAINNET_EXECUTION: '1' });
-  const resource = { resourceId: 'readiness-resource', providerId: 'provider', network: environment.network,
+  const resource = { ...(paymentProtocol === 'mpp_solana_charge' ? { paymentProtocol } : {}), resourceId: 'readiness-resource', providerId: 'provider', network: environment.network,
     mint: environment.asset.mint, decimals: 6 as const, recipient: payee.address, amount: '5000',
     request: { url: 'https://provider.example/data', method: 'GET' as const, access: 'https' as const, headers: {} } };
   const ledger = ledgerFixture(); const memberId = ledger.defaultCardMember().id;
@@ -145,7 +145,7 @@ it('keeps registry and Grant ready when only facilitator configuration is invali
       { cardMemberId: memberId, connectionId: randomUUID(), connectionGeneration: 1 },
       { resourceId: resource.resourceId, providerId: resource.providerId, operation: 'paid.resource.purchase',
         network: environment.network, assetId: environment.asset.mint, assetDecimals: 6, payTo: payee.address,
-        paymentScheme: 'exact' }, now, 'live_mainnet');
+        paymentScheme: paymentProtocol === 'x402' ? 'exact' : 'mpp_charge', ...(paymentProtocol === 'mpp_solana_charge' ? { maximumNetworkFeeLamports: '10000' } : {}) }, now, 'live_mainnet');
     const wallet = { address: buyer.address, status: 'available' as const, balance: '10000' };
     const broken = authoritySurface(ledger, environment, memberId, wallet, undefined, now, {
       facilitator: { ready: false, code: 'FACILITATOR_CONFIGURATION_INVALID', mode: 'configured_endpoint' },

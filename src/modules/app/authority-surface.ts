@@ -46,7 +46,9 @@ export function authoritySurface(ledger: PurchaseLedger, environment: PaymentEnv
     && grant.assetDecimals === environment.asset.decimals;
   const grantScopeMatches = scopeMatches && (!registeredLive || (resource !== undefined
     && resource.providerId === grant.providerId && (resource.recipientSource === 'live_challenge' || resource.recipient === grant.payTo)
-    && grant.operation === PAID_RESOURCE_PURCHASE_OPERATION && grant.paymentScheme === 'exact'));
+    && grant.operation === PAID_RESOURCE_PURCHASE_OPERATION
+    && grant.paymentScheme === (resource.paymentProtocol === 'mpp_solana_charge' ? 'mpp_charge' : 'exact')
+    && (resource.paymentProtocol !== 'mpp_solana_charge' || grant.maximumNetworkFeeLamports !== undefined)));
   const environmentCheck = check(environment.mode === 'simulated' ? 'SIMULATED_EXECUTION_DISABLED'
     : environment.isProduction && !environment.productionExecutionEnabled ? 'MAINNET_EXECUTION_DISABLED' : null);
   const facilitator = context.facilitator ?? { ready: true, code: null,
