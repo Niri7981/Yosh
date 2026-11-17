@@ -17,6 +17,7 @@ def module(name, file):
 
 dependencies = module('standalone_dependency_test', 'build-standalone-dependencies.py')
 packager = module('standalone_package_test', 'package-standalone-plugin.py')
+standalone_builder = module('standalone_builder_test', 'build-standalone-dev.py')
 
 
 class StandaloneArtifactTests(unittest.TestCase):
@@ -99,6 +100,61 @@ class StandaloneArtifactTests(unittest.TestCase):
         self.assertEqual(packager.verify_runtime(self.output), self.manifest)
         (self.runtime / 'mcp.cjs').write_text('modified adapter')
         with self.assertRaisesRegex(ValueError, 'integrity mismatch'): packager.verify_runtime(self.output)
+
+    def test_mpp_package_is_versioned_and_requires_both_verified_files(self):
+        self.local_mainnet_runtime()
+        self.manifest['mppProtocol'] = True
+        for name in ['mpp-protocol-engine', 'mpp-provenance.json']:
+            (self.runtime / name).write_text('isolated fixture ' + name)
+            self.manifest['files'][name] = packager.sha(self.runtime / name)
+        self.save_manifest()
+        icon = self.root / 'plugins/yosh-dev/assets/icon.png'; icon.parent.mkdir(parents=True); icon.write_bytes(b'fixture')
+        destination = self.root / 'build.noindex/mpp-package'
+        with mock.patch.object(packager, 'ROOT', self.root): packager.package(self.output, destination)
+        plugin = destination / 'marketplace/plugins/yosh-local-dev'
+        self.assertEqual(json.loads((plugin / 'plugin.json').read_text())['version'], '0.2.7')
+        self.assertEqual((plugin / 'runtime/mpp-protocol-engine').read_bytes(), (self.runtime / 'mpp-protocol-engine').read_bytes())
+        (self.runtime / 'mpp-protocol-engine').write_text('changed')
+        with self.assertRaisesRegex(ValueError, 'integrity mismatch'): packager.verify_runtime(self.output)
+
+    def test_mainnet_mpp_requires_matching_capability_and_verified_subset(self):
+        mainnet = self.local_mainnet_runtime()
+        self.manifest.update(mppProtocol=True, mainnetMpp=True)
+        mainnet['mppProtocol'] = True
+        for name in ['mpp-protocol-engine', 'mpp-provenance.json']:
+            (self.runtime / name).write_text('fixture ' + name)
+            self.manifest['files'][name] = mainnet['files'][name] = packager.sha(self.runtime / name)
+        self.save_mainnet(mainnet)
+        self.assertEqual(packager.verify_runtime(self.output), self.manifest)
+        icon = self.root / 'plugins/yosh-dev/assets/icon.png'; icon.parent.mkdir(parents=True); icon.write_bytes(b'fixture')
+        destination = self.root / 'build.noindex/mainnet-mpp-package'
+        with mock.patch.object(packager, 'ROOT', self.root): packager.package(self.output, destination)
+        plugin = destination / 'marketplace/plugins/yosh-local-dev'
+        self.assertEqual(json.loads((plugin / 'plugin.json').read_text())['version'], '0.2.13')
+        self.manifest['mainnetMpp'] = False; self.save_manifest()
+        with self.assertRaisesRegex(ValueError, 'capability mismatch'): packager.verify_runtime(self.output)
+        self.manifest['mainnetMpp'] = True
+        del mainnet['files']['mpp-provenance.json']; self.save_mainnet(mainnet)
+        with self.assertRaisesRegex(ValueError, 'contract mismatch'): packager.verify_runtime(self.output)
+
+    def test_mpp_builder_rejects_unrecorded_executable_without_shipping_private_inventory(self):
+        artifact = self.root / 'protocol'; artifact.mkdir()
+        binary = artifact / 'yosh-execution-protocol'; binary.write_text('fixture-binary')
+        record = {'kind': 'mpp-protocol-only', 'schemaVersion': 1, 'networkDenied': True,
+                  'paymentSent': False, 'signerUsed': False,
+                  'payRevision': '402f67c44dd8d41d7d1584fcb5d868006ce8c891',
+                  'payKitRevision': '7f1369180ca4b047aadff1bea77aed4525e10039',
+                  'binarySha256': packager.sha(binary),
+                  'wrapperSha256': packager.sha(ROOT / 'integration/pay-protocol-engine/main.rs'),
+                  'builderSha256': packager.sha(ROOT / 'scripts/build-mpp-protocol-engine.py'),
+                  'commands': ['/private/workstation/path'], 'sourceFiles': {'private-path': 'fixture'}}
+        (artifact / 'source-lock.json').write_text(json.dumps(record))
+        standalone_builder.copy_mpp_protocol(artifact, self.runtime)
+        public = json.loads((self.runtime / 'mpp-provenance.json').read_text())
+        self.assertNotIn('commands', public); self.assertNotIn('sourceFiles', public)
+        binary.write_text('changed')
+        with self.assertRaisesRegex(ValueError, 'provenance mismatch'):
+            standalone_builder.copy_mpp_protocol(artifact, self.runtime)
 
     def test_local_package_identity_and_catalog_match_directory_not_copied_license(self):
         self.manifest.update(kind='yosh-local-devnet', apiVersion=2, dataContract='local-devnet-v1')

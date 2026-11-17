@@ -26,7 +26,7 @@ def verify_mainnet(runtime):
             or manifest.get('dataContract') != 'existing-mainnet-v1' \
             or manifest.get('profile') != 'com.yosh.pay-development.v011rc5' \
             or manifest.get('productionEnabled') is not False \
-            or set(manifest.get('files', {})) != set(MAINNET_FILES) \
+            or set(manifest.get('files', {})) != set(MAINNET_FILES + (['mpp-protocol-engine', 'mpp-provenance.json'] if manifest.get('mppProtocol') is True else [])) \
             or set(manifest.get('licenses', {})) != set(LICENSE_FILES):
         raise ValueError('Mainnet runtime contract mismatch')
     for name, digest in manifest['files'].items():
@@ -54,6 +54,9 @@ def verify_runtime(package):
         required += ['mainnet.cjs', 'mainnet-mcp.cjs', 'mainnet-manifest.json', 'mainnet.sb']
     if local and manifest.get('mainnetBridge'): required += ['mainnet-launch.mjs', 'mainnet-launch.sh']
     if local: required += ['local-mcp.cjs', 'yosh-confirm', 'spirit-design-sheet.png', 'instrument-serif.woff2', 'Instrument-Serif-OFL.txt']
+    if manifest.get('mppProtocol'):
+        if not local: raise ValueError('MPP requires the isolated local Devnet profile')
+        required += ['mpp-protocol-engine', 'mpp-provenance.json']
     if set(manifest['files']) != set(required): raise ValueError('Unexpected runtime file')
     for name in required:
         if name not in manifest['files']: raise ValueError('Incomplete runtime manifest')
@@ -65,7 +68,11 @@ def verify_runtime(package):
         file = runtime / 'licenses' / name
         if file.is_symlink() or not file.is_file() or not file.resolve().is_relative_to(runtime.resolve()):
             raise ValueError('License path rejected')
-    if standalone_mainnet: verify_mainnet(runtime)
+    if standalone_mainnet:
+        verify_mainnet(runtime)
+        mainnet_mpp = json.loads((runtime / 'mainnet-manifest.json').read_text()).get('mppProtocol') is True
+        if bool(manifest.get('mainnetMpp')) != mainnet_mpp or (mainnet_mpp and not manifest.get('mppProtocol')):
+            raise ValueError('Mainnet MPP capability mismatch')
     return manifest
 
 
@@ -73,7 +80,7 @@ def package(source, output):
     manifest = verify_runtime(source)
     local = manifest['kind'] == 'yosh-local-devnet'
     standalone_mainnet = manifest.get('mainnetStandalone') is True
-    version = '0.2.4' if standalone_mainnet else '0.2.3' if local else '0.1.0'
+    version = '0.2.13' if manifest.get('mainnetMpp') else '0.2.7' if manifest.get('mppProtocol') else '0.2.4' if standalone_mainnet else '0.2.3' if local else '0.1.0'
     plugin_name = 'yosh-local-dev' if local else NAME
     output = output.absolute()
     if not output.resolve().is_relative_to((ROOT / 'build.noindex').resolve()) or output.is_symlink():

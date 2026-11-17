@@ -33,8 +33,11 @@ const Owner = z.object({ apiVersion: z.literal(API_VERSION), dataContract: z.lit
   runtimeDigest: z.string().regex(/^[a-f0-9]{64}$/), pid: z.number().int().positive(), ready: z.boolean() }).strict();
 const Manifest = z.object({ kind: z.literal(runtimeKind), apiVersion: z.literal(API_VERSION),
   dataContract: z.literal(SCHEMA_CONTRACT), productionEnabled: z.literal(false),
+  mppProtocol: z.boolean().optional(),
   files: z.record(z.string(), z.string().regex(/^[a-f0-9]{64}$/)) }).passthrough();
+const mppProtocol = local && Manifest.parse(JSON.parse(readFileSync(join(runtime, 'manifest.json'), 'utf8'))).mppProtocol === true;
 const runtimeFiles = ['node', 'standalone.cjs', 'mcp.cjs', 'pay-mcp', 'pay-protocol-engine', 'offline.sb',
+  ...(mppProtocol ? ['mpp-protocol-engine', 'mpp-provenance.json'] : []),
   ...(local ? ['local-mcp.cjs', 'mainnet.cjs', 'mainnet-mcp.cjs', 'mainnet-manifest.json', 'mainnet.sb',
     'yosh-confirm', 'spirit-design-sheet.png', 'instrument-serif.woff2', 'Instrument-Serif-OFL.txt'] : [])];
 
@@ -186,6 +189,7 @@ async function serve(directory: string, digest: string) {
     Object.assign(process.env, { YOSH_PORT: String(profile.backendPort), YOSH_PACKAGED_RUNTIME_DIR: runtime, YOSH_PAY_MCP_DEVNET: '1',
       YOSH_PAY_MCP_MAINNET: '0', YOSH_EXECUTION_MODE: 'live_devnet', YOSH_ENABLE_DEVNET_PURCHASES: '1', YOSH_ENABLE_MAINNET_EXECUTION: '0',
       SOLANA_CLUSTER: 'devnet', SOLANA_RPC_URL: 'https://api.devnet.solana.com' });
+    if (mppProtocol) process.env.YOSH_MPP_PROTOCOL_ENGINE = join(runtime, 'mpp-protocol-engine');
     backend = await startLiveDevnetDevelopmentBackend({ directory: backendDirectory(directory), port: profile.backendPort, localAuthorizationOnly: true,
       afterClose: async () => { await web?.close(); },
       localAuthorizationLink: () => { if (!web) throw new Error('LOCAL_WEB_NOT_READY'); return web.createLink(); } });
