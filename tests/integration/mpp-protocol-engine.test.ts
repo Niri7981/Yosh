@@ -18,6 +18,22 @@ function header(options: { request?: object; details?: object; suffix?: string; 
 }
 
 describe('pinned MPP SDK protocol boundary', () => {
+  it('selects the unique Solana Charge from combined merchant offers using the SDK', async () => {
+    const solana = header({ suffix: ', description="Price, Payment offers"' });
+    const tempo = header({ method: 'tempo' });
+    const selected = await parseMppChallenge(binary, `${tempo}, ${solana}, ${header({ method: 'stripe' })}`);
+    expect(selected.challenge.method).toBe('solana');
+    expect(selected.challenge.description).toBe('Price, Payment offers');
+    expect(selected.header).not.toContain('method="tempo"');
+    expect((await parseMppChallenge(binary, selected.header)).challenge).toEqual(selected.challenge);
+  });
+
+  it('rejects ambiguous Solana offers and unsupported selectors within combined headers', async () => {
+    await expect(parseMppChallenge(binary, `${header()}, ${header()}`)).rejects.toThrow('MPP_AMBIGUOUS_CHALLENGE');
+    await expect(parseMppChallenge(binary, `${header({ method: 'tempo' })}, ${header({ suffix: ', header="Payment-Authorization"' })}`))
+      .rejects.toThrow('MPP_UNSUPPORTED_CHALLENGE_PARAMETER');
+  });
+
   it('builds unsigned V0 through the SDK and formats the exact signed credential and original echo', async () => {
     const challenge = await parseMppChallenge(binary, header({ suffix: ', opaque="eyJub25jZSI6IjEifQ"' }));
     const prepared = await prepareMppCharge(binary, { challenge, payer: payer.publicKey.toBase58(), hostValidatedLifetime });
@@ -65,9 +81,16 @@ describe('pinned MPP SDK protocol boundary', () => {
     await expect(parseMppChallenge(binary, '付款付款付款')).rejects.toThrow('MPP_INVALID_CHALLENGE');
   });
 
-  it('refuses a challenge blockhash different from the host validated lifetime', async () => {
+  it('uses the exact host RPC lifetime for an advisory merchant hash without changing the challenge echo', async () => {
     const challenge = await parseMppChallenge(binary, header({ details: { recentBlockhash: recipient } }));
-    await expect(prepareMppCharge(binary, { challenge, payer: payer.publicKey.toBase58(), hostValidatedLifetime })).rejects.toThrow('MPP_INVALID_LIFETIME');
+    const original = structuredClone(challenge.challenge);
+    const prepared = await prepareMppCharge(binary, { challenge, payer: payer.publicKey.toBase58(), hostValidatedLifetime });
+    const tx = VersionedTransaction.deserialize(Buffer.from(prepared.transaction, 'base64'));
+    expect(tx.message.recentBlockhash).toBe(hostValidatedLifetime.recentBlockhash);
+    expect(prepared.lastValidBlockHeight).toBe(hostValidatedLifetime.lastValidBlockHeight);
+    tx.sign([payer]);
+    const credential = await encodeMppCredential(binary, { challenge, transaction: Buffer.from(tx.serialize()).toString('base64') });
+    expect(JSON.parse(Buffer.from(credential.slice(8), 'base64url').toString()).challenge).toEqual(original);
   });
 
   it('decodes a merchant receipt as an observation and rejects foreign receipts', async () => {
