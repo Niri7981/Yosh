@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { PurchaseStatusSchema } from '../purchases/purchase-state';
 import { DeliveryStatusSchema } from '../purchases/delivery-state';
+import { PaymentFailureDetails } from '../payment/pay-controller-diagnostics';
 
 export const AgentPurchaseReadInput = z.object({
   operationId: z.string().regex(/^[a-zA-Z0-9_.:-]{1,128}$/).optional(),
@@ -11,6 +12,7 @@ export const AgentPurchaseSummary = z.object({
   purchaseId: z.string(), operationId: z.string().nullable(), status: PurchaseStatusSchema,
   paymentStatus: z.enum(['NOT_STARTED', 'PAYING', 'PAYMENT_UNKNOWN', 'PAID', 'FAILED']),
   deliveryStatus: DeliveryStatusSchema, policyCode: z.string().regex(/^[A-Z][A-Z0-9_]{1,100}$/),
+  failure: PaymentFailureDetails.optional(),
   resourceId: z.string(), amount: z.string().regex(/^\d+$/), network: z.string(),
   assetId: z.string(), assetDecimals: z.number().int().min(0).max(255), transaction: z.string().nullable(),
 }).strict();
