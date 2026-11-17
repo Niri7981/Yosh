@@ -229,24 +229,118 @@ it('shows the fee input only for MPP and submits integer lamports while reviewin
   await runInNewContext('refresh(true)', context);
   expect(elements.get('network-fee-field')!.hidden).toBe(true);
   expect(elements.get('network-fee')!.disabled).toBe(true);
+  await elements.get('protocol-mpp_solana_charge')!.handlers.get('click')!();
   elements.get('resource')!.value = 'mpp-api';
   await elements.get('resource')!.handlers.get('change')!();
   expect(elements.get('network-fee-field')!.hidden).toBe(false);
   expect(elements.get('network-fee')!.disabled).toBe(false);
-  elements.get('network-fee')!.value = '99999';
+  await elements.get('network-fee-custom')!.handlers.get('click')!();
+  elements.get('network-fee')!.value = '0.000099999';
   await elements.get('network-fee')!.handlers.get('input')!();
-  expect(elements.get('network-fee-preview')!.textContent).toBe('0.000099999 SOL（99999 lamports）');
+  expect(elements.get('network-fee-preview')!.textContent).toBe('每笔最多 0.000099999 SOL');
   elements.get('total')!.value = '1'; elements.get('single')!.value = '0.01'; elements.get('hours')!.value = '24';
   await runInNewContext('element("editor").handlers.get("submit")({preventDefault(){},submitter:element("review-continue")})', context);
   expect(requests).toEqual([{ resourceId: 'mpp-api', total: '1', single: '0.01', hours: 24, maximumNetworkFeeLamports: '99999' }]);
   const values = elements.get('facts')!.children.map(child => child.textContent);
   expect(values).toContain('每笔 SOL 网络手续费上限');
-  expect(values).toContain('0.000010001 SOL（10001 lamports）');
-  expect(values).not.toContain('0.000099999 SOL（99999 lamports）');
+  expect(values).toContain('0.000010001 SOL');
+  expect(values).not.toContain('0.000099999 SOL');
   elements.get('network-fee')!.value = '500000';
   expect(elements.get('facts')!.children.map(child => child.textContent)).toEqual(values);
   elements.get('resource')!.value = 'exact-api';
   await elements.get('resource')!.handlers.get('change')!();
   expect(elements.get('network-fee-field')!.hidden).toBe(true);
   expect(elements.get('network-fee')!.value).toBe('');
+});
+
+
+it.each([
+  ['0.00001', '10000'], ['0.000005001', '5001'], ['0.000000001', '1'],
+  ['1.01', '1010000000'], ['9223372036.854775807', '9223372036854775807'],
+])('converts SOL %s to exact lamports %s without floating point', (sol, lamports) => {
+  const { context } = activityHarness();
+  expect(runInNewContext(`networkFeeAtomic(${JSON.stringify(sol)})`, context)).toBe(lamports);
+});
+
+it.each(['', '0', '0.000000000', '0.0000000001', '1e-5', '-0.1', 'NaN', '1,000', '9223372036.854775808'])(
+  'blocks invalid fee %s before a freeze request reaches the server', async value => {
+    const { elements, calls, context } = activityHarness();
+    runInNewContext("availableResources=[{resourceId:'mpp',paymentProtocol:'mpp_solana_charge'}];selectedProtocol='mpp_solana_charge';element('resource').value='mpp';syncFeeField()", context);
+    elements.get('network-fee')!.value = value;
+    await runInNewContext('element("editor").handlers.get("submit")({preventDefault(){},submitter:element("review-continue")})', context);
+    expect(calls).toEqual([]);
+    expect(elements.get('status')!.textContent || elements.get('dialog-status')!.textContent).not.toBe('');
+  },
+);
+
+it('lets the user choose a cap without typing, edit SOL, and clears the choice across API scopes', async () => {
+  const { elements, context, calls } = activityHarness();
+  runInNewContext("availableResources=[{resourceId:'mpp',paymentProtocol:'mpp_solana_charge'}];selectedProtocol='mpp_solana_charge';element('resource').value='mpp';syncFeeField()", context);
+  expect(elements.get('network-fee')!.value).toBe('');
+  await elements.get('network-fee-low')!.handlers.get('click')!();
+  expect(elements.get('network-fee')!.value).toBe('0.00001');
+  expect(elements.get('network-fee-low')!.attributes.get('aria-pressed')).toBe('true');
+  expect(elements.get('network-fee-editor')!.hidden).toBe(true);
+  await elements.get('network-fee-high')!.handlers.get('click')!();
+  expect(elements.get('network-fee')!.value).toBe('0.00005');
+  await elements.get('network-fee-custom')!.handlers.get('click')!();
+  expect(elements.get('network-fee-editor')!.hidden).toBe(false);
+  expect(elements.get('network-fee')!.value).toBe('0.00005');
+  await elements.get('resource')!.handlers.get('change')!();
+  expect(elements.get('network-fee')!.value).toBe('');
+  expect(elements.get('network-fee-high')!.attributes.get('aria-pressed')).toBe('false');
+  expect(calls).toEqual([]);
+});
+
+
+const protocolResources = [
+  { resourceId: 'legacy', displayName: 'Existing API' },
+  { resourceId: 'x402-api', displayName: 'x402 API', paymentProtocol: 'x402' },
+  { resourceId: 'mpp-api', displayName: 'MPP API', paymentProtocol: 'mpp_solana_charge' },
+  { resourceId: 'future-api', displayName: 'Future API', paymentProtocol: 'unsupported' },
+];
+it('requires protocol then API, filters by backend protocol and resets the previous fee choice', async () => {
+  const { elements, context, calls } = activityHarness();
+  runInNewContext(`availableResources=${JSON.stringify(protocolResources)};renderResourceOptions()`, context);
+  expect(elements.get('resource')!.disabled).toBe(true);
+  expect(elements.get('resource')!.value).toBe('');
+  await elements.get('protocol-x402')!.handlers.get('click')!();
+  expect(elements.get('resource')!.children.map(option => option.value)).toEqual(['', 'legacy', 'x402-api']);
+  expect(elements.get('resource')!.value).toBe('');
+  elements.get('resource')!.value = 'legacy';
+  await elements.get('protocol-mpp_solana_charge')!.handlers.get('click')!();
+  expect(elements.get('resource')!.children.map(option => option.value)).toEqual(['', 'mpp-api']);
+  expect(elements.get('resource')!.value).toBe('');
+  elements.get('resource')!.value = 'mpp-api';
+  await elements.get('resource')!.handlers.get('change')!();
+  await elements.get('network-fee-low')!.handlers.get('click')!();
+  expect(elements.get('network-fee')!.value).toBe('0.00001');
+  await elements.get('protocol-x402')!.handlers.get('click')!();
+  expect(elements.get('network-fee')!.value).toBe('');
+  expect(elements.get('network-fee-field')!.hidden).toBe(true);
+  expect(elements.get('resource')!.value).toBe('');
+  expect(calls).toEqual([]);
+});
+
+it('shows an empty protocol scope and clears a resource removed by refresh', async () => {
+  const { elements, context, calls } = activityHarness();
+  runInNewContext(`availableResources=${JSON.stringify(protocolResources)};selectedProtocol='mpp_solana_charge';element('resource').value='mpp-api';renderResourceOptions()`, context);
+  expect(elements.get('resource')!.value).toBe('mpp-api');
+  runInNewContext("availableResources=[{resourceId:'legacy'}];renderResourceOptions()", context);
+  expect(elements.get('resource')!.value).toBe('');
+  expect(elements.get('resource')!.disabled).toBe(true);
+  expect(elements.get('resource-hint')!.textContent).toContain('暂无 MPP');
+  expect(elements.get('review-continue')!.disabled).toBe(true);
+  expect(calls).toEqual([]);
+});
+
+it('rejects a stale cross-protocol API before freezing and blocks switching during preparation', async () => {
+  const { elements, context, calls } = activityHarness();
+  runInNewContext(`availableResources=${JSON.stringify(protocolResources)};selectedProtocol='x402';element('resource').value='mpp-api'`, context);
+  await runInNewContext('element("editor").handlers.get("submit")({preventDefault(){},submitter:element("review-continue")})', context);
+  expect(calls).toEqual([]);
+  expect(elements.get('status')!.textContent).toContain('协议');
+  runInNewContext('preparing=true', context);
+  await elements.get('protocol-mpp_solana_charge')!.handlers.get('click')!();
+  expect(runInNewContext('selectedProtocol', context)).toBe('x402');
 });
