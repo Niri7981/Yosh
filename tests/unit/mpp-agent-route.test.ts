@@ -88,6 +88,19 @@ it('exercises the real runtime Mainnet and isolation gates without constructing 
 });
 
 const requireDependency = createRequire(import.meta.url);
+it('accepts only the explicit Mainnet standalone MPP capability and ignores injected production execution dependencies', () => {
+  const runExternalPaymentOperation = vi.fn();
+  const runtime = { environment: { isProduction: true }, dependencies: { mpp: { binary: '/untrusted/engine', prepare: vi.fn() } },
+    hosting: { kind: 'mainnet-standalone', mppProtocolEnginePath: '/verified/runtime/mpp-protocol-engine' }, runExternalPaymentOperation };
+  Object.setPrototypeOf(runtime, AppRuntime.prototype);
+  expect(() => Reflect.apply(AppRuntime.prototype.requestMppPurchase, runtime, [input, origin, principal])).not.toThrow();
+  expect(runExternalPaymentOperation).toHaveBeenCalledOnce();
+  const dependencies: unknown = Reflect.apply(Reflect.get(AppRuntime.prototype, 'mppDependencies'), runtime, []);
+  expect(dependencies).toEqual({ binary: '/verified/runtime/mpp-protocol-engine' });
+  runtime.hosting.mppProtocolEnginePath = 'relative/engine';
+  expect(() => Reflect.apply(AppRuntime.prototype.requestMppPurchase, runtime, [input, origin, principal]))
+    .toThrow('MPP_MAINNET_ACCEPTANCE_REQUIRED');
+});
 const wrapperCode = buildSync({ entryPoints: [resolve('scripts/pay-dev-mcp.ts')], bundle: true, write: false,
   platform: 'node', format: 'cjs', packages: 'external', define: { __YOSH_RC5__: 'true' }, minifySyntax: true }).outputFiles[0].text;
 const RpcResult = z.object({ id: z.number(), result: z.object({ isError: z.boolean().optional(),

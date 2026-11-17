@@ -1,3 +1,5 @@
+import { readAgentPurchase } from '../../src/modules/purchases/agent-purchase-read';
+import { paymentFailure } from '../../src/modules/payment/pay-controller-diagnostics';
 import { randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -288,3 +290,32 @@ it('atomically claims one merchant challenge across concurrent processes using d
     } finally { reopened.close(); }
   } finally { workers.forEach(({ child }) => child.kill()); }
 }, 15_000);
+
+
+it('persists redacted execution failure across restart and reads the MPP operation under its original owner', () => {
+  const path = temporaryLedger(); let value = ledger(path);
+  try {
+    value.setDailyLimit('1000000');
+    const authority = grant(value, 'mpp-resource', 'mpp_charge');
+    const original = intent('diagnostic-mpp', 'mpp-resource', authority);
+    const record = value.reserve(original, quote(), now, 'live_devnet', principal.cardMemberId);
+    value.claim(record.approvalId, now, undefined, 'live_devnet');
+    value.failUnsubmitted(record.approvalId);
+    value.recordExecutionFailure(record.approvalId, paymentFailure(new Error('MPP_BLOCKHASH_EXPIRED'), 'preflight', original.idempotencyKey));
+    expect(readAgentPurchase(value, principal.cardMemberId, { operationId: original.idempotencyKey })).toMatchObject({
+      purchaseId: original.idempotencyKey, status: 'FAILED', failure: {
+        failureStage: 'preflight', failureCode: 'PAY_PREFLIGHT_FAILED', protocolFailureCode: 'MPP_BLOCKHASH_EXPIRED',
+      },
+    });
+    value.close(); value = ledger(path);
+    const after = readAgentPurchase(value, principal.cardMemberId, { purchaseId: original.idempotencyKey });
+    expect(after?.failure?.protocolFailureCode).toBe('MPP_BLOCKHASH_EXPIRED');
+    expect(readAgentPurchase(value, randomUUID(), { operationId: original.idempotencyKey })).toBeUndefined();
+    const exact = grant(value, 'x402-resource', 'exact');
+    const other = value.reserve(intent('diagnostic-secret', 'x402-resource', exact, false), x402Quote(), now, 'live_devnet', principal.cardMemberId);
+    value.recordExecutionFailure(other.approvalId, paymentFailure(new Error('private wallet secret signed bytes'), 'signing', 'diagnostic-secret'));
+    const safe = readAgentPurchase(value, principal.cardMemberId, { purchaseId: 'diagnostic-secret' });
+    expect(safe?.failure).toMatchObject({ failureStage: 'signing', failureCode: 'PAY_SIGNING_FAILED' });
+    expect(JSON.stringify(safe)).not.toMatch(/wallet secret|signed bytes/);
+  } finally { value.close(); }
+});

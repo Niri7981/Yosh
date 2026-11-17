@@ -8,17 +8,19 @@ Use Yosh directly as a plugin in Codex. The plugin starts its own local payment 
 
 ## Plugin Edition
 
-**Plugin Edition 0.2.4** combines API discovery, Spend Grants, controlled Mainnet purchases and purchase queries in one plugin. Mainnet uses the existing Yosh wallet and records. Devnet uses separate test funds and state. Every wallet, API and purchase call selects its network explicitly.
+**Plugin Edition 0.2.13** combines API discovery, Spend Grants, controlled Mainnet purchases and purchase queries in one plugin, with support for x402 and MPP Solana Charge. Mainnet uses the existing Yosh wallet and records. Devnet uses separate test funds and state. Every wallet, API and purchase call selects its network explicitly.
 
 | Entry point | Version and availability |
 | --- | --- |
-| Plugin Edition | **0.2.4**, locally packaged and accepted in Codex on macOS. Not yet published in the public Codex plugin directory. |
+| Plugin Edition | **0.2.13** local package and authorization UI; MPP real-payment acceptance used **0.2.11**, with its running Mainnet backend retained during the UI updates. Not yet published in the public Codex plugin directory. |
 | Native macOS App | **0.1.1, build 7**. See the [stable App release record](docs/releases/v0.1.1.md) and [App guide](docs/guides/native-app-getting-started.md). |
-| Historical public download | The [website download](https://2049-web.vercel.app/) is **0.1.0 Beta**, not the 0.2.4 plugin package. |
+| Historical public download | The [website download](https://2049-web.vercel.app/) is **0.1.0 Beta**, not the current plugin package. |
 
 **Mainnet setup boundary:** the current plugin requires an existing configured Yosh Mainnet installation, including its Keychain wallet and monetary controls. It does not yet provide fresh Mainnet wallet creation/import or complete first-time onboarding. Once that setup exists, the plugin can authorize and purchase without launching the App.
 
 On **November 13, 2026**, user acceptance completed a new Grant and a **0.001 USDC** Agent402 purchase with Yosh.app closed throughout. The purchase returned `PAID` and `COMPLETE` with the API result. See the [standalone runtime and acceptance record](docs/architecture/mainnet-standalone-runtime-20261113.md). This follows the [0.2.3 plugin milestone](docs/architecture/plugin-milestone-20261112.md), which used an App-hosted Mainnet backend.
+
+On **November 17, 2026**, the standalone plugin completed a **0.001 USDC MPP Solana Charge** purchase from AgentFeed, with **5,001 lamports** in network fees, while Yosh.app stayed closed. Original chain evidence and persisted delivery confirmed `PAID / COMPLETE`; a fresh independent Codex session verified the native MCP read tools. See the [MPP acceptance record and remaining limits](docs/demo/mpp-mainnet-plugin-20261117.md).
 
 ## Get started with the plugin
 
@@ -59,6 +61,8 @@ Next, ask for the Mainnet authorization page:
 
 `open_local_settings` returns the local page. Review the API, network, asset, recipient constraints, total limit, per-purchase limit and expiration, then confirm through the system confirmation window. The Agent cannot confirm for you. After confirmation, ask Yosh to refresh the Grant status.
 
+The page selects **network → payment protocol → API**, filtering APIs to x402 or MPP. MPP Grants also require an explicit per-payment SOL network-fee limit, shown as SOL presets or a custom SOL amount. The backend validates the exact integer lamport limit independently. An existing x402 Grant does not authorize MPP charges.
+
 A Grant covers one Agent and Resource. Its total applies across the Grant's lifetime. **Daily Authority** is a separate shared daily limit that includes both paid and reserved amounts; neither allowance is your wallet balance. The existing Mainnet daily limit and pause state are preserved by the plugin. This version's Mainnet Grant page does not edit them.
 
 ### 4. Buy once and check the result
@@ -92,9 +96,9 @@ The plugin and native App share authorization, signing, accounting and recovery 
 | Plugin / MCP | Explicit network selection, API discovery, purchase requests and bounded queries. |
 | Authorization page / native App | User review and trusted confirmation of permitted changes. |
 | Local backend | Authentication, Grants, budgets, exclusive execution, Keychain signing and the SQLite ledger. |
-| Pay and official x402 SDK | MCP request flow, offer selection and supported payment protocol handling. |
+| Pay / pinned protocol SDKs | MCP request flow, offer selection and supported x402 or MPP protocol handling; signing and submission stay in Yosh. |
 
-The existing App and its data are preserved. **The current native App does not attach its UI to an already-running standalone backend.** To switch back to that App version, stop standalone normally before opening it. See the [native App guide](docs/guides/native-app-getting-started.md) for its existing workflow.
+The existing App and its data are preserved. **The current native App does not attach its UI to an already-running standalone backend, and its pre-MPP reader has not been updated for MPP records.** Keep the old App out of the MPP workflow until that compatibility update is delivered; stopping standalone alone does not resolve this reader limitation. Existing runtime ownership locks remain in place. See the [native App guide](docs/guides/native-app-getting-started.md) for its existing workflow.
 
 ### Pay integration
 
@@ -106,13 +110,15 @@ Builds use pinned, verified Pay/pay-kit sources. The [source record](docs/releas
 
 | Area | Verified scope and remaining work |
 | --- | --- |
-| Mainnet payments | Solana Mainnet, native USDC, supported x402 V2 `exact` flow. |
-| API requests | Constrained GET and JSON POST. GET has real purchase evidence; live POST purchase acceptance remains outstanding. |
+| Mainnet payments | Solana Mainnet, native USDC, supported x402 V2 `exact` and MPP Solana `charge` flows. MPP requires a verified capability-bearing standalone artifact. |
+| API requests | x402: constrained GET and JSON POST. MPP: GET only. Both have real GET purchase evidence; live POST purchase acceptance remains outstanding. |
 | Delivery | Bounded JSON and declared text, including HTTP 200/201. No arbitrary media or streaming. |
 | Recovery | Automated coverage for original-payment and delivery recovery. Actual merchant recovery remains unverified. |
 | Mainnet onboarding | Existing wallet/configuration reuse works. Fresh wallet creation/import and complete first-time setup remain future work. |
 | Distribution | Local macOS development package. Public plugin listing, notarized distribution and clean-machine acceptance remain future work. |
 | Other hosts and payment methods | Codex is the verified host. Other hosts, networks, assets and payment schemes need separate validation. |
+
+MPP Session/channel payments, card payments, sponsored fees, splits and ATA creation are outside this version's supported scope. The [MPP architecture record](docs/architecture/mpp-solana-charge.md) documents protocol restrictions, pinned SDK inputs and recovery behavior.
 
 Missing or expired authorization, pause, insufficient allowance, invalid quotes and signer mismatch block new payments. Unknown outcomes retain their reservation and evidence. API discovery inspects endpoints supplied to it; it is not a global API marketplace. Refunds are not supported, and third-party delivery cannot be guaranteed.
 
@@ -135,6 +141,8 @@ python3 -B scripts/package-standalone-plugin.py \
 
 The first command verifies an artifact already produced by `build-standalone-dependencies.py build`; it does not download or create dependencies. Packaging produces a local `marketplace/`, plugin ZIP and checksum evidence under `build.noindex/plugin-package/`. These build commands do not install the plugin, start a backend, create a wallet or authorize a payment.
 
+The example above builds the baseline runtime. To include Mainnet MPP, supply a separately verified protocol build through `--mpp-artifact /path/to/mpp-artifact --mainnet-mpp` to `build-standalone-dev.py`. See the [MPP source and artifact requirements](docs/architecture/mpp-solana-charge.md). Installing a new package does not silently advance an existing Mainnet runtime: the explicit upgrade path verifies and drains its current owner before handoff.
+
 Run `npm run typecheck`, `npm run lint`, `npm run build` and the relevant tests before delivery. Mainnet acceptance is separate from fixture testing and requires explicit purchase authorization. [Standalone acceptance](docs/architecture/mainnet-standalone-runtime-20261113.md) documents the host checks and evidence boundaries. Native App builds retain their [stable release process](docs/releases/v0.1.1.md).
 
 ### Grant UI design preview
@@ -150,6 +158,7 @@ This preview includes the asset portfolio, per-Agent Grant summary, liquid trans
 ## Documentation
 
 - [Documentation index](docs/README.md)
+- [MPP Mainnet plugin acceptance and limits](docs/demo/mpp-mainnet-plugin-20261117.md)
 - [Plugin 0.2.4 runtime and acceptance](docs/architecture/mainnet-standalone-runtime-20261113.md)
 - [Plugin 0.2.3 milestone](docs/architecture/plugin-milestone-20261112.md)
 - [Native macOS App guide](docs/guides/native-app-getting-started.md)

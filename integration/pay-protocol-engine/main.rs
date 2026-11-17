@@ -396,6 +396,13 @@ fn mpp_parameter_policy(header: &str) -> SafeResult<()> {
     let mut index = 8;
     while index < bytes.len() {
         while index < bytes.len() && bytes[index].is_ascii_whitespace() { index += 1; }
+        // Repeated HTTP authentication fields may be joined by the transport.
+        // Check raw parameter names in every offer before the SDK can discard
+        // unknown fields; challenge splitting and decoding remain SDK-owned.
+        if bytes.get(index..index + 8).is_some_and(|value| value.eq_ignore_ascii_case(b"Payment ")) {
+            index += 8;
+            while index < bytes.len() && bytes[index].is_ascii_whitespace() { index += 1; }
+        }
         let start = index;
         while index < bytes.len() && bytes[index].is_ascii_alphabetic() { index += 1; }
         let key = &header[start..index];
@@ -472,6 +479,18 @@ fn mpp_challenge(header: &str) -> SafeResult<(pay_kit::mpp::PaymentChallenge, pa
 }
 
 fn mpp_parse(header: String) -> SafeResult<Value> {
+    mpp_parameter_policy(&header)?;
+    let offers = pay_kit::mpp::parse_www_authenticate_all([header.as_str()]);
+    if offers.len() > 16 { return Err("MPP_INVALID_CHALLENGE"); }
+    let mut selected = None;
+    for offer in offers {
+        let challenge = offer.map_err(|_| "MPP_INVALID_CHALLENGE")?;
+        if challenge.method.as_str() != "solana" || challenge.intent.as_str() != "charge" { continue; }
+        if selected.is_some() { return Err("MPP_AMBIGUOUS_CHALLENGE"); }
+        selected = Some(challenge);
+    }
+    let selected = selected.ok_or("MPP_UNSUPPORTED_METHOD_INTENT")?;
+    let header = pay_kit::mpp::format_www_authenticate(&selected).map_err(|_| "MPP_INVALID_CHALLENGE")?;
     let (challenge, request, _) = mpp_challenge(&header)?;
     Ok(json!({"header":header,"challenge":challenge,"request":request}))
 }
@@ -503,10 +522,13 @@ fn mpp_prepare(header: String, payer: String, lifetime: HostValidatedLifetime) -
     let payer = solana_pubkey::Pubkey::from_str(&payer).map_err(|_| "MPP_INVALID_PAYER")?;
     solana_pubkey::Pubkey::from_str(&lifetime.recent_blockhash).map_err(|_| "MPP_INVALID_BLOCKHASH")?;
     let height = lifetime.last_valid_block_height.parse::<u64>().map_err(|_| "MPP_INVALID_LIFETIME")?;
-    if height == 0 || height > 9_007_199_254_740_991 || height.to_string() != lifetime.last_valid_block_height
-        || details.recent_blockhash.as_ref().is_some_and(|value| value != &lifetime.recent_blockhash) {
+    if height == 0 || height > 9_007_199_254_740_991 || height.to_string() != lifetime.last_valid_block_height {
         return Err("MPP_INVALID_LIFETIME");
     }
+    // Solana Charge recentBlockhash is advisory. Use the host's fresh, exact
+    // RPC lifetime so signing never invents an expiry height for a merchant hash.
+    // Only this local construction copy changes; the credential echoes the
+    // original challenge, including its unmodified request and challenge ID.
     details.recent_blockhash = Some(lifetime.recent_blockhash.clone());
     let rpc = pay_kit::mpp::solana_rpc_client::rpc_client::RpcClient::new_sender(
         HostValidatedBlockhashSender(lifetime.recent_blockhash.clone()), Default::default());

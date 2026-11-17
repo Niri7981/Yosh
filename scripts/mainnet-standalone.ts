@@ -5,6 +5,7 @@ import { createInterface } from 'node:readline';
 import { z } from 'zod';
 import { assertMainnetProxyStartupEnvironment, loadMainnetStandaloneConfiguration } from '../src/modules/pay-dev/mainnet-standalone-configuration';
 import { installMainnetRuntime, verifyMainnetRuntime } from '../src/modules/pay-dev/mainnet-runtime-artifact';
+import { upgradeMainnetRuntime } from '../src/modules/pay-dev/mainnet-runtime-upgrade';
 import { claimMainnetProcessLock, drainMainnetBackend, ensureMainnetBackend, inspectMainnetBackend, readMainnetOwner,
   stopMainnetBackend, writeMainnetOwner } from '../src/modules/pay-dev/mainnet-standalone-owner';
 import { startMainnetDevelopmentBackend } from '../src/modules/pay-dev/mainnet-runtime';
@@ -59,8 +60,10 @@ async function serve(digest: string, initial: Configuration) {
     Object.assign(process.env, configuration.environment);
     // AppRuntime obtains the original backend-owner and ledger writer locks
     // before opening or recovering the existing ledger. Never clear those locks.
+    const verified = verifyMainnetRuntime(runtime).manifest;
     backend = await startMainnetDevelopmentBackend({ directory: configuration.directory, port: configuration.port,
-      hosting: { kind: 'mainnet-standalone', runtimeDigest: digest, payMcpPath: join(runtime, 'pay-mcp') } });
+      hosting: { kind: 'mainnet-standalone', runtimeDigest: digest, payMcpPath: join(runtime, 'pay-mcp'),
+        ...(verified.mppProtocol ? { mppProtocolEnginePath: join(runtime, 'mpp-protocol-engine') } : {}) } });
     writeMainnetOwner(configuration.directory, digest, !stopRequested);
     const running = backend;
     let closing = false;
@@ -121,11 +124,15 @@ function mcp(installed: string, configuration: Configuration) {
 
 async function main() {
   if (process.argv.length !== 3) throw new Error('MAINNET_ARGUMENTS_INVALID');
-  const action = z.enum(['start', 'status', 'stop', 'serve', 'install-mcp']).parse(process.argv[2]);
+  const action = z.enum(['start', 'status', 'stop', 'serve', 'install-mcp', 'upgrade']).parse(process.argv[2]);
   const { digest } = verifyMainnetRuntime(runtime);
   if (realpathSync(process.execPath) !== realpathSync(join(runtime, 'node'))) throw new Error('MAINNET_PACKAGED_NODE_REQUIRED');
   const configuration = await loadMainnetStandaloneConfiguration(runtime);
   if (action === 'serve') { await serve(digest, configuration); return; }
+  if (action === 'upgrade') {
+    await upgradeMainnetRuntime(runtime, configuration);
+    console.log(JSON.stringify({ upgraded: true, runtimeDigest: digest, dataPreserved: true })); return;
+  }
   if (action === 'stop') {
     await stopMainnetBackend({ configuration, digest });
     console.log(JSON.stringify({ stopped: true, environment: 'mainnet', dataPreserved: true })); return;

@@ -1,4 +1,5 @@
 import { LocalControlApprovals, type LocalControlReceipt } from '../authority/local-control-approval';
+import { PaymentFailureDetails, readPaymentFailure } from '../payment/pay-controller-diagnostics';
 import { ExecutionSafety, type ExternalExecutionFacts, type ExternalExecutionPermit } from './execution-safety';
 import { LocalGrantApprovals, type LocalGrantConfirmation } from '../authority/local-grant-approval';
 import { assertX402Purchase, type SpendReservation, type PurchaseRecord, type PurchaseQuote } from './purchase-contract';
@@ -133,6 +134,10 @@ export class PurchaseLedger {
         execution_mode TEXT CHECK(execution_mode IN ('simulated','live_devnet')), payment_evidence TEXT);
       CREATE TABLE IF NOT EXISTS purchase_answers (purchase_id TEXT PRIMARY KEY, answer TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS purchase_events (sequence INTEGER PRIMARY KEY AUTOINCREMENT, purchase_id TEXT NOT NULL, type TEXT NOT NULL, at INTEGER NOT NULL);`);
+    // Additive, idempotent migration: legacy purchase/payment rows are untouched.
+    // Operational failure facts are separate from the immutable approval decision.
+    this.db.exec(`CREATE TABLE IF NOT EXISTS purchase_execution_failures (
+      purchase_id TEXT PRIMARY KEY REFERENCES purchases(id), details TEXT NOT NULL, at INTEGER NOT NULL);`);
     if (!this.columns('purchases').has('owner_card_member_id')) this.db.exec('ALTER TABLE purchases ADD COLUMN owner_card_member_id TEXT');
     if (!this.columns('purchases').has('execution_mode')) this.db.exec('ALTER TABLE purchases ADD COLUMN execution_mode TEXT');
     if (!this.columns('purchases').has('payment_evidence')) this.db.exec('ALTER TABLE purchases ADD COLUMN payment_evidence TEXT');
@@ -296,6 +301,16 @@ export class PurchaseLedger {
     });
   }
   private event(id: string, type: string) { this.db.prepare('INSERT INTO purchase_events (purchase_id,type,at) VALUES (?,?,?)').run(id, type, Date.now()); }
+  recordExecutionFailure(approvalId: string, error: unknown) {
+    const details = readPaymentFailure(error);
+    if (!details.failureStage) return;
+    this.db.prepare(`INSERT OR IGNORE INTO purchase_execution_failures (purchase_id,details,at)
+      SELECT id,?,? FROM purchases WHERE approval_id=?`).run(JSON.stringify(details), this.now(), approvalId);
+  }
+  executionFailure(purchaseId: string) {
+    const row = this.db.prepare('SELECT details FROM purchase_execution_failures WHERE purchase_id=?').get(purchaseId);
+    return row ? PaymentFailureDetails.parse(JSON.parse(String(row.details))) : undefined;
+  }
   private grantEvent(id: string, type: string, at = this.now()) { this.db.prepare('INSERT INTO spend_grant_events (grant_id,type,at) VALUES (?,?,?)').run(id, type, at); }
   private expireGrants(now: number) {
     if (!this.managed) return;

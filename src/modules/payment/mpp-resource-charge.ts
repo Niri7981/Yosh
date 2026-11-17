@@ -32,18 +32,18 @@ export function validateMppQuote(raw: unknown, resource: X402Resource, config: P
 }
 
 export async function fetchMppResourceQuote(resource: X402Resource, config: PaymentConfig, binary: string,
-  fetcher: typeof fetch = fetch, now = Date.now()) {
+  fetcher?: typeof fetch, now = Date.now()) {
   assertMppResource(resource, config);
   const request = HttpResourceRequestSchema.parse(resource.request);
   const init = { method: request.method, headers: request.headers, redirect: 'error' as const, signal: AbortSignal.timeout(15_000) };
-  const response = request.access === 'https' ? await safeResourceFetch(request.url, init, fetcher) : await fetcher(request.url, init);
+  const response = request.access === 'https' ? await safeResourceFetch(request.url, init, fetcher) : await (fetcher ?? fetch)(request.url, init);
   try {
     if (response.status !== 402 || (response.url && response.url !== request.url)) throw new Error('MPP_CHALLENGE_REQUIRED');
     const header = z.string().min(1).max(16_384).parse(response.headers.get('www-authenticate'));
     const selected = await parseMppChallenge(binary, header);
     return validateMppQuote({ protocol: 'mpp', method: 'solana', intent: 'charge', scheme: 'mpp_charge',
       network: config.network, asset: selected.request.currency, payTo: selected.request.recipient,
-      amount: selected.request.amount, challenge: selected.challenge, challengeHeader: header, expiresAt: selected.expiresAt }, resource, config, now);
+      amount: selected.request.amount, challenge: selected.challenge, challengeHeader: selected.header, expiresAt: selected.expiresAt }, resource, config, now);
   } finally { await response.body?.cancel().catch(() => {}); }
 }
 

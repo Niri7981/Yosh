@@ -3,8 +3,10 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
+import { upgradeMainnetRuntime } from '../../src/modules/pay-dev/mainnet-runtime-upgrade';
+import { acquireDataDirectoryOwnership } from '../../src/modules/app/data-directory-owner';
 import { installMainnetRuntime, verifyMainnetRuntime } from '../../src/modules/pay-dev/mainnet-runtime-artifact';
-import { claimMainnetProcessLock, drainMainnetBackend, ensureMainnetBackend, inspectMainnetBackend, stopMainnetBackend, writeMainnetOwner } from '../../src/modules/pay-dev/mainnet-standalone-owner';
+import { claimMainnetProcessLock, drainMainnetBackend, ensureMainnetBackend, inspectMainnetBackend, stopMainnetBackend, readMainnetOwner, writeMainnetOwner } from '../../src/modules/pay-dev/mainnet-standalone-owner';
 
 const cleanups: string[] = [];
 afterEach(() => { for (const path of cleanups.splice(0)) rmSync(path, { recursive: true, force: true }); });
@@ -155,4 +157,60 @@ it('never stops the original App if it replaces the inspected standalone listene
   expect(oldAppStopped).toBe(false);
   expect(requests).not.toContain('POST /api/app/lifecycle');
   expect(failure).toBeInstanceOf(Error);
+});
+
+function mppCandidate(runtime: string) {
+  const path = join(runtime, 'mainnet-manifest.json');
+  const old = JSON.parse(readFileSync(path, 'utf8'));
+  const files = { ...old.files };
+  for (const name of ['mpp-protocol-engine', 'mpp-provenance.json']) {
+    writeFileSync(join(runtime, name), `fixture-${name}`); files[name] = hash(`fixture-${name}`);
+  }
+  writeFileSync(path, JSON.stringify({ ...old, mppProtocol: true, files }));
+  return hash(readFileSync(path));
+}
+it('binds the Mainnet MPP capability to both verified executable and provenance bytes', () => {
+  const f = fixture();
+  const digest = mppCandidate(f.runtime);
+  expect(verifyMainnetRuntime(f.runtime).manifest.mppProtocol).toBe(true);
+  const installed = installMainnetRuntime(f.runtime, f.configuration.root);
+  expect(verifyMainnetRuntime(installed).digest).toBe(digest);
+  writeFileSync(join(f.runtime, 'mpp-protocol-engine'), 'tampered');
+  expect(() => verifyMainnetRuntime(f.runtime)).toThrow('MAINNET_RUNTIME_INTEGRITY_FAILED');
+});
+it('cannot claim Mainnet MPP with the old file set', () => {
+  const f = fixture(); const path = join(f.runtime, 'mainnet-manifest.json');
+  writeFileSync(path, JSON.stringify({ ...JSON.parse(readFileSync(path, 'utf8')), mppProtocol: true }));
+  expect(() => verifyMainnetRuntime(f.runtime)).toThrow('MAINNET_RUNTIME_INTEGRITY_FAILED');
+});
+it('explicit stopped-owner upgrade changes only the version fence, retaining financial bytes and rejecting stale startup', async () => {
+  const f = fixture(); installMainnetRuntime(f.runtime, f.configuration.root);
+  writeMainnetOwner(f.configuration.directory, f.digest, false);
+  const ledgerPath = join(f.configuration.directory, 'app-ledger.sqlite'); writeFileSync(ledgerPath, 'original-ledger');
+  const next = mppCandidate(f.runtime);
+  const fetcher = transport(f.configuration.environment.YOSH_MANAGEMENT_TOKEN, () => undefined);
+  await upgradeMainnetRuntime(f.runtime, f.configuration, fetcher);
+  expect(readMainnetOwner(f.configuration.directory)).toMatchObject({ runtimeDigest: next, ready: false });
+  expect(readFileSync(ledgerPath, 'utf8')).toBe('original-ledger');
+  const launch = vi.fn(() => ({ failed: () => false }));
+  await expect(ensureMainnetBackend({ configuration: f.configuration, digest: f.digest, fetcher, launch }))
+    .rejects.toThrow('MAINNET_RUNTIME_VERSION_MISMATCH');
+  expect(launch).not.toHaveBeenCalled();
+});
+it('refuses a handoff while the App core owns the ledger, even when no listener or standalone service is present', async () => {
+  const f = fixture(); installMainnetRuntime(f.runtime, f.configuration.root);
+  writeMainnetOwner(f.configuration.directory, f.digest, false); mppCandidate(f.runtime);
+  const core = acquireDataDirectoryOwnership(f.configuration.directory);
+  try {
+    await expect(upgradeMainnetRuntime(f.runtime, f.configuration,
+      transport(f.configuration.environment.YOSH_MANAGEMENT_TOKEN, () => undefined))).rejects.toThrow('DATA_DIRECTORY_IN_USE');
+    expect(readMainnetOwner(f.configuration.directory)?.runtimeDigest).toBe(f.digest);
+  } finally { core.release(); }
+});
+it('refuses a handoff from an undrained owner with no listener', async () => {
+  const f = fixture(); installMainnetRuntime(f.runtime, f.configuration.root);
+  writeMainnetOwner(f.configuration.directory, f.digest, true); mppCandidate(f.runtime);
+  await expect(upgradeMainnetRuntime(f.runtime, f.configuration,
+    transport(f.configuration.environment.YOSH_MANAGEMENT_TOKEN, () => undefined))).rejects.toThrow('MAINNET_RUNTIME_HANDOFF_CHANGED');
+  expect(readMainnetOwner(f.configuration.directory)?.runtimeDigest).toBe(f.digest);
 });

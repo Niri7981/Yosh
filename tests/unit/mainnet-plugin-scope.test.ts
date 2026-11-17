@@ -3,7 +3,7 @@ import { filterMainnetTools, permittedMainnetCall } from '../../src/modules/mcp/
 
 const allowed = ['get_spending_status', 'get_balance', 'list_catalog', 'search_catalog', 'get_catalog_entry',
   'discover_x402_resource', 'register_x402_resource', 'quote_x402_resource', 'curl', 'recover_payment',
-  'get_purchase', 'get_purchase_delivery'];
+  'get_purchase', 'get_purchase_delivery', 'request_mpp_purchase', 'quote_mpp_resource'];
 const forbidden = ['topup', 'sell_inference', 'create_skill', 'setup', 'export_wallet', 'sign_transaction',
   'set_daily_limit', 'set_paused', 'create_grant', 'unknown_future_pay_tool'];
 const call = (name: unknown) => ({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: {} } });

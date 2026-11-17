@@ -1,0 +1,4 @@
+(version 1)
+(allow default)
+(deny file-read* file-write* (regex #".*\.app(/|$)"))
+(deny process-exec (regex #".*\.app(/|$)"))

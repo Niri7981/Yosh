@@ -167,6 +167,20 @@ it('runs 402 → official SDK transaction/credential → one verified payment an
   expect(f.rpcMethods).not.toContain('sendTransaction');
 });
 
+it('retains a sanitized pre-signing failure after service catch, retry and restart', async () => {
+  const f = await fixture({ persistent: true });
+  vi.mocked(loadBuyerSigner).mockRejectedValueOnce(new Error('private keychain error must never be returned'));
+  const failed = await f.run();
+  expect(failed).toMatchObject({ status: 'FAILED', paymentStatus: 'FAILED', transaction: null,
+    failure: { failureStage: 'signer_load', failureCode: 'PAY_SIGNER_LOAD_FAILED', purchaseId: 'mpp-sdk-purchase' } });
+  expect(JSON.stringify(failed)).not.toContain('private keychain');
+  expect(f.signTransactions).not.toHaveBeenCalled(); expect(f.counts().paidCalls).toBe(0);
+  expect(f.ledger.savedOriginalPayment(f.record().approvalId)).toBeUndefined();
+  f.reopen();
+  expect(await f.run()).toEqual(failed);
+  expect(f.counts()).toEqual({ quoteCalls: 1, paidCalls: 0 });
+});
+
 it('retains UNKNOWN and its reservation after submission timeout, without another credential submission', async () => {
   const f = await fixture({ chainKnown: false, merchantTimeout: true });
   expect(await f.run()).toMatchObject({ status: 'PAYMENT_UNKNOWN' });
@@ -175,6 +189,16 @@ it('retains UNKNOWN and its reservation after submission timeout, without anothe
   expect(f.ledger.savedOriginalPayment(f.record().approvalId)?.evidence).toEqual(original.evidence);
   expect(f.ledger.managedSummary(Date.now(), 'live_devnet')).toMatchObject({ reserved: f.quote.amount, paid: '0' });
   expect(f.signTransactions).toHaveBeenCalledOnce(); expect(f.counts().paidCalls).toBe(1);
+});
+
+it('recovers an original unknown payment after Grant revocation without another signature or payment', async () => {
+  const f = await fixture({ chainKnown: false, merchantTimeout: true, recoveryLocation: 'query' });
+  expect(await f.run()).toMatchObject({ status: 'PAYMENT_UNKNOWN' });
+  f.ledger.revokeActiveSpendGrant(Date.now(), 'grant.REVOKED', f.principal.cardMemberId, f.resource.resourceId);
+  f.setChainKnown(true);
+  expect(await f.run()).toMatchObject({ status: 'PAID', deliveryStatus: 'COMPLETE' });
+  expect(f.signTransactions).toHaveBeenCalledOnce();
+  expect(f.counts()).toEqual({ quoteCalls: 1, paidCalls: 1 });
 });
 
 it.each([false, true])('accepts the public confirmed transaction ID and explorer URL in valid delivery (identifier recovery: %s)', async recovery => {

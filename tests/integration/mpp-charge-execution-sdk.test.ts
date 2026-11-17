@@ -25,7 +25,7 @@ it.each(['devnet', 'mainnet'] as const)('signs actual pinned SDK %s USDC bytes w
     merchant: merchant.address, facilitatorUrl: null };
   const request = { amount: '10000', currency: config.mint, recipient: config.merchant,
     ...(network === 'mainnet' ? { externalId: 'sdk-charge-fixture' } : {}),
-    methodDetails: { network, decimals: 6, tokenProgram: TOKEN_PROGRAM } };
+    methodDetails: { network, decimals: 6, tokenProgram: TOKEN_PROGRAM, ...(network === 'mainnet' ? { recentBlockhash: merchant.address } : {}) } };
   const header = `Payment id="signing-fixture", realm="merchant.invalid", method="solana", intent="charge", request="${Buffer.from(JSON.stringify(request)).toString('base64url')}", expires="${new Date(Date.now() + 60_000).toISOString()}"`;
   const challenge = await parseMppChallenge(binary, header);
   const quote = MppChargeQuoteSchema.parse({ protocol: 'mpp', method: 'solana', intent: 'charge', scheme: 'mpp_charge',

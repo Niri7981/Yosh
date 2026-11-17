@@ -4,11 +4,19 @@ import { dirname, join, resolve } from 'node:path';
 import { z } from 'zod';
 
 const Digest = z.string().regex(/^[a-f0-9]{64}$/);
-const Manifest = z.object({ kind: z.literal('yosh-mainnet-standalone'), apiVersion: z.literal(1),
+const ProgramFiles = z.object({ node: Digest, 'mainnet.cjs': Digest,
+  'mainnet-mcp.cjs': Digest, 'pay-mcp': Digest, 'pay-protocol-engine': Digest, 'mainnet.sb': Digest }).strict();
+const BaseManifest = z.object({ kind: z.literal('yosh-mainnet-standalone'), apiVersion: z.literal(1),
   dataContract: z.literal('existing-mainnet-v1'), profile: z.literal('com.yosh.pay-development.v011rc5'),
-  productionEnabled: z.literal(false), files: z.object({ node: Digest, 'mainnet.cjs': Digest,
-    'mainnet-mcp.cjs': Digest, 'pay-mcp': Digest, 'pay-protocol-engine': Digest, 'mainnet.sb': Digest }).strict(),
+  productionEnabled: z.literal(false),
   licenses: z.object({ 'Node-LICENSE': Digest, 'Pay-LICENSE': Digest, 'pay-kit-LICENSE': Digest }).strict() }).passthrough();
+// Capability and executable bytes are inseparable; older x402-only artifacts
+// remain valid but cannot acquire MPP capability from a process environment.
+const Manifest = z.union([
+  BaseManifest.extend({ mppProtocol: z.literal(true), files: ProgramFiles.extend({
+    'mpp-protocol-engine': Digest, 'mpp-provenance.json': Digest }).strict() }),
+  BaseManifest.extend({ mppProtocol: z.literal(false).optional(), files: ProgramFiles }),
+]);
 const hash = (data: Uint8Array) => createHash('sha256').update(data).digest('hex');
 function programFile(path: string, limit = 256 * 1024 * 1024) {
   const stat = lstatSync(path);

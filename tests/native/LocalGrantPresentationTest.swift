@@ -62,7 +62,13 @@ struct LocalGrantPresentationTest {
         scope["network"] = "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"
         scope["assetId"] = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
         binding["scope"] = scope; request["binding"] = binding
-        do { _ = try render(request); fatalError("Mainnet MPP confirmation accepted") } catch { }
+        let mainnetMpp = try render(request)
+        precondition(mainnetMpp.authenticationReason.contains("主网真实资金授权"))
+        precondition(mainnetMpp.details.contains("付款钱包：" + wallet))
+        precondition(mainnetMpp.details.contains("10002 lamports"))
+        scope.removeValue(forKey: "maximumNetworkFeeLamports")
+        binding["scope"] = scope; request["binding"] = binding
+        do { _ = try render(request); fatalError("Mainnet MPP without fee consent accepted") } catch { }
         let control: [String: Any] = ["version": 1, "kind": "control", "id": UUID().uuidString,
             "challenge": String(repeating: "a", count: 64), "sessionHash": String(repeating: "b", count: 64),
             "basis": String(repeating: "c", count: 64), "createdAt": now, "expiresAt": now + 300_000,
@@ -70,6 +76,6 @@ struct LocalGrantPresentationTest {
             "agentLabel": "Fixture", "action": ["type": "pause", "paused": true]]
         let controlPresentation = try render(control)
         precondition(controlPresentation.authenticationReason.contains("测试设置"))
-        print("Native presentation: wallet/reason, MPP exact fee details and system reason, missing/invalid fee and Mainnet MPP rejection passed. No UI or authentication invoked.")
+        print("Native presentation: Mainnet/Devnet wallet and MPP fee consent passed. No UI or authentication invoked.")
     }
 }

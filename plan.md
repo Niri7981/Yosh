@@ -1,6 +1,8 @@
 # Yosh macOS 第一版实施计划
 
-2026-11-16 MPP Solana Charge：按用户本轮实现授权，在独立 `codex/mpp-solana-charge` 工作树扩展明确的 onchain 协议路由；复用原钱包身份、Grant、共享额度与账本。首阶段为原生 USDC/GET/Charge 的隔离实现与 Mock 验收，包含单独 SOL 网络费同意与原付款恢复；不支持真实银行卡、Session，不解除正式 Mainnet 门禁。范围、官方 SDK 来源、验收与限制见 [MPP Solana Charge](docs/architecture/mpp-solana-charge.md)。本段仅更新当前开发范围，不更改下面历史验收事实。
+2026-11-17 插件优先的 Mainnet MPP 验收：用户明确将旧 App 的 MPP 兼容交付推迟到插件实付成功之后。自 0.2.9 起取消安装版 App reader 哈希作为 MPP 登记、Grant 与新购买的前置条件；插件仍须使用经过校验的 Standalone artifact，复用原钱包、账本及独占锁，保留有效 MPP Grant、SOL 费用上限、共享额度和暂停校验。Standalone 沙箱禁止读取、写入或执行 App。原 App 不删除、不替换；旧版不能读取新增 MPP 记录的限制保留到下一阶段解决。用户创建 Grant 后才进行限定 API 的真实付款，再以新的 Codex Session 独立验收；当前开发与自动化测试不等于付款完成。
+
+2026-11-16 MPP Solana Charge：按用户本轮实现授权，在独立 `codex/mpp-solana-charge` 工作树扩展明确的 onchain 协议路由；复用原钱包身份、Grant、共享额度与账本。首阶段为原生 USDC/GET/Charge 的隔离实现与 Mock 验收，包含单独 SOL 网络费同意与原付款恢复；不支持真实银行卡、Session，不解除正式 Mainnet 门禁。后续用户已授权修复并交付 Mainnet 插件接入：仅验证过的 Standalone artifact 可声明 MPP 能力，原生确认仍绑定独立 SOL 费上限；实付验收须另有有效 Grant 和额度。范围、官方 SDK 来源、验收与限制见 [MPP Solana Charge](docs/architecture/mpp-solana-charge.md)。本段仅更新当前开发范围，不更改下面历史验收事实。
 
 2026-11-05 相关修复归档：按用户明确授权，将当前 Grant 授权修复、受限安装来源校验、Demo 规则及此前积累的原生窗口/Authority/Grant/Execution/滚动修复按主题拆分提交至 `origin/main`。本轮当前验证、00:00 Mainnet 只读状态及未解决的证据边界见 [修复归档](docs/architecture/revision-archive-20261105.md)；不新增付款、安装或生产设置变更。
 
@@ -402,3 +404,12 @@ M6 前必须再次取得具体主网交易授权（API/收款方、用途、金�
 用户授权先实现插件独立主网后台及原经济身份复用。插件作为完整独立产品，App 是可选的管理入口。本轮 0.2.4 本地插件已在原 App 关闭时，由两个新的真实 Codex app-server 宿主完成独立启动、连接和历史购买只读验收；复用原 Keychain 钱包、CardMember、Grant、额度、账本与恢复核心。原 App 正常退出、再次启动和原 MCP 查询通过；安装文件与原经济记录保留。自动化回归 199 项、打包测试 10 项及 typecheck/lint/build 通过。未执行新付款、恢复付款、授权修改、正式 App 替换、提交、推送或发布。当前 Desktop 聊天的旧 MCP 连接不等同于新安装版本。新用户主网配置、运行中 App 界面挂接及 Mainnet 自动升级属于后续范围。细节与证据见 [Mainnet Standalone stages 1–2](docs/architecture/mainnet-standalone-runtime-20261113.md)。
 
 随后用户在新 Session 中完成 App 全程关闭的真实验收：通过插件新建 Mainnet Grant，单次支付 0.001 USDC 购买 Agent402 行情并取得结果。归档前只读 MCP 查询核对购买 `pay_4b69cafe76bfe50d2347ee565dcdd948cd222b578553b7354d7e82a82900` 为 `PAID / COMPLETE / CONFIRMED`，使用新 Grant v6。用户授权将本阶段作为已合并 PR #5 的插件版补全，按多个独立 commit 整理并创建关联的英文后续 PR，同时更新 README。此授权只覆盖当前功能归档、文档与功能分支提交/推送，不包括合并 main、替换正式 App、发布版本或新增付款。完整验收边界见同一实现记录。
+
+
+#### 2026-11-17 plugin-first MPP real-purchase follow-up
+
+User-confirmed Grant v7 persisted; refreshing the short-lived authorization page did not delete it. First real request failed before submission. Independent round 1 reported FAIL, with a reproducible advisory merchant blockhash/latest-RPC mismatch plus missing diagnostics, incorrect MPP readiness and operation-ID lookup. Plugin 0.2.11 repairs these using an exact fresh RPC lifetime, preserved challenge echo, additive sanitized failure evidence, and owner-bound protocol-aware reads.
+
+The subsequent authorized AgentFeed MPP purchase completed for 0.001 USDC with a 5,001-lamport fee and independently verified PAID / COMPLETE evidence. Round 2 passed payment/code checks but found a stale host connection; round 3 passed all four native read calls in a fresh Codex session. Local package 0.2.13 adds SOL fee presets/custom input and network → protocol → API selection while retaining the accepted Mainnet backend. Native App MPP reader compatibility and page-session refresh UX remain outstanding. See the [acceptance record](docs/demo/mpp-mainnet-plugin-20261117.md).
+
+The user subsequently authorized archiving these MPP changes in multiple commits, opening an English PR and merging it into main. This Git task does not authorize another payment, change financial settings or replace the App. Unrelated work in the desktop checkout and the original routing worktree remains preserved.

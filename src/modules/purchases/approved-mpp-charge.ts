@@ -124,13 +124,15 @@ export async function executeApprovedMppCharge(ledger: PurchaseLedger, approvalI
       return await receiveMppDelivery(ledger, current, response, endpoint, dependencies.binary);
     } finally { await response.body?.cancel().catch(() => {}); }
   } catch (error) {
+    const failure = paymentFailure(error, stage, record.intent.idempotencyKey);
+    ledger.recordExecutionFailure(approvalId, failure);
     const original = ledger.savedOriginalPayment(approvalId);
     if (original?.state === 'SIGNED_NOT_SUBMITTED' || (!original && !ledger.savedMppPayment(approvalId))) ledger.failUnsubmitted(approvalId);
     else {
       ledger.unknown(approvalId);
       await reconcileApprovedPayment(ledger, record.intent.idempotencyKey, config, undefined, record.ownerCardMemberId);
     }
-    throw paymentFailure(error, stage, record.intent.idempotencyKey);
+    throw failure;
   } finally {
     active.delete(approvalId);
     if (!active.size) activeExecutions.delete(ledger);

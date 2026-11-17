@@ -20,10 +20,12 @@ const rpcRequest = z.object({ id: z.unknown(), method: z.string(), params: z.arr
 beforeEach(() => { vi.resetAllMocks(); vi.stubEnv('YOSH_PAY_MCP_DEVNET', ''); vi.stubEnv('YOSH_PAY_MCP_MAINNET', ''); });
 afterEach(() => { vi.unstubAllGlobals(); vi.unstubAllEnvs(); });
 
-async function setup() {
+async function setup(quotedBlockhash = false) {
   const f = mppFixture();
   const expiresAt = Date.now() + 120_000;
-  const challenge = { ...f.quote.challenge, expires: new Date(expiresAt).toISOString() };
+  const request = readMppChargeRequest(f.quote);
+  if (quotedBlockhash) request.methodDetails.recentBlockhash = Keypair.generate().publicKey.toBase58();
+  const challenge = { ...f.quote.challenge, request: Buffer.from(JSON.stringify(request)).toString('base64url'), expires: new Date(expiresAt).toISOString() };
   const quote = MppChargeQuoteSchema.parse({ ...f.quote, challenge, expiresAt,
     challengeHeader: 'Payment ' + Object.entries(challenge).map(([name, value]) => `${name}="${value}"`).join(', ') });
   const parsed = { header: quote.challengeHeader, challenge, expiresAt, request: readMppChargeRequest(quote) };
@@ -68,6 +70,21 @@ async function setup() {
 }
 
 describe('MPP signing boundary with memory signer and fixture RPC', () => {
+  it('binds a fresh RPC hash and its own expiry while preserving the merchant challenge', async () => {
+    const f = await setup(true);
+    const original = structuredClone(f.parsed.challenge);
+    const result = await f.run();
+    expect(prepareMppCharge).toHaveBeenCalledWith(binary, expect.objectContaining({ hostValidatedLifetime: f.lifetime }));
+    expect(result.lifetime).toEqual(f.lifetime);
+    expect(result.payment.quote.challenge).toEqual(original);
+    expect(f.sign).toHaveBeenCalledOnce();
+  });
+
+  it('refuses an expired chosen blockhash before loading a signer', async () => {
+    const f = await setup(true); f.results.isBlockhashValid = { value: false };
+    await expect(f.run()).rejects.toThrow('MPP_BLOCKHASH_EXPIRED');
+    expect(loadBuyerSigner).not.toHaveBeenCalled();
+  });
   it('preflights the exact ATAs/fee and signs once with a real generated Ed25519 key', async () => {
     const f = await setup();
     const result = await f.run();
