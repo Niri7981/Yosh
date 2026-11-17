@@ -1,4 +1,5 @@
 import { combinedTools, routeTool, type EnvironmentTools } from '../src/modules/mcp/environment-routing';
+import { localToolErrorCode } from '../src/modules/mcp/local-tool-error';
 /** Setup tools remain available before pairing. Once paired, forward to the
  * existing Pay wrapper; no wallet, approval or payment logic lives here. */
 import { execFile } from 'node:child_process';
@@ -11,6 +12,8 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import { IS_LOCAL_AUTH_DEVELOPMENT } from '../src/modules/pay-dev/profile';
+declare const __YOSH_PLUGIN_VERSION__: string | undefined;
+const LOCAL_PLUGIN_VERSION = typeof __YOSH_PLUGIN_VERSION__ === 'string' ? __YOSH_PLUGIN_VERSION__ : '0.2.4';
 const execute = promisify(execFile);
 const root = dirname(resolve(process.argv[1]));
 const directory = z.string().min(1).parse(process.argv[3]);
@@ -25,7 +28,7 @@ const setup = [
   { name: 'open_local_settings', description: 'Get a short-lived Yosh settings link. Pass environment: mainnet for direct Mainnet entry or devnet for Devnet. Without environment the page asks the user to choose before reading either network. Mainnet preserves the original wallet, Grant and ledger through the bundled backend. Does not approve, create a wallet, enable spending or pay. The user confirms changes in the native system window.', inputSchema: { type: 'object' as const, properties: { environment: { type: 'string', enum: ['mainnet', 'devnet'] } }, additionalProperties: false } },
   { name: 'local_setup_status', description: 'Read pairing and pause state; refresh Pay tool availability after the user completes local setup. Does not change authorization.', inputSchema: { type: 'object' as const, properties: {}, additionalProperties: false } },
 ];
-const server = new Server({ name: 'yosh-local-dev', version: '0.2.4' }, { capabilities: { tools: { listChanged: true } } });
+const server = new Server({ name: 'yosh-local-dev', version: LOCAL_PLUGIN_VERSION }, { capabilities: { tools: { listChanged: true } } });
 let client: Client | undefined, connecting: Promise<Client> | undefined;
 let mainnetClient: Client | undefined, mainnetConnecting: Promise<Client> | undefined;
 let mainnetStarting: Promise<void> | undefined;
@@ -42,7 +45,7 @@ async function mainnet() {
   await ensureMainnet();
   if (mainnetClient) return mainnetClient;
   mainnetConnecting ??= (async () => {
-    const next = new Client({ name: 'yosh-dev-mainnet-proxy', version: '0.2.4' });
+    const next = new Client({ name: 'yosh-dev-mainnet-proxy', version: LOCAL_PLUGIN_VERSION });
     try {
       await next.connect(new StdioClientTransport({ command: join(root, 'node'),
         args: [join(root, 'mainnet.cjs'), 'install-mcp'], cwd: root, stderr: 'ignore',
@@ -65,7 +68,7 @@ async function pay() {
   if (!state.enabled) { await client?.close(); client = undefined; throw new Error('LOCAL_CONNECTION_DISABLED'); }
   if (client) return client;
   connecting ??= (async () => {
-    const next = new Client({ name: 'yosh-local-proxy', version: '0.2.4' });
+    const next = new Client({ name: 'yosh-local-proxy', version: LOCAL_PLUGIN_VERSION });
     try {
       await next.connect(new StdioClientTransport({ command: join(root, 'node'), args: [join(root, 'mcp.cjs'), '--data-dir', directory],
         cwd: directory, stderr: 'ignore', env: { HOME: directory, PATH: '/usr/bin:/bin', NODE_ENV: 'test', YOSH_PAY_DEV: '1', YOSH_PAY_DEV_ENV: 'devnet' } }));
@@ -99,8 +102,10 @@ server.setRequestHandler(CallToolRequestSchema, async request => {
     const target = routed.environment === 'mainnet' ? await mainnet() : await pay();
     return await target.callTool({ name: request.params.name, arguments: routed.arguments });
   } catch (error) {
-    const code = error instanceof Error && /^LOCAL_[A-Z_]+$/.test(error.message) ? error.message : 'LOCAL_TOOL_UNAVAILABLE';
-    return { ...text({ code, next: 'Open local settings to inspect the original state; do not replace an unknown purchase.' }), isError: true };
+    const code = localToolErrorCode(error);
+    return { ...text({ code, next: code.includes('VERSION') || code.includes('RUNTIME_CHANGED')
+      ? 'Reconnect Yosh in a new Session using the installed plugin version. Do not start another owner or change payment records.'
+      : 'Open local settings to inspect the original state; do not replace an unknown purchase.' }), isError: true };
   }
 });
 void server.connect(new StdioServerTransport());
