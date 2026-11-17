@@ -1,6 +1,6 @@
 # MPP Solana Charge：隔离实现与验收边界
 
-日期：2026-11-16。状态：隔离实现已通过独立验收；不代表安装版、真实 Codex 宿主或真实 Mainnet 付款验收。
+初始记录：2026-11-16，隔离实现通过独立验收。2026-11-17 已补充插件 Mainnet 实付及新 Codex 宿主验收，详见[当前验收记录](../demo/mpp-mainnet-plugin-20261117.md)。下文保留各阶段当时的验证边界，不能把历史未完成项当作当前结论。
 
 本阶段以 `main` 的 `a86b184` 为基线，在 `codex/mpp-solana-charge` 独立工作树开发。原工作树及 `codex/alipay-executor` 中的未提交工作完整保留，仅复用经过核对的 Payment Domain Routing 代码。完整源码快照、包含新增文件的 diff、测试日志及独立审查记录保存在本地交接材料中，不随源码公开。Git 归档不安装 App、不启用生产支付，也不运行产品数据库迁移。
 
@@ -47,7 +47,7 @@ expiresAt: 绝对到期时间
 
 旧 `paymentScheme: exact` Grant 不覆盖 MPP。新 `mpp_charge` Grant 必须单独同意 `maximumNetworkFeeLamports`，金额是正整数字符串；USDC 额度不能被解释为 SOL 手续费授权。费用条款通过首次创建 MPP Grant 时的显式事务迁移保存在不可修改的 `mpp_grant_terms` 关联表。它不是第二套预算账本，不重建 `monetary_scopes` / `spend_grants`，仅使用 x402 的数据库不因此创建该表。签名前的 RPC fee estimate 必须在原 Grant 的费用上限内，并验证余额、交易形状与模拟结果。
 
-隔离授权页面仅在已注册的 MPP Resource 上显示每笔 SOL 网络手续费上限，以整数字符串提交 lamports。`AppRuntime.freezeLocalGrant()` 将上限写入冻结的 `binding.scope`；网页复核、结果和授权历史读取后端冻结值，`commitLocalGrant()` 再将同一值交给 `createSpendGrant()`。修改费用、缺少费用或向 `exact` Grant 注入费用均被拒绝；确认单与 Grant 在同一事务中消费/创建，不能二次使用。原生确认的 NSAlert 明细和 LocalAuthentication 提示均显示精确 lamports 与 SOL 换算。原生 helper 拒绝无效费用和 Mainnet MPP。现有 x402 授权字节及不含费用字段的展示路径保持兼容。
+隔离授权页面仅在已注册的 MPP Resource 上显示每笔 SOL 网络手续费上限，以整数字符串提交 lamports。`AppRuntime.freezeLocalGrant()` 将上限写入冻结的 `binding.scope`；网页复核、结果和授权历史读取后端冻结值，`commitLocalGrant()` 再将同一值交给 `createSpendGrant()`。修改费用、缺少费用或向 `exact` Grant 注入费用均被拒绝；确认单与 Grant 在同一事务中消费/创建，不能二次使用。原生确认的 NSAlert 明细和 LocalAuthentication 提示均显示精确 lamports 与 SOL 换算。原生 helper 拒绝无效费用；Mainnet MPP 必须同时绑定主网钱包、网络、资产和明确的 SOL 费用上限。现有 x402 授权字节及不含费用字段的展示路径保持兼容。
 
 ## Router 与恢复
 
@@ -59,18 +59,18 @@ Payment Domain Routing 只从保留工作树借用薄 descriptor/router/alias �
 
 付款与交付分离。HTTP 200、merchant receipt `reference` 或 transaction signature 存在都不能单独证明支付成功；原交易链上核对后才形成 PAID。MPP receipt 仅作附加观察。第一阶段不重放单次 credential：只支持 Resource 明确声明的只读 `payment_identifier` 恢复端点；没有该能力时标为不支持交付恢复，保留已付款事实。
 
-## 当前支持范围与未完成事项
+## 隔离实现阶段的支持范围与未完成事项（2026-11-16）
 
 - 仅 Solana Charge、native USDC、六位精度、legacy Token Program、GET、SDK V0 unsigned transaction、买方支付网络费。
 - 支持有或无 `externalId`；有值时 Memo 必须精确匹配，无值时不编造 Memo。
 - 拒绝 Session/channel、splits、confidential transfer、sponsored fee payer、ATA 创建、备用 credential header、digest binding 和其它未明确支持的条款。
 - API 入口为认证 Agent 的 `POST /api/agent/mpp/purchases`；MCP 入口为 `request_mpp_purchase`。输入仅允许已注册 Resource、稳定 requestId、用途及授权请求参数；不能传入金额、网络、收款人、credential、批准标志或 executor。
 - wrapper 的 MPP HTTP timeout 为 120 秒。中断只提示查询原 purchase ID，不声称“没有付款”，也不建议用新 ID 重试。
-- `AppRuntime` 的 Mainnet MPP 入口明确拒绝 `MPP_MAINNET_ACCEPTANCE_REQUIRED`；其它非隔离环境拒绝 `MPP_ISOLATED_RUNTIME_REQUIRED`。
-- 隔离网页/原生费用字段、冻结复核与 Grant 提交已接线并经过脚本/纯函数/编译验证。真实浏览器视觉、原生弹窗/系统认证、Codex Desktop 宿主、安装版启停/退出生命周期及真实链上验收尚未完成。本阶段 backend 的 Mainnet 绑定测试只能作为隔离 mock 证据，不能解除上述门禁。
+- 经用户后续授权，Mainnet MPP 仅在已验证并声明 `mppProtocol` 的 Standalone artifact 中可用。旧 App / 未声明能力的 runtime 仍拒绝 `MPP_MAINNET_ACCEPTANCE_REQUIRED`。Mainnet 不接受测试 prepare/fetch 注入；其它非隔离环境拒绝 `MPP_ISOLATED_RUNTIME_REQUIRED`。
+- 隔离网页/原生费用字段、冻结复核与 Grant 提交已接线并经过脚本/纯函数/编译验证。真实浏览器视觉、原生弹窗/系统认证、Codex Desktop 宿主、安装版启停/退出生命周期及真实链上验收尚未完成。backend 的 Mainnet 绑定测试仅为自动化回归，不能当作真实付款验收。
 - 仅使用后端明确注册为 MPP 的 Resource；资源注册与报价不是付款授权，也不证明第三方商家支持本阶段受限 Charge 形状。
 
-## 验证记录与下一步验收
+## 隔离实现阶段的验证记录与下一步验收（2026-11-16）
 
 独立 Codex Session 第一轮判定 FAIL，发现同一原交易可被不同购买重复归属，以及交付正文中的公开交易 ID 被误判为敏感凭据。增加失败回归后分别修复；第二轮独立重验判定 PASS。第二轮在额度中断后使用经宿主元数据确认的 `gpt-6-astra / high` 完成，期间源码保持冻结。以下为最终独立验证结果，不重复相加额外的针对性探测。
 
@@ -87,3 +87,45 @@ Payment Domain Routing 只从保留工作树借用薄 descriptor/router/alias �
 后续改变执行链路时继续回归：错协议 Grant/手续费缺失与超限、多个 Agent/连接的共享预算、同 requestId 重放与冲突、同 merchant challenge 重用、Pause/退出与签名提交顺序、发送后断连、重启保留 UNKNOWN、原交易失败/确认、坏 receipt、已付款未交付、凭据反射、资源/网络/收款人变化、主网门禁，以及原 x402 链路。
 
 完整 MCP 宿主验收需要另行准备隔离 runtime、真实 MCP client/子进程、合成商家与 RPC fixture，穿过 HTTP handler/auth/Runtime/Ledger/SDK 全链路。VM wrapper 单测不能代替该验收，更不能代替用户现有 Codex Desktop 的最终验收。真实付款仍需具体 API/收款方、用途和金额上限的另行授权。
+
+### Mainnet delivery follow-up (2026-11-16, historical 0.2.8 scope)
+
+Plugin 0.2.8 includes the MPP executable and provenance in the immutable Mainnet manifest. An explicit `mainnet.cjs upgrade` verifies old and new artifacts, drains the authenticated owner, and holds startup, standalone-service and App backend ownership locks before advancing the version fence. MCP startup never upgrades or downgrades automatically. The original App bundle, wallet, financial settings and existing payment evidence are not replaced.
+
+The Mainnet Agent surface adds `quote_mpp_resource` (unpaid challenge only) and `request_mpp_purchase`. Grant creation stays in the native-confirmed management flow; no Agent management tool is added. Real Mainnet acceptance additionally requires a matching MPP Grant, explicit SOL fee consent and sufficient shared daily budget. Unit tests and build success are not payment evidence.
+
+
+Independent review round 1 found missing automatic MPP delivery recovery wiring and a pre-MPP App reader incompatibility. Startup and scheduled recovery now receive the verified adapter directly, independently of environment variables and new-purchase compatibility checks. New Mainnet MPP registration/Grant/purchase is refused with `MPP_SHARED_APP_UPGRADE_REQUIRED` while the canonical installed Yosh.app reader does not match an independently reviewed compatible-reader digest in the immutable artifact. A standalone installation without Yosh.app remains App-independent. The current build deliberately includes no compatible-reader digest: the installed old App is preserved, so real MPP writes remain blocked pending a separately approved compatible App delivery. This protects old history; it does not make the old App capable of reading MPP. Do not bypass this gate by renaming/deleting the App or adding an unreviewed hash. Existing original-payment recovery remains available.
+
+Round 2 also identified first-start resource imports and same-ID recovery as separate entry points. Configuration imports checked compatibility before inserting MPP resources; replay of an owned original request entered original-only recovery before the new-purchase gate. The 0.2.8 Mainnet sandbox permitted metadata for the canonical App path and reading only its backend `server.js` for the digest check. The launcher derived that path from the OS account, not Agent input or environment configuration. All App writes and App execution remained denied. Round 3 and a fresh read-only Codex host verified that scoped implementation and the installed 0.2.8 gate; no real MPP payment occurred.
+
+### Plugin-first Mainnet setup (2026-11-17, before real-payment acceptance)
+
+The user explicitly deferred native App MPP compatibility until after the plugin completes a real payment. Candidate 0.2.9 therefore removes the installed-App reader prerequisite and its manifest field. It does not rename, remove, launch or replace Yosh.app. The standalone sandbox now denies all App reads, writes and execution, verified against a disposable App fixture.
+
+Verified artifact capability still gates MPP resource registration, first-start imports, Grant creation and purchase. Mainnet cannot inject a test prepare/fetch implementation. Original-payment recovery keeps the verified protocol adapter, even when new spending has no valid Grant. Wallet identity, Keychain signing, shared ledger/budgets, atomic execution ownership, fee consent, pause and the existing App/backend ownership locks are retained.
+
+This stages the product delivery; it does not make the pre-MPP App reader compatible. Once MPP records exist in the shared ledger, the old App may reject those records until its later compatibility update. Keep that App out of this acceptance flow. All original data and the App bundle are preserved; no duplicate Mainnet ledger is created.
+
+Acceptance order: install and verify the plugin; register and quote the selected API without payment; let the user create a native-confirmed MPP Grant with an explicit SOL fee limit; execute one purchase within that Grant and shared budget; then use a new Codex session to independently check the original transaction, persisted payment/delivery and remaining gaps. Automated fixture tests are engineering regression evidence only, not real-payment acceptance.
+
+The installed 0.2.9 read-only readiness probe exposed two real merchant integration defects before spending: the quote caller passed the global fetch function as an explicit fixture injection (rejected in production), and the adapter accepted only a single authentication challenge while AgentFeed sends Solana and Tempo offers together. The 0.2.10 candidate leaves the production transport uninjected and uses the pinned SDK multi-challenge parser and formatter to select exactly one Solana Charge offer. Raw unsupported fields and ambiguous Solana offers remain rejected; only the selected challenge enters the immutable quote. Regression tests reproduce both failures; the protocol binary is rebuilt from the same pinned SDK source with updated adapter provenance.
+
+
+### 2026-11-17: merchant blockhash interoperability and failure evidence
+
+The live merchant's Solana Charge challenge may include an advisory `recentBlockhash` different from the RPC's newest hash. The first real purchase failed before submission; an independent unsigned reproduction returned `MPP_INVALID_LIFETIME`. The original exception was not recorded, so that reproduction is not an exact historical failure trace.
+
+The Solana Charge specification defines that field as advisory (SHOULD, not MUST). Yosh deliberately uses one fresh `getLatestBlockhash` response for both the hash and its exact last-valid height because its existing signer requires a complete lifetime. The protocol wrapper changes only the SDK construction copy. The original challenge/request/ID remain unchanged in the credential. Token, recipient, amount, memo, network, fee cap, immutable purchase and fresh blockhash validity are still verified before signing. No height from a newer hash is assigned to a merchant hash. No already-signed payment is rebuilt or retried. Official reference: https://paymentauth.org/draft-solana-charge-00#section-7.2
+
+Execution failures now have an additive `purchase_execution_failures` table containing only schema-allowlisted stage/codes and bounded RPC metadata. They are owner-bound through the existing purchase read, retained after restart, and separate from the original authorization decision. Existing records are not backfilled with guessed errors. MPP operation IDs resolve to their original request IDs; x402 retains its existing hashed mapping. Ambiguous cross-protocol IDs fail closed. Readiness checks the registered protocol and MPP fee consent instead of assuming x402 `exact`.
+
+Acceptance requires actual installed runtime identity, one user-authorized Mainnet MPP purchase with independently verified original chain evidence and persisted delivery, no duplicate debit, and independent fresh Codex Session review. Mock/fixture regression results do not satisfy Mainnet payment acceptance.
+
+### 2026-11-17: accepted Mainnet payment and Grant UI follow-up
+
+Plugin 0.2.11 completed the authorized AgentFeed Solana Charge purchase for 0.001 USDC with a 5,001-lamport fee, below the approved 10,000-lamport cap. Original chain verification and persisted delivery established PAID / COMPLETE; a fresh independent Codex session verified spending status, purchase lookup by both identifiers, and stored delivery through native MCP tools. No App was opened or replaced. The [public acceptance record](../demo/mpp-mainnet-plugin-20261117.md) distinguishes all three review rounds and links the original transaction.
+
+The installed local package subsequently advanced to 0.2.13 for Grant UI changes while retaining the accepted Mainnet backend. The page now selects network, then protocol, then an API filtered by the backend's protocol declaration. Changing protocol clears the API and fee selection; stale cross-protocol selections cannot proceed to review. MPP fee entry uses SOL presets or exact custom SOL input, converted to an integer lamport string without floating-point arithmetic. Backend frozen-scope validation remains authoritative.
+
+Grant-page reload/session UX and native App MPP reader compatibility remain deferred. A page session expiring does not delete its persisted Grant. Card payments and MPP Session/channel support are not included.
