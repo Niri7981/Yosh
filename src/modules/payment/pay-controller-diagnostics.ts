@@ -42,16 +42,22 @@ const failureCodes = {
   settlement_reconciliation: 'PAY_SETTLEMENT_RECONCILIATION_FAILED', delivery: 'PAY_DELIVERY_FAILED',
 } as const;
 export type PaymentFailureStage = keyof typeof failureCodes;
-const paymentDetails = z.object({
+export const PaymentFailureDetails = z.object({
   failureStage: z.enum(Object.keys(failureCodes) as [PaymentFailureStage, ...PaymentFailureStage[]]).optional(),
   failureCode: z.enum(Object.values(failureCodes)).optional(),
   purchaseId: z.string().regex(/^[a-zA-Z0-9_.:-]{1,128}$/).optional(),
   rpcMethod: z.enum(['getGenesisHash', 'getLatestBlockhash', 'getMultipleAccounts', 'getBalance', 'simulateTransaction',
-    'getSignatureStatuses', 'getSignaturesForAddress', 'getTransaction', 'getBlockHeight']).optional(),
+    'getSignatureStatuses', 'getSignaturesForAddress', 'getTransaction', 'getBlockHeight', 'isBlockhashValid', 'getFeeForMessage']).optional(),
+  protocolFailureCode: z.enum(['MPP_INVALID_LIFETIME', 'MPP_BLOCKHASH_EXPIRED', 'MPP_RPC_NETWORK_MISMATCH',
+    'MPP_UNSIGNED_PREPARE_FAILED', 'MPP_NETWORK_FEE_LIMIT', 'MPP_INSUFFICIENT_SOL', 'MPP_INSUFFICIENT_USDC',
+    'MPP_PROTOCOL_TIMEOUT', 'MPP_PROTOCOL_UNAVAILABLE', 'MPP_CHALLENGE_CHANGED', 'MPP_NETWORK_FEE_CONSENT_REQUIRED',
+    'MPP_SIGNER_MISMATCH', 'MPP_SINGLE_SIGNATURE_REQUIRED', 'MPP_LIFETIME_MISMATCH', 'MPP_ORIGINAL_OUTCOME_UNRESOLVED',
+    'MPP_DELIVERY_PENDING']).optional(),
   rpcHttpStatus: z.number().int().min(100).max(599).optional(),
   rpcFailureCode: z.enum(['HTTP_ERROR', 'RPC_REJECTED', 'INVALID_RESPONSE', 'TIMEOUT', 'TRANSPORT_ERROR']).optional(),
   transportCode: z.enum(['ENOTFOUND', 'EAI_AGAIN', 'ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EACCES', 'ERR_TLS_CERT_ALTNAME_INVALID']).optional(),
 }).strict();
+const paymentDetails = PaymentFailureDetails;
 const paymentFailures = new WeakMap<object, z.infer<typeof paymentDetails>>();
 
 /** Keep only allowlisted facts across the purchase layer's deliberately generic error. */
@@ -59,9 +65,16 @@ export function paymentFailure(error: unknown, stage: PaymentFailureStage, purch
   const source = error instanceof Error ? error : new Error('PAYMENT_EXECUTION_FAILED');
   const target = replacement ?? source;
   const id = paymentDetails.shape.purchaseId.safeParse(purchaseId);
+  const protocol = paymentDetails.shape.protocolFailureCode.safeParse(source.message);
   paymentFailures.set(target, { failureStage: stage, failureCode: failureCodes[stage], ...paymentFailures.get(source),
+    ...(protocol.success && protocol.data ? { protocolFailureCode: protocol.data } : {}),
     ...(id.success && id.data ? { purchaseId: id.data } : {}) });
   return target;
+}
+
+/** Allowlisted metadata only; never the exception message, request or payload. */
+export function readPaymentFailure(error: unknown) {
+  return PaymentFailureDetails.parse(error instanceof Error ? paymentFailures.get(error) ?? {} : {});
 }
 
 /** Never retain an RPC URL, response body, error message, params or signed bytes. */

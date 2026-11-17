@@ -14,7 +14,7 @@ const ASSOCIATED_TOKEN_PROGRAM = new PublicKey('ATokenGPvbdGVxr1b2hvZbsiqW5xWH25
 const MEMO_PROGRAM = 'MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr';
 const COMPUTE_PROGRAM = 'ComputeBudget111111111111111111111111111111';
 type TransferBinding = Readonly<{ payer: string; recipient: string; mint: string; amount: string;
-  network: string; genesisHash: string | null; memo: string; quotedBlockhash?: string }>;
+  network: string; genesisHash: string | null; memo: string }>;
 
 function digest(bytes: Uint8Array) { return createHash('sha256').update(bytes).digest('hex'); }
 function tokenAccount(owner: string, mint: string) {
@@ -31,7 +31,7 @@ function assertEnvironment(config: PaymentConfig) {
 function quoteBinding(quote: MppChargeQuote, payer: string, genesisHash: string | null): TransferBinding {
   const request = readMppChargeRequest(quote);
   return { payer, recipient: quote.payTo, mint: quote.asset, amount: quote.amount, network: quote.network, genesisHash,
-    memo: request.externalId ?? '', quotedBlockhash: request.methodDetails.recentBlockhash };
+    memo: request.externalId ?? '' };
 }
 
 function authorizedQuote(config: PaymentConfig, input: MppChargeQuote): MppChargeQuote {
@@ -85,9 +85,8 @@ function inspect(wire: string, binding: TransferBinding, signed: boolean, lifeti
       throw new Error('MPP_MEMO_MISMATCH');
     }
   }
-  if ((binding.quotedBlockhash !== undefined && tx.recentBlockhash !== binding.quotedBlockhash)
-    || (lifetime && (lifetime.recentBlockhash !== tx.recentBlockhash
-      || !/^(0|[1-9]\d{0,19})$/.test(lifetime.lastValidBlockHeight)))) throw new Error('MPP_LIFETIME_MISMATCH');
+  if (lifetime && (lifetime.recentBlockhash !== tx.recentBlockhash
+      || !/^(0|[1-9]\d{0,19})$/.test(lifetime.lastValidBlockHeight))) throw new Error('MPP_LIFETIME_MISMATCH');
   return { transaction, bytes, message, sourceTokenAccount, recipientTokenAccount };
 }
 

@@ -11,6 +11,8 @@ import { assertMppUnsignedBindings } from './mpp-payment-evidence';
 import { decodeOriginalTransaction } from './original-payment-evidence';
 import type { MppChargeQuote } from './mpp-contract';
 import { hash } from '../purchases/spending-policy';
+import { assertMppExecutionEnabled } from './mpp-resource-charge';
+import { paymentFailure, type PaymentFailureStage } from './pay-controller-diagnostics';
 
 const lamports = z.number().int().safe().nonnegative();
 const atomic = z.string().regex(/^(0|[1-9]\d*)$/).max(20);
@@ -43,27 +45,42 @@ export async function preflightMppCharge(config: PaymentConfig, quote: MppCharge
  * wallet signer. Every asynchronous boundary is followed by authority recheck. */
 export async function prepareSignedMppCharge(binary: string, config: PaymentConfig, quote: MppChargeQuote,
   beforeSign: () => void, maximumNetworkFeeLamports: string) {
-  beforeSign();
-  const selected = await parseMppChallenge(binary, quote.challengeHeader);
-  if (hash(selected.challenge) !== hash(quote.challenge) || selected.expiresAt !== quote.expiresAt) throw new Error('MPP_CHALLENGE_CHANGED');
-  const lifetime = await readPayLifetime(config, config.mode === 'live_mainnet' ? 'mainnet' : 'devnet');
-  beforeSign();
-  const prepared = await prepareMppCharge(binary, { challenge: selected, payer: config.buyer, hostValidatedLifetime: lifetime });
-  assertMppUnsignedBindings(prepared.transaction, config, quote, lifetime);
-  await preflightMppCharge(config, quote, prepared.transaction, maximumNetworkFeeLamports);
-  beforeSign();
-  const signer = await loadBuyerSigner(config.buyer, process.env, config);
-  beforeSign();
-  if (signer.address !== config.buyer) throw new Error('MPP_SIGNER_MISMATCH');
-  const unsigned = { ...getTransactionDecoder().decode(Buffer.from(prepared.transaction, 'base64')),
-    lifetimeConstraint: { blockhash: blockhash(lifetime.recentBlockhash), lastValidBlockHeight: BigInt(lifetime.lastValidBlockHeight) } };
-  assertIsTransactionWithinSizeLimit(unsigned);
-  const signatures = await signer.signTransactions([unsigned]);
-  if (signatures.length !== 1 || Object.keys(signatures[0]).length !== 1 || Object.keys(signatures[0])[0] !== signer.address)
-    throw new Error('MPP_SINGLE_SIGNATURE_REQUIRED');
-  beforeSign();
-  const transaction = getBase64EncodedWireTransaction({ ...unsigned, signatures: { ...unsigned.signatures, ...signatures[0] } });
-  const credential = await encodeMppCredential(binary, { challenge: selected, transaction });
-  beforeSign();
-  return { payment: { protocol: 'mpp' as const, quote, credential, transaction }, lifetime };
+  let stage: PaymentFailureStage = 'preparation';
+  try {
+    assertMppExecutionEnabled(config);
+    beforeSign();
+    const selected = await parseMppChallenge(binary, quote.challengeHeader);
+    if (hash(selected.challenge) !== hash(quote.challenge) || selected.expiresAt !== quote.expiresAt) throw new Error('MPP_CHALLENGE_CHANGED');
+    // MPP's merchant hash is advisory. Pin both hash and expiry from one RPC
+    // response; do not pair the merchant hash with another hash's expiry height.
+    const lifetime = await readPayLifetime(config, config.mode === 'live_mainnet' ? 'mainnet' : 'devnet');
+    beforeSign();
+    const prepared = await prepareMppCharge(binary, { challenge: selected, payer: config.buyer, hostValidatedLifetime: lifetime });
+    stage = 'unsigned_bindings';
+    assertMppUnsignedBindings(prepared.transaction, config, quote, lifetime);
+    stage = 'preflight';
+    await preflightMppCharge(config, quote, prepared.transaction, maximumNetworkFeeLamports);
+    stage = 'signer_authorization';
+    beforeSign();
+    stage = 'signer_load';
+    const signer = await loadBuyerSigner(config.buyer, process.env, config);
+    stage = 'signer_authorization';
+    beforeSign();
+    if (signer.address !== config.buyer) throw new Error('MPP_SIGNER_MISMATCH');
+    stage = 'transaction_decode';
+    const unsigned = { ...getTransactionDecoder().decode(Buffer.from(prepared.transaction, 'base64')),
+      lifetimeConstraint: { blockhash: blockhash(lifetime.recentBlockhash), lastValidBlockHeight: BigInt(lifetime.lastValidBlockHeight) } };
+    assertIsTransactionWithinSizeLimit(unsigned);
+    stage = 'signing';
+    const signatures = await signer.signTransactions([unsigned]);
+    stage = 'signature_validation';
+    if (signatures.length !== 1 || Object.keys(signatures[0]).length !== 1 || Object.keys(signatures[0])[0] !== signer.address)
+      throw new Error('MPP_SINGLE_SIGNATURE_REQUIRED');
+    stage = 'signer_authorization'; beforeSign();
+    stage = 'payload_encode';
+    const transaction = getBase64EncodedWireTransaction({ ...unsigned, signatures: { ...unsigned.signatures, ...signatures[0] } });
+    const credential = await encodeMppCredential(binary, { challenge: selected, transaction });
+    stage = 'signer_authorization'; beforeSign();
+    return { payment: { protocol: 'mpp' as const, quote, credential, transaction }, lifetime };
+  } catch (error) { throw paymentFailure(error, stage); }
 }
