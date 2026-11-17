@@ -109,12 +109,12 @@ struct LocalGrantConfirmation {
         let total = try amount(request.binding.input.totalLimit, mainnet: mainnet), single = try amount(request.binding.input.singleLimit, mainnet: mainnet)
         let fee: String
         if request.binding.scope.paymentScheme == "mpp_charge" {
-            guard !mainnet, let raw = request.binding.scope.maximumNetworkFeeLamports,
+            guard let raw = request.binding.scope.maximumNetworkFeeLamports,
                   raw.first != "0", raw.allSatisfy({ $0 >= "0" && $0 <= "9" }),
                   let integer = UInt64(raw), integer > 0, integer <= UInt64(Int64.max) else { throw Failure.rejected }
             fee = "\(integer / 1_000_000_000).\(String(format: "%09llu", integer % 1_000_000_000)) SOL（\(raw) lamports）"
         } else {
-            guard request.binding.scope.maximumNetworkFeeLamports == nil else { throw Failure.rejected }
+            guard request.binding.scope.paymentScheme == "exact", request.binding.scope.maximumNetworkFeeLamports == nil else { throw Failure.rejected }
             fee = ""
         }
         let feeDetails = fee.isEmpty ? "" : "\n每笔 SOL 网络手续费上限：\(fee)\n由付款钱包承担，独立于 USDC 消费额度。"
