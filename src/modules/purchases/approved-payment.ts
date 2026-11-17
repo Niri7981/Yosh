@@ -246,7 +246,7 @@ export async function executeApprovedPayment(ledger: PurchaseLedger, approvalId:
 
 /** Original payment is reconciled first; existing delivery recovery is only used after PAID. */
 export async function recoverApprovedPayment(ledger: PurchaseLedger, taskId: string, config: PaymentConfig, endpoint: string, trace: Trace = () => {}, memberId?: string,
-  options: { fetcher?: typeof fetch; automatic?: boolean; signal?: AbortSignal } = {}) {
+  options: { binary?: string; fetcher?: typeof fetch; automatic?: boolean; signal?: AbortSignal } = {}) {
   let record = memberId ? ledger.getOwned(taskId, memberId) : ledger.getLegacy(taskId);
   if (!record || !['live_devnet', 'live_mainnet'].includes(record.executionMode)) return;
   if (record.intent.mpp) {

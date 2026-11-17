@@ -71,7 +71,9 @@ function localTimeZone() {
 }
 
 /** Supplied only by the trusted runtime entry after package verification. */
-export type AppRuntimeHosting = Readonly<{ kind: 'mainnet-standalone'; payMcpPath: string; runtimeDigest: string }>;
+export type AppRuntimeHosting = Readonly<{ kind: 'mainnet-standalone'; payMcpPath: string; runtimeDigest: string;
+  /** Supplied only by the verified standalone artifact, never Agent input or environment. */
+  mppProtocolEnginePath?: string }>;
 
 export class AppRuntime {
   readonly ledger: PurchaseLedger;
@@ -170,8 +172,7 @@ export class AppRuntime {
       if (this.controlledPay) ledger.executionSafety.enable(Date.now());
       dependencies.paymentExecutor?.bindRuntime?.(directory, ledger);
       // Import installation configuration once; subsequent reads use durable product data.
-      if (!ledger.resources.list().length) ledger.resources.initialize(loadRegisteredResources(process.env, this.devDevnet || this.devSimulated || this.offlineResources ? this.environment : resolvePaymentEnvironment({ YOSH_EXECUTION_MODE: 'live_mainnet' })), (this.devDevnet || this.devSimulated || this.offlineResources) ? this.environment.network : resolvePaymentEnvironment({ YOSH_EXECUTION_MODE: 'live_mainnet' }).network);
-      else ledger.resources.initialize([], (this.devDevnet || this.devSimulated || this.offlineResources) ? this.environment.network : resolvePaymentEnvironment({ YOSH_EXECUTION_MODE: 'live_mainnet' }).network);
+      this.initializeRegisteredResources();
       const defaultMemberId = this.ledger.defaultCardMember().id;
       for (const member of this.ledger.cardMembers()) {
         this.memberConnections.set(member.id, new AgentConnection(directory, member.id, id => this.ledger.isCardMemberActive(id), member.id !== defaultMemberId, dependencies.now));
@@ -194,6 +195,15 @@ export class AppRuntime {
       this.restoreExecutionProfile();
       throw error;
     }
+  }
+  private initializeRegisteredResources() {
+    const environment = this.devDevnet || this.devSimulated || this.offlineResources
+      ? this.environment : resolvePaymentEnvironment({ YOSH_EXECUTION_MODE: 'live_mainnet' });
+    const resources = this.ledger.resources.list().length ? [] : loadRegisteredResources(process.env, environment);
+    // Installation configuration can introduce records too; it is not exempt
+    // from the verified-capability boundary used by management registration.
+    if (resources.some(resource => resource.paymentProtocol === 'mpp_solana_charge')) this.mppDependencies();
+    this.ledger.resources.initialize(resources, environment.network);
   }
   private applyExecutionProfile(mode: PurchaseExecutionMode) {
     const profile = executionProfile(this.configuredEnvironment, mode);
@@ -373,13 +383,26 @@ export class AppRuntime {
     return this.track(operation());
   }
   private mppDependencies(): MppChargeDependencies {
-    // This phase has only isolated acceptance. Do not expose a new SOL-fee
-    // spending path in an installed Mainnet runtime before separate host acceptance.
-    if (this.environment.isProduction) throw new Error('MPP_MAINNET_ACCEPTANCE_REQUIRED');
+    if (this.environment.isProduction) {
+      const binary = this.mppRecoveryBinary();
+      // Standalone owns the ledger through the shared backend lock. Native App
+      // reader compatibility is a separate delivery stage, not spending authority.
+      // Production always uses the original Keychain signer, RPC and merchant
+      // transport. Isolated prepare/fetch injections cannot cross this boundary.
+      return { binary };
+    }
     if (!isDevnetDevelopment(this.directory)) throw new Error('MPP_ISOLATED_RUNTIME_REQUIRED');
     const binary = this.dependencies.mpp?.binary ?? process.env.YOSH_MPP_PROTOCOL_ENGINE;
     if (!binary || !isAbsolute(binary)) throw new Error('MPP_PROTOCOL_UNAVAILABLE');
     return this.dependencies.mpp ?? { binary, fetcher: this.dependencies.fetcher };
+  }
+  private mppRecoveryBinary(): string {
+    if (!this.environment.isProduction) return this.mppDependencies().binary;
+    const binary = this.hosting?.mppProtocolEnginePath;
+    if (this.hosting?.kind !== 'mainnet-standalone' || !binary || !isAbsolute(binary))
+      throw new Error('MPP_MAINNET_ACCEPTANCE_REQUIRED');
+    // Startup and scheduled recovery use the same verified protocol executable.
+    return binary;
   }
   requestMppPurchase(input: unknown, origin: string, principal: SpendPrincipal) {
     const dependencies = this.mppDependencies();
@@ -448,7 +471,8 @@ export class AppRuntime {
             if (record?.status === 'PAYMENT_UNKNOWN' && paymentChecks++ >= 4) continue;
             if (record) await recoverApprovedPayment(this.ledger, item.requestId, config,
               paymentEndpointForIntent(origin, record.intent), () => {}, item.ownerCardMemberId,
-              { automatic: true, signal: this.reconciliationAbort.signal }); }
+              { automatic: true, signal: this.reconciliationAbort.signal,
+                ...(record.intent.mpp ? { binary: this.mppRecoveryBinary() } : {}) }); }
           catch { /* Keep mismatched or unavailable original payments frozen. */ }
         }
       }
@@ -488,7 +512,8 @@ export class AppRuntime {
         const record = (item.ownerCardMemberId ? this.ledger.getOwned(item.requestId, item.ownerCardMemberId) : this.ledger.getLegacy(item.requestId));
         if (!record) continue;
         await recoverApprovedPayment(this.ledger, item.requestId, config, paymentEndpointForIntent(origin, record.intent),
-          () => {}, item.ownerCardMemberId, { fetcher: this.dependencies.fetcher });
+          () => {}, item.ownerCardMemberId, { fetcher: this.environment.isProduction ? undefined : this.dependencies.fetcher,
+            ...(record.intent.mpp ? { binary: this.mppRecoveryBinary() } : {}) });
       }
       this.recoveryStatus = this.ledger.pendingRecovery().length ? 'pending' : 'complete';
     } catch { this.recoveryStatus = 'pending'; }
@@ -680,6 +705,7 @@ export class AppRuntime {
     if (!this.accepting) throw new ManagementApiError('SERVICE_STOPPING', 503, 'Yosh is stopping.');
     const resource = RuntimeResourceSchema.parse(raw);
     if (resource.network !== this.environment.network || resource.mint !== this.environment.asset.mint) throw new Error('RESOURCE_NETWORK_MISMATCH');
+    if (resource.paymentProtocol === 'mpp_solana_charge') this.mppDependencies();
     return resourceEntrySummary(this.ledger.resources.add(resource));
   }
   disableRegisteredResource(id: string, state: 'DISABLED' | 'REMOVED') {
