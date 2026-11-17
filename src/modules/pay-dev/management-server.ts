@@ -26,7 +26,9 @@ import * as resource from '../../app/api/app/resources/[resourceId]/route';
 import * as agentDiscovery from '../../app/api/agent/discovery/route';
 import * as agentResources from '../../app/api/agent/resources/route';
 import * as agentQuote from '../../app/api/agent/quote/route';
+import * as agentMppQuote from '../../app/api/agent/mpp/quote/route';
 import * as agentPurchase from '../../app/api/agent/purchase/route';
+import * as agentMppPurchase from '../../app/api/agent/mpp/purchases/route';
 import * as agentDelivery from '../../app/api/agent/purchases/[purchaseId]/delivery/route';
 import * as agent from '../../app/api/agent/route';
 import { ManagementApiError, managementRoute } from '../app/management-auth';
@@ -62,6 +64,7 @@ export async function serveDevelopmentRuntime<T extends { memberId: string }>(op
     ['GET /api/agent', request => new URL(request.url).searchParams.get('operation') === 'status'
       ? agent.GET(request) : Promise.resolve(Response.json({ code: 'INVALID_OPERATION' }, { status: 400 }))],
     ['GET /api/agent/purchase', agentPurchase.GET],
+    ['POST /api/agent/mpp/purchases', agentMppPurchase.POST],
     ['GET /api/app/notifications', notifications.GET], ['GET /api/app/overview', overview.GET], ['GET /api/app/health', health.GET],
     ['PUT /api/app/settings', settings.PUT], ['PUT /api/app/grant', grant.PUT],
     ['GET /api/app/members', members.GET], ['POST /api/app/members', members.POST],
@@ -72,6 +75,7 @@ export async function serveDevelopmentRuntime<T extends { memberId: string }>(op
     ['GET /api/app/resources', resources.GET], ['POST /api/app/resources', resources.POST],
     ['POST /api/app/resources/discover', resourceDiscovery.POST], ['POST /api/app/resources/prepare', resourcePreparation.POST],
     ['POST /api/agent/discovery', agentDiscovery.POST], ['POST /api/agent/resources', agentResources.POST], ['POST /api/agent/quote', agentQuote.POST],
+    ['POST /api/agent/mpp/quote', agentMppQuote.POST],
     ['PUT /api/app/connection', request => managementRoute(request, true, async verified => {
       const { enabled } = z.object({ enabled: z.boolean() }).strict().parse(await smallJson(verified));
       return Response.json({ connection: await app.setMemberConnection(enabled, origin, descriptor.memberId) });

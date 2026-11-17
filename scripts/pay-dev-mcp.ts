@@ -116,7 +116,10 @@ async function main() {
   // these tools hold only the captured Agent capability, never management access.
   const resourceTools = live || (IS_CODEX_PLUGIN_DEVELOPMENT && !simulated) ? [
     { name: 'request_mpp_purchase', path: '/api/agent/mpp/purchases', schema: PurchaseRequestInputSchema,
-      description: 'Request a registered MPP Solana Charge using a stable requestId. Requires a separate mpp_charge Spend Grant and explicit SOL fee cap. Currently available only in the isolated development runtime; Mainnet activation is blocked pending acceptance. Unknown outcomes must retain the same purchase ID; never retry with a new ID or another protocol.' },
+      description: 'Request a registered MPP Solana Charge using a stable requestId. Requires a separate mpp_charge Spend Grant and explicit SOL fee cap. Mainnet requires the verified MPP standalone runtime and uses real funds. Unknown outcomes must retain the same purchase ID; never retry with a new ID or another protocol.' },
+    { name: 'quote_mpp_resource', path: '/api/agent/mpp/quote',
+      schema: z.object({ resourceId: z.string().min(1).max(200), sample: ResourceRequestInputSchema.optional() }).strict(),
+      description: 'Read a fresh unpaid MPP Solana Charge challenge for a registered API. Does not reserve, sign, pay or create a Grant. Use request_mpp_purchase only after user authorization.' },
     { name: 'discover_x402_resource', path: '/api/agent/discovery', schema: DiscoveryInput,
       description: live ? 'Inspect a candidate public HTTPS x402 API without payment using Yosh discovery. Returns an Agent-bound discoveryId and immutable registration proposal. Unknown POST requires separate approval in Yosh. Does not register, authorize spending or pay.'
         : 'Inspect one of the fixed Offline GET fixture URLs returned in get_spending_status.discoveryUrls. Returns an Agent-bound discoveryId. No public network, registration, spending permission or payment.' },
@@ -250,7 +253,7 @@ async function main() {
         ? `${code}: Request interrupted. Read the original purchase ID; do not assume no payment and do not create a replacement.`
         : `${code}: No spending permission or payment was created.${code.startsWith('OFFLINE_')
         ? ' This isolated Offline environment supports fixed fixtures only; public API discovery and registration are unavailable.'
-        : ' Review POST requests in Yosh before discovery.'}` }] };
+        : code === 'RESOURCE_POST_APPROVAL_REQUIRED' ? ' Review POST requests in Yosh before discovery.' : ''}` }] };
     }
     if (!closed) process.stdout.write(`${JSON.stringify({ jsonrpc: '2.0', id, result })}\n`);
   };
@@ -374,7 +377,7 @@ async function main() {
       if (!simulated) response.data.result.tools.push(...purchaseTools);
       if (live) response.data.result.tools.push(recoveryTool);
       for (const tool of resourceTools) response.data.result.tools.push({ name: tool.name, description: tool.description,
-        inputSchema: z.toJSONSchema(tool.schema), annotations: { readOnlyHint: tool.name === 'quote_x402_resource',
+        inputSchema: z.toJSONSchema(tool.schema), annotations: { readOnlyHint: ['quote_x402_resource', 'quote_mpp_resource'].includes(tool.name),
           destructiveHint: ['discover_x402_resource', 'request_mpp_purchase'].includes(tool.name), openWorldHint: tool.name !== 'register_x402_resource' } });
       process.stdout.write(`${JSON.stringify(response.data)}\n`);
     } else {

@@ -66,7 +66,7 @@ it('the plugin lists only upstream curl and blocks guessed upstream tools before
   const f = fixture('PAYMENTS_PAUSED');
   try {
     expect(f.listTools()).toEqual(['curl', 'get_spending_status', 'get_purchase', 'get_purchase_delivery',
-      'request_mpp_purchase', 'discover_x402_resource', 'register_x402_resource', 'quote_x402_resource']);
+      'request_mpp_purchase', 'quote_mpp_resource', 'discover_x402_resource', 'register_x402_resource', 'quote_x402_resource']);
     const before = f.forwarded.length;
     const forbidden = ['create_skill', 'get_balance', 'get_catalog_entry', 'list_catalog', 'search_catalog',
       'sell_inference', 'topup', 'recover_payment', 'future_upstream_tool'];
