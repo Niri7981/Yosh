@@ -119,6 +119,11 @@ export async function serveDevelopmentRuntime<T extends { memberId: string }>(op
     ['GET /api/app/notifications', notifications.GET], ['GET /api/app/overview', overview.GET], ['GET /api/app/health', health.GET],
     ['PUT /api/app/settings', settings.PUT], ['PUT /api/app/grant', grant.PUT],
     ['POST /api/app/local-host-resource', request => handleLocalHostResource(request, app)],
+    ['POST /api/app/local-host-member', request => managementRoute(request, true, async verified => {
+      const input = StatementRegistration.parse(await smallJson(verified));
+      try { return Response.json(app.boundHostPurchaseMember(input)); }
+      catch { throw new ManagementApiError('LOCAL_HOST_BINDING_MISMATCH', 403, '未找到此宿主的有效购买连接。'); }
+    })],
     ['POST /api/app/local-host-purchase', request => handleLocalHostPurchase(request, app, origin)],
     ['POST /api/app/local-statement-pairing', request => managementRoute(request, true, async verified => {
       const input = StatementRegistration.parse(await smallJson(verified));

@@ -53,3 +53,17 @@ export function resolveInstalledHost(runtime: string, profile = ownerProfile()) 
     return findHostBinding(profile, realpathSync(path));
   } catch { throw new Error('LOCAL_HOST_EXECUTABLE_NOT_REGISTERED'); }
 }
+
+/** Environment values name a desired connection, never its owner. Only old explicitly
+ * registered hosts get the ordinary Pay surface; new hosts use the owner-bound plan. */
+export async function verifiedMcpMember(host: Pick<z.infer<typeof Binding>, 'registration' | 'label' | 'legacyMember'>,
+  member: Record<string, string>, internal: string | undefined, resolvePurchase: (registration: string, label: string) => Promise<{memberId: string}>) {
+  if (internal !== undefined && internal !== '1') throw new Error('LOCAL_HOST_BINDING_MISMATCH');
+  if (internal === '1') {
+    const verified = await resolvePurchase(host.registration, host.label);
+    if (!member.YOSH_CARD_MEMBER_ID || member.YOSH_CARD_MEMBER_ID !== verified.memberId) throw new Error('LOCAL_HOST_BINDING_MISMATCH');
+    return { ...member, YOSH_INTERNAL_PURCHASE: '1' };
+  }
+  if ((member.YOSH_CARD_MEMBER_ID ?? 'default') !== host.legacyMember) throw new Error('LOCAL_HOST_BINDING_MISMATCH');
+  return member;
+}

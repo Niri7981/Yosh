@@ -962,6 +962,19 @@ export class AppRuntime {
     return describePurchaseResource(this.hostPurchaseResource(resourceId));
   }
 
+  boundHostPurchaseMember(raw: unknown) {
+    const registration = StatementRegistration.parse(raw);
+    const verify = this.hosting?.legacyMemberForRegistration;
+    if (!verify || !this.payMainnet || this.localGrantEnvironment() !== 'mainnet') throw new Error('LOCAL_HOST_BINDING_MISMATCH');
+    const binding = verify(registration.hostId, registration.label);
+    const legacy = binding === 'default' ? this.ledger.defaultCardMember().id : binding;
+    const paired = this.ledger.localStatementPairings().registration(registration).memberId;
+    const memberId = legacy ?? paired;
+    if (!memberId || (legacy && paired && legacy !== paired) || !this.connectionFor(memberId).principal('request_purchase'))
+      throw new Error('LOCAL_HOST_BINDING_MISMATCH');
+    return { memberId };
+  }
+
   async authorizeHostPurchase(raw: unknown, origin: string, signal?: AbortSignal) {
     const {hostId, label, existingOnly, ...input} = StatementRegistration.extend(LocalHostPurchaseOwnerInput.shape).strict().parse(raw);
     if (existingOnly) return this.track(this.confirmHostPurchase({hostId, label}, input, origin, signal, true));

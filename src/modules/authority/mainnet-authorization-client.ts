@@ -23,7 +23,7 @@ function privateText(file: string) {
 
 /** Attach to the original backend. Never start it, switch environments, copy
  * wallet data or pass its management credential to the browser/MCP. */
-async function callOwner(path: '/api/app/local-grants' | '/api/app/local-statement-pairing' | '/api/app/local-host-purchase' | '/api/app/local-host-resource', bodyFor: (memberId: string) => string, timeout: number) {
+async function callOwner(path: '/api/app/local-grants' | '/api/app/local-statement-pairing' | '/api/app/local-host-purchase' | '/api/app/local-host-resource' | '/api/app/local-host-member', bodyFor: (memberId: string) => string, timeout: number) {
   try {
     const root = join(userInfo().homedir, 'Library/Application Support/Yosh Pay Dev v0.1.1-rc.5');
     const directory = join(root, 'Mainnet');
@@ -95,4 +95,11 @@ export async function describeLocalHostResource(hostId: string, label: string, i
   const contract = PurchaseResourceContract.safeParse(result);
   if (!contract.success || contract.data.resourceId !== lookup.resourceId) throw new Error('LOCAL_RESOURCE_LOOKUP_UNAVAILABLE');
   return contract.data;
+}
+
+/** No pairing, Grant or native prompt: resolve only an already enabled purchase connection. */
+export async function readLocalPurchaseMember(hostId: string, label: string) {
+  const registration = StatementRegistration.parse({ hostId, label });
+  const result = await callOwner('/api/app/local-host-member', () => JSON.stringify(registration), 10_000);
+  return z.object({ memberId: z.uuid() }).strict().parse(result);
 }

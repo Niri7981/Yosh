@@ -1,9 +1,9 @@
 import { LocalHostPurchaseOwnerInput } from '../src/modules/mcp/local-host-purchase';
 import { PurchaseResourceLookup } from '../src/modules/mcp/purchase-resource-contract';
 import { MAX_LOCAL_REQUEST_BYTES } from '../src/modules/http/request-size-limits';
-import { authorizeLocalHostPurchase, describeLocalHostResource, pairLocalStatementHost } from '../src/modules/authority/mainnet-authorization-client';
+import { authorizeLocalHostPurchase, describeLocalHostResource, pairLocalStatementHost, readLocalPurchaseMember } from '../src/modules/authority/mainnet-authorization-client';
 import { parseHostRegistration } from '../src/modules/mcp/local-host-registration';
-import { legacyMemberForRegistration, resolveInstalledHost } from '../src/modules/mcp/installed-host';
+import { legacyMemberForRegistration, resolveInstalledHost, verifiedMcpMember } from '../src/modules/mcp/installed-host';
 import { nativeGrantConfirmation, nativeStatementConfirmation } from '../src/modules/authority/native-grant-confirmation';
 import { mcpMemberEnvironment } from '../src/modules/mcp/member-environment';
 import { spawn } from 'node:child_process';
@@ -99,11 +99,11 @@ async function serve(digest: string, initial: Configuration) {
   }
 }
 
-function mcp(installed: string, configuration: Configuration) {
+function mcp(installed: string, configuration: Configuration, member: Record<string, string>) {
   const child = spawn('/usr/bin/sandbox-exec', ['-f', join(installed, 'mainnet.sb'), join(installed, 'node'),
     join(installed, 'mainnet-mcp.cjs'), '--data-dir', configuration.root], {
     cwd: installed, stdio: ['pipe', 'pipe', 'ignore'],
-    env: { ...mcpMemberEnvironment(process.env), ...(process.env.YOSH_INTERNAL_PURCHASE === '1' ? { YOSH_INTERNAL_PURCHASE: '1' } : {}),
+    env: { ...member,
       HOME: configuration.environment.HOME, PATH: '/usr/bin:/bin', NODE_ENV: 'production' } });
   const input = createInterface({ input: process.stdin }), output = createInterface({ input: child.stdout });
   const lists = new Set<string | number>();
@@ -203,7 +203,15 @@ async function main() {
     console.log(JSON.stringify({ memberId })); return;
   }
   const { installed, installedConfiguration, status } = await readyRuntime();
-  if (action === 'install-mcp') { mcp(installed, installedConfiguration); return; }
+  if (action === 'install-mcp') {
+    const member = mcpMemberEnvironment(process.env);
+    if (manifest.firstUsePurchases) {
+      const caller = resolveInstalledHost(runtime);
+      const verified = await verifiedMcpMember(caller, member, process.env.YOSH_INTERNAL_PURCHASE, readLocalPurchaseMember);
+      mcp(installed, installedConfiguration, verified); return;
+    }
+    mcp(installed, installedConfiguration, member); return;
+  }
   console.log(JSON.stringify({ environment: 'mainnet', running: true, ...status, candidateRuntimeDigest: digest,
     ...(status.owner === 'standalone' ? { runtimeDigest: digest, runtimeDirectory: installed } : {}) }));
 }

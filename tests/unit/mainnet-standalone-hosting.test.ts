@@ -261,7 +261,8 @@ it('binds one native purchase consent to its member, request and exact quote, in
   });
   const confirm = vi.fn<ConfirmLocalGrant>(async () => {});
   const statement = vi.fn<ConfirmStatementPairing>(async () => {});
-  let app = f.open(true, f.payMcpPath, statement, confirm, merchant);
+  let app = f.open(true, f.payMcpPath, statement, confirm, merchant, () => null);
+  expect(() => app.boundHostPurchaseMember(registration)).toThrow('LOCAL_HOST_BINDING_MISMATCH');
   confirm.mockRejectedValueOnce(new Error('LOCAL_CONFIRMATION_DECLINED'));
   const before = app.ledger.cardMembers();
   await expect(app.authorizeHostPurchase({...input, existingOnly: true}, origin)).rejects.toThrow('LOCAL_PURCHASE_NOT_FOUND');
@@ -274,6 +275,8 @@ it('binds one native purchase consent to its member, request and exact quote, in
   expect(statement).not.toHaveBeenCalled();
   expect(confirm.mock.calls[1][0]).toMatchObject({binding: {input: {totalLimit: '1000', singleLimit: '1000'},
     scope: {payTo: quote.payTo}}, purchase: {requestId: input.requestId, reason: input.reason}});
+  expect(app.boundHostPurchaseMember(registration)).toEqual({memberId: plan.memberId});
+  expect(() => app.boundHostPurchaseMember({...registration, hostId: randomUUID()})).toThrow('LOCAL_HOST_BINDING_MISMATCH');
   const credential = readConnection(f.directory, plan.memberId);
   expect(credential.capabilities).toEqual(['request_purchase']);
   const req = new Request(origin, {headers: {authorization: 'Bearer ' + credential.token}});
@@ -322,6 +325,7 @@ it('keeps an established host identity and its standing grant across one-shot ap
   const confirm = vi.fn<ConfirmLocalGrant>(async () => {});
   const app = f.open(true, f.payMcpPath, undefined, confirm, merchant, resolver);
   app.setAgentConnection(true, origin); await app.initializeWallet();
+  expect(app.boundHostPurchaseMember(registration)).toEqual({memberId: f.memberId});
   const credential = readConnection(f.directory), before = app.ledger.cardMembers();
   const input = {...registration, requestId: 'first', resourceId: f.resource.resourceId, reason: 'Market price'};
   expect(await app.authorizeHostPurchase(input, origin)).toMatchObject({memberId: f.memberId});
