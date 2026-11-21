@@ -3,6 +3,9 @@ import { randomUUID } from 'node:crypto';
 import { StatementRegistration } from '../authority/local-statement-pairing';
 import { describePurchaseResource, PurchaseResourceLookup } from '../mcp/purchase-resource-contract';
 import { LocalHostPurchaseOwnerInput, LocalHostPurchasePlan, type HostPurchase } from '../mcp/local-host-purchase';
+import { ResultInput, StatementInput } from '../mcp/account-read-contract';
+import { checkSandboxDatabases, lookupSimulatedPurchase, purchaseInSimulator, sandboxWalletIdentity, simulationGrantScope, type RemotePurchaseConsent } from '../purchases/remote-simulated-purchase';
+import { purchasePairingRequest, pairingRequest, type ReadScope, type ReadConsent } from '../remote/pairings';
 import { IS_LOCAL_AUTH_DEVELOPMENT } from '../pay-dev/profile';
 import { LocalControlAction, type LocalControlReceipt } from '../authority/local-control-approval';
 import { basename, dirname, isAbsolute, resolve as resolveRuntimePath } from 'node:path';
@@ -127,14 +130,16 @@ export class AppRuntime {
   private environment: PaymentEnvironment;
   private readonly configuredEnvironment = { ...process.env };
   private readonly profileKeys = new Set<string>();
+  private readonly sandboxWallet?: string;
   private purchaseExecutionMode() {
     const current = resolvePaymentEnvironment();
+    if (this.sandboxWallet && (current.mode !== 'simulated' || current.productionExecutionEnabled)) throw new Error('REMOTE_PURCHASE_SIMULATED_ONLY');
     if (current.mode !== 'live_mainnet' && current.cluster !== 'devnet') throw new PaymentEnvironmentError('INVALID_PAYMENT_ENVIRONMENT', 'App requires Devnet or explicit Mainnet environment');
     if ((current.mode === 'live_mainnet' || this.environment.mode === 'live_mainnet') && hash(current) !== hash(this.environment)) throw new PaymentEnvironmentError('INVALID_PAYMENT_ENVIRONMENT', 'Restart Yosh before changing the payment environment');
     this.environment = current;
     return current.mode;
   }
-  constructor(readonly directory = runtimeDataDirectory(), private dependencies: { initializeWallet?: () => Promise<{ address: string; reused: boolean }>; readWallets?: () => Promise<WalletInventoryEntry[]>; timeZone?: () => string; now?: () => number; fetcher?: typeof fetch; codex?: CodexIntegrationOptions; paymentExecutor?: PaymentExecutor; mpp?: MppChargeDependencies; offlineResources?: OfflineResourcePolicy; hosting?: AppRuntimeHosting } = {}) {
+  constructor(readonly directory = runtimeDataDirectory(), private dependencies: { remotePurchaseSandbox?: boolean; confirmRemotePurchaseConsent?: (facts: RemotePurchaseConsent) => Promise<boolean>; confirmRemoteReadPairing?: (facts: ReadConsent) => Promise<boolean>; initializeWallet?: () => Promise<{ address: string; reused: boolean }>; readWallets?: () => Promise<WalletInventoryEntry[]>; timeZone?: () => string; now?: () => number; fetcher?: typeof fetch; codex?: CodexIntegrationOptions; paymentExecutor?: PaymentExecutor; mpp?: MppChargeDependencies; offlineResources?: OfflineResourcePolicy; hosting?: AppRuntimeHosting } = {}) {
     dependencies = this.dependencies = { ...dependencies };
     this.hosting = dependencies.hosting ? Object.freeze({ ...dependencies.hosting }) : undefined;
     resolveYoshConfiguration();
@@ -142,6 +147,14 @@ export class AppRuntime {
     this.devMainnet = isMainnetDevelopment(directory);
     this.devDevnet = isDevnetDevelopment(directory);
     this.devSimulated = isSimulatedDevelopment(directory);
+    if (dependencies.remotePurchaseSandbox) {
+      this.sandboxWallet = sandboxWalletIdentity(directory);
+      checkSandboxDatabases(directory);
+      if (this.hosting || this.payDevelopment || this.devDevnet || this.devMainnet || this.devSimulated || this.controlledPay ||
+          dependencies.offlineResources || dependencies.mpp || dependencies.paymentExecutor ||
+          resolvePaymentEnvironment().mode !== 'simulated' || resolvePaymentEnvironment().productionExecutionEnabled)
+        throw new Error('REMOTE_PURCHASE_SIMULATED_ONLY');
+    } else if (existsSync(join(directory, 'remote-purchase-sandbox-v1'))) throw new Error('REMOTE_PURCHASE_SANDBOX_REQUIRED');
     if (this.hosting && (this.hosting.kind !== 'mainnet-standalone' || !this.payMainnet || this.payDevnet
       || this.payDevelopment || dependencies.paymentExecutor || typeof this.hosting.payMcpPath !== 'string'
       || this.hosting.payMcpPath.includes('\0') || !isAbsolute(this.hosting.payMcpPath)
@@ -163,6 +176,7 @@ export class AppRuntime {
       // Product configuration holds operator policy; the persisted selection is
       // the active profile. Resolve it before validating the active environment.
       const selection = readExecutionSelection(directory);
+      if (this.sandboxWallet && selection && selection !== 'simulated') throw new Error('REMOTE_PURCHASE_SIMULATED_ONLY');
       if (selection) this.applyExecutionProfile(selection);
       this.environment = resolvePaymentEnvironment();
       if (this.hosting && this.environment.mode !== 'live_mainnet') throw new Error('MAINNET_STANDALONE_HOSTING_REJECTED');
@@ -177,15 +191,15 @@ export class AppRuntime {
         } });
       }
       if (dependencies.paymentExecutor && !this.controlledPay && this.environment.mode !== 'live_devnet') throw new Error('PAY_EXECUTOR_PRODUCTION_BLOCKED');
-      ledger = new PurchaseLedger(join(directory, 'app-ledger.sqlite'), { managed: true, requireRegisteredResource: true, requireSpendGrant: true, mode: this.purchaseExecutionMode(), timeZone: dependencies.timeZone ?? localTimeZone, now: dependencies.now });
+      ledger = new PurchaseLedger(join(directory, 'app-ledger.sqlite'), { managed: true, walletIdentity: this.sandboxWallet, requireRegisteredResource: true, requireSpendGrant: true, mode: this.purchaseExecutionMode(), timeZone: dependencies.timeZone ?? localTimeZone, now: dependencies.now });
       this.ledger = ledger;
       if (this.controlledPay) ledger.executionSafety.enable(Date.now());
       dependencies.paymentExecutor?.bindRuntime?.(directory, ledger);
       // Import installation configuration once; subsequent reads use durable product data.
-      this.initializeRegisteredResources();
+      if (!this.sandboxWallet) this.initializeRegisteredResources();
       const defaultMemberId = this.ledger.defaultCardMember().id;
       for (const member of this.ledger.cardMembers()) {
-        this.memberConnections.set(member.id, new AgentConnection(directory, member.id, id => this.ledger.isCardMemberActive(id), member.id !== defaultMemberId, dependencies.now));
+        this.memberConnections.set(member.id, new AgentConnection(directory, member.id, id => this.ledger.isCardMemberActive(id) && !this.ledger.remoteReadPairings().belongsToMember(id), member.id !== defaultMemberId, dependencies.now));
       }
       this.agentConnection = this.memberConnections.get(defaultMemberId)!;
       if (this.controlledPay) {
@@ -194,7 +208,7 @@ export class AppRuntime {
           executor: dependencies.paymentExecutor!, origin, rpcUrl: this.environment.rpcUrl, ...(this.payMainnet ? { mainnet: true } : { devnet: true }) });
         if (this.payMainnet) writePayMainnetDescriptor(directory, origin, defaultMemberId);
       }
-      this.codexIntegration = new CodexIntegration(directory, defaultMemberId, dependencies.codex);
+      this.codexIntegration = new CodexIntegration(directory, defaultMemberId, this.sandboxWallet ? { root: directory, run: async () => { throw Error('REMOTE_PURCHASE_SANDBOX_ONLY'); } } : dependencies.codex);
       this.agentConnection.setIntegration(this.hosting || this.payDevelopment || this.devMainnet || this.devDevnet || this.devSimulated ? this.agentConnection.status().enabled : this.codexIntegration.configured,
         this.hosting || this.payDevelopment || this.devMainnet || this.devDevnet || this.devSimulated ? 'yosh-pay-dev' : this.codexIntegration.serverName);
       // A verified persisted connection survives a service restart. Host-session
@@ -266,6 +280,7 @@ export class AppRuntime {
     }
   }
   setExecution(mode: PurchaseExecutionMode) {
+    if (this.sandboxWallet && mode !== 'simulated') throw Error('REMOTE_PURCHASE_SIMULATED_ONLY');
     if ((this.devMainnet || this.devDevnet || this.devSimulated) && mode !== this.environment.mode) throw new ManagementApiError('ENVIRONMENT_RESTART_REQUIRED', 409, 'Change the Dev environment in Settings.');
     if (this.payDevelopment && mode !== 'live_devnet') throw new ManagementApiError('PAY_DEVELOPMENT_ONLY', 409, '此开发版只使用离线测试环境。');
     this.purchaseExecutionMode();
@@ -293,6 +308,7 @@ export class AppRuntime {
     }
   }
   setProductionExecutionEnabled(enabled: boolean) {
+    if (this.sandboxWallet) throw Error('REMOTE_PURCHASE_SIMULATED_ONLY');
     if (this.payDevelopment) throw new ManagementApiError('PAY_PRODUCTION_BLOCKED', 409, '开发版不支持真实资金。');
     this.purchaseExecutionMode();
     if (!this.accepting) throw new ManagementApiError('SERVICE_STOPPING', 503, 'Yosh is stopping.');
@@ -340,6 +356,7 @@ export class AppRuntime {
         : this.recoveryStatus === 'complete' ? 'recoveryComplete' : 'recoveryPending' };
   }
   async initializeWallet() {
+    if (this.sandboxWallet) throw new Error('REMOTE_PURCHASE_SANDBOX_ONLY');
     resolveYoshConfiguration();
     this.purchaseExecutionMode();
     if (this.environment.mode === 'live_mainnet' && !this.wallet && Date.now() < this.walletRetryAfter) throw new Error('WALLET_RETRY_PENDING');
@@ -449,6 +466,7 @@ export class AppRuntime {
     return action === 'plan' ? this.payAuthority.prepareControlled(input.facts, principal) : this.payAuthority.execute(input.facts, input.unsigned, principal);
   }
   start(origin: string): Promise<void> {
+    if (this.sandboxWallet) { this.requirePurchaseSandbox(); return Promise.resolve(); }
     resolveYoshConfiguration();
     this.purchaseExecutionMode();
     if (this.startup) return this.startup;
@@ -770,6 +788,7 @@ export class AppRuntime {
   }
   existingWallets() { return this.track(this.readWallets()); }
   private readWalletInventory() {
+    if (this.sandboxWallet) return Promise.resolve<WalletAccountObservation[]>([]);
     if (!this.walletInventory || (this.walletInventoryExpiresAt > 0 && Date.now() >= this.walletInventoryExpiresAt)) {
       this.walletInventoryExpiresAt = 0;
       const readWallets: () => Promise<WalletInventoryEntry[]> = this.dependencies.readWallets ?? (() => readExistingProductWallets());
@@ -811,6 +830,97 @@ export class AppRuntime {
     const connection = this.memberConnections.get(memberId);
     if (!connection || !this.ledger.cardMember(memberId)) throw new Error('CARD_MEMBER_NOT_FOUND');
     return connection;
+  }
+  private requirePurchaseSandbox() {
+    if (!this.sandboxWallet || !this.accepting || this.purchaseExecutionMode() !== 'simulated' ||
+      sandboxWalletIdentity(this.directory) !== this.sandboxWallet) throw Error('REMOTE_PURCHASE_SIMULATED_ONLY');
+    return this.ledger.scope('simulated');
+  }
+  private async confirmRemotePurchase(facts: RemotePurchaseConsent) {
+    const confirm = this.dependencies.confirmRemotePurchaseConsent ?? (await import('../remote/purchase-confirm')).confirmRemotePurchaseConsent;
+    if (!await confirm(Object.freeze(facts))) throw new ManagementApiError('REMOTE_PURCHASE_CONSENT_DENIED', 403, '本机未确认。');
+    this.requirePurchaseSandbox();
+  }
+  async issueRemotePurchasePairing(label: string) {
+    const { walletIdentity } = this.requirePurchaseSandbox();
+    const parsed = purchasePairingRequest.parse({ label, scopes: ['purchase'] });
+    await this.confirmRemotePurchase({ action: 'pair', environment: 'simulated', account: walletIdentity, label: parsed.label });
+    const result = this.ledger.issueRemotePurchasePairing(parsed.label, this.requirePurchaseSandbox());
+    this.memberConnections.set(result.memberId, new AgentConnection(this.directory, result.memberId, () => false, true));
+    return result;
+  }
+  async createRemotePurchaseGrant(pairingId: string, raw: unknown) {
+    const request = SpendGrantInputSchema.extend({ resourceId: z.literal('market-snapshot') }).strict().parse(raw);
+    const { resourceId, ...input } = request;
+    const scope = this.requirePurchaseSandbox(), pairs = this.ledger.remoteReadPairings();
+    const pairing = pairs.purchaseForId(z.uuid().parse(pairingId), scope);
+    const now = () => this.dependencies.now?.() ?? Date.now();
+    const basis = () => {
+      const last = this.ledger.spendGrantSummary(now(), 'simulated', pairing.memberId, resourceId);
+      return last ? hash([last.id, last.version, last.status]) : null;
+    };
+    const previous = basis();
+    await this.confirmRemotePurchase({ action: 'grant', label: pairing.label, account: scope.walletIdentity,
+      environment: 'simulated', pairingId, ...request });
+    const principal = pairs.purchasePrincipal(pairingId, this.requirePurchaseSandbox());
+    if (basis() !== previous) throw new ManagementApiError('REMOTE_PURCHASE_GRANT_CHANGED', 409, '此授权已变更，请重新确认。');
+    const grant = this.ledger.createSpendGrant(input, principal, simulationGrantScope, now(), 'simulated');
+    return { grantId: grant.id, resourceId, totalLimit: grant.totalLimit, singleLimit: grant.singleLimit, expiresAt: grant.expiresAt };
+  }
+  revokeRemotePurchaseGrant(pairingId: string, grantId: string) {
+    const principal = this.ledger.remoteReadPairings().purchasePrincipal(z.uuid().parse(pairingId), this.requirePurchaseSandbox());
+    return this.ledger.revokeSimulatedPairingGrant(principal, z.uuid().parse(grantId), simulationGrantScope.resourceId, this.dependencies.now?.() ?? Date.now());
+  }
+  authenticateRemotePurchase(token: string) {
+    return this.ledger.remoteReadPairings().authenticatePurchase(token, this.requirePurchaseSandbox());
+  }
+  requestRemotePurchase(token: string, raw: unknown) {
+    const pairing = this.authenticateRemotePurchase(token), scope = this.requirePurchaseSandbox();
+    const principal = this.ledger.remoteReadPairings().purchasePrincipal(pairing.id, scope);
+    return purchaseInSimulator(this.ledger, principal, raw, scope.walletIdentity, this.dependencies.now?.() ?? Date.now());
+  }
+  getRemotePurchase(token: string, raw: unknown) {
+    const pairing = this.authenticateRemotePurchase(token), scope = this.requirePurchaseSandbox();
+    const principal = this.ledger.remoteReadPairings().purchasePrincipal(pairing.id, scope);
+    return lookupSimulatedPurchase(this.ledger, principal, raw, scope.walletIdentity);
+  }
+  async issueRemoteReadPairing(label: string, scopes: readonly ReadScope[]) {
+    if (!this.accepting) throw new ManagementApiError('SERVICE_STOPPING', 503, 'Yosh 正在退出。');
+    const request = pairingRequest.parse({ label, scopes });
+    const scope = this.ledger.scope(this.purchaseExecutionMode());
+    const confirm = this.dependencies.confirmRemoteReadPairing ?? (await import('../remote/confirm')).confirmRemoteReadPairing;
+    // Approval names this installation and wallet; asynchronous confirmation cannot authorize a newly selected environment.
+    const account = this.ledger.defaultCardMember().id + ' / ' + scope.walletIdentity;
+    let approved: boolean;
+    try { approved = await confirm({ label: request.label, scopes: [...request.scopes], account, environment: scope.environment }); }
+    catch (error) {
+      if (error instanceof Error && error.message === 'LOCAL_CONFIRMATION_DECLINED') approved = false;
+      else throw new ManagementApiError('REMOTE_READ_CONFIRMATION_UNAVAILABLE', 503, '无法完成本机确认，未创建配对。');
+    }
+    if (approved !== true) throw new ManagementApiError('REMOTE_READ_CONSENT_DENIED', 403, '未批准远端读取。');
+    if (!this.accepting || monetaryScopeId(scope) !== monetaryScopeId(this.ledger.scope(this.purchaseExecutionMode())))
+      throw new ManagementApiError('REMOTE_READ_SCOPE_CHANGED', 409, '钱包环境已变化，请重新确认。');
+    const result = this.ledger.issueRemoteReadPairing(request.label, request.scopes, scope);
+    this.memberConnections.set(result.memberId, new AgentConnection(this.directory, result.memberId, () => false, true));
+    return result;
+  }
+  listRemoteReadPairings() { return this.ledger.remoteReadPairings().list(); }
+  revokeRemoteReadPairing(id: string) {
+    const member = this.ledger.remoteReadPairings().memberForId(z.uuid().parse(id));
+    if (typeof member !== 'string') throw new ManagementApiError('REMOTE_READ_PAIRING_NOT_FOUND', 404, '未找到该配对。');
+    if (this.ledger.isCardMemberActive(member)) this.revokeCardMember(member);
+    return { revoked: true };
+  }
+  authenticateRemoteRead(token: string) {
+    if (!this.accepting) throw new Error('REMOTE_READ_UNAUTHORIZED');
+    return this.ledger.remoteReadPairings().authenticate(token, this.ledger.scope(this.purchaseExecutionMode()));
+  }
+  remoteAccountRead(token: string, scope: ReadScope, input: unknown) {
+    const principal = this.authenticateRemoteRead(token);
+    if (!principal.scopes.includes(scope)) throw new Error('REMOTE_READ_FORBIDDEN');
+    const mode = this.purchaseExecutionMode();
+    if (scope === 'statement') return this.ledger.readAccountStatement(principal.memberId, mode, StatementInput.parse(input));
+    return this.ledger.readAccountResult(principal.memberId, mode, ResultInput.parse(input));
   }
   pairStatementHost(input: { hostId: string; label: string }, origin: string, signal?: AbortSignal) {
     const confirm = this.hosting?.confirmStatementPairing;
@@ -1044,6 +1154,7 @@ export class AppRuntime {
   setAgentConnection(enabled: boolean, origin: string, memberId = this.ledger.defaultCardMember().id) {
     if (!this.accepting) throw new Error('SERVICE_STOPPING');
     this.ledger.assertCardMemberActive(memberId);
+    if (enabled && this.ledger.remoteReadPairings().belongsToMember(memberId)) throw new ManagementApiError('REMOTE_MEMBER_READ_ONLY', 403, '此成员仅用于远端读取。');
     this.ledger.revokeActiveSpendGrant(this.dependencies.now?.() ?? Date.now(), 'grant.REVOKED_CONNECTION_CHANGED', memberId);
     const connection = this.connectionFor(memberId);
     if (enabled && this.ledger.hasStatementOnlyMember(memberId) && !this.ledger.localStatementPairings().mayRead(memberId)) {

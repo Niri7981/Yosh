@@ -6,6 +6,8 @@
     "node": ">=24.5.0"
   },
   "scripts": {
+    "build:remote-purchase-sandbox": "node scripts/build-remote-purchase-sandbox.mjs && npm run build:remote-read",
+    "build:remote-read": "esbuild scripts/remote-read-owner.ts scripts/remote-read-transport.ts --bundle --platform=node --target=node24 --format=cjs --out-extension:.js=.cjs --outdir=build.noindex/remote-read",
     "app:dev": "electron electron/main.cjs",
     "dev": "next dev",
     "build": "next build",

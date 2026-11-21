@@ -1,5 +1,7 @@
 import { resolveInstalledHost } from '../src/modules/mcp/installed-host';
 import { mcpMemberEnvironment } from '../src/modules/mcp/member-environment';
+import { signedLocalManagement } from '../src/modules/app/signed-local-management';
+import { configureRemoteReadConfirmation } from '../src/modules/remote/confirm';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { callMainnetAuthorization } from '../src/modules/authority/mainnet-authorization-client';
@@ -8,7 +10,7 @@ import { nativeGrantConfirmation, nativeControlConfirmation } from '../src/modul
 import { startLiveDevnetDevelopmentBackend } from '../src/modules/pay-dev/live-devnet-runtime';
 import { IS_LOCAL_AUTH_DEVELOPMENT as local } from '../src/modules/pay-dev/profile';
 /** Development-only process owner; no real wallet, web authority or auto-update. */
-import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { constants, copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, userInfo } from 'node:os';
@@ -122,29 +124,8 @@ function installRuntime(directory: string, digest: string) {
 }
 
 async function management(directory: string, method: 'GET' | 'POST', path: string, body = '') {
-  const { managementSecret: secret } = Control.parse(privateJson(join(directory, 'standalone-control.json')));
-  const nonce = randomBytes(32).toString('hex'), timestamp = String(Date.now()), bodyHash = hash(body);
-  const message = ['2049-management-v1', method, path, timestamp, nonce, bodyHash].join('\n');
-  const response = await fetch(origin + path, { method, redirect: 'error', signal: AbortSignal.timeout(2000),
-    headers: { 'content-type': 'application/json', origin,
-      'x-2049-nonce': nonce, 'x-2049-timestamp': timestamp, 'x-2049-body-sha256': bodyHash,
-      'x-2049-proof': createHmac('sha256', secret).update(message).digest('hex') }, ...(body ? { body } : {}) });
-  const reader = response.body?.getReader();
-  const chunks: Uint8Array[] = []; let size = 0;
-  try {
-    if (reader) for (;;) {
-      const part = await reader.read(); if (part.done) break;
-      size += part.value.length;
-      if (size > 16384) throw new Error('STANDALONE_RESPONSE_TOO_LARGE');
-      chunks.push(part.value);
-    }
-  } finally { await reader?.cancel(); reader?.releaseLock(); }
-  const bytes = Buffer.concat(chunks);
-  const proof = response.headers.get('x-2049-response-proof') ?? '';
-  const expected = createHmac('sha256', secret).update(['2049-management-response-v1', nonce, String(response.status), hash(bytes)].join('\n')).digest();
-  if (!/^[a-f0-9]{64}$/.test(proof) || !timingSafeEqual(Buffer.from(proof, 'hex'), expected)) throw new Error('STANDALONE_BACKEND_AUTH_FAILED');
-  if (!response.ok) throw new Error('STANDALONE_BACKEND_NOT_READY');
-  return JSON.parse(bytes.toString('utf8')) as unknown;
+  const { managementSecret } = Control.parse(privateJson(join(directory, 'standalone-control.json')));
+  return signedLocalManagement(origin, managementSecret, method, path, body);
 }
 
 function readOwner(directory: string, digest: string) {
@@ -198,6 +179,7 @@ async function serve(directory: string, digest: string) {
       afterClose: async () => { await web?.close(); },
       localAuthorizationLink: () => { if (!web) throw new Error('LOCAL_WEB_NOT_READY'); return web.createLink(); } });
     const manifest = Manifest.parse(JSON.parse(readFileSync(join(runtime, 'manifest.json'), 'utf8')));
+    configureRemoteReadConfirmation(join(runtime, 'yosh-confirm'), manifest.files['yosh-confirm']);
     const assets = new Map<string, { bytes: Buffer; contentType: string }>([
       ['/spirit-design-sheet.png', { bytes: readFileSync(join(runtime, 'spirit-design-sheet.png')), contentType: 'image/png' }],
       ['/instrument-serif.woff2', { bytes: readFileSync(join(runtime, 'instrument-serif.woff2')), contentType: 'font/woff2' }],

@@ -1,3 +1,5 @@
+import { handleRemoteReadMcp } from '../remote/mcp';
+import { handleRemoteReadPairings } from '../remote/management';
 import { mainnetLocalGrants } from '../authority/mainnet-local-grants';
 import { recordControllerDiagnostic, controllerBackendDiagnostic, readControllerJson, parseControllerInput } from '../payment/pay-controller-diagnostics';
 import { createServer } from 'node:http';
@@ -91,6 +93,9 @@ export async function serveDevelopmentRuntime<T extends { memberId: string }>(op
   const { app, origin, port, descriptor, authority, simulator } = options;
   type Handler = (request: Request) => Promise<Response>;
   const routes = new Map<string, Handler>([
+    ['POST /api/agent/remote-mcp', request => handleRemoteReadMcp(app, request)],
+    ['POST /api/app/remote-read-pairings', request => handleRemoteReadPairings(app, request)],
+    ['GET /api/app/remote-read-pairings', request => handleRemoteReadPairings(app, request)],
     ['POST /api/app/local-grants', request => mainnetLocalGrants(request, app)],
     ['POST /api/app/local-authorization-link', request => managementRoute(request, true, async () => {
       if (!options.localAuthorizationLink) throw new ManagementApiError('LOCAL_AUTHORIZATION_UNAVAILABLE', 404, 'Local setup is unavailable.');
@@ -159,7 +164,7 @@ export async function serveDevelopmentRuntime<T extends { memberId: string }>(op
       const request = new Request(url, { method, headers, signal: lifetime.signal, ...(chunks.length ? { body: Buffer.concat(chunks) } : {}) });
       let response: Response;
       if (options.localAuthorizationOnly && url.pathname.startsWith('/api/app/') && method !== 'GET'
-        && !['/api/app/lifecycle','/api/app/local-authorization-link'].includes(url.pathname)) {
+        && !['/api/app/lifecycle','/api/app/local-authorization-link','/api/app/remote-read-pairings'].includes(url.pathname)) {
         // In C, possession of the old same-user management file is not consent.
         // Trusted confirmation commits in-process; no generic HTTP write bypass.
         response = await managementRoute(request, true, async () => {

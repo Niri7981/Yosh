@@ -28,7 +28,7 @@ export function nativeStatementConfirmation(binary: string, expectedHash: string
     return confirmNative(binary, expectedHash, bytes, createHash('sha256').update(bytes).digest('hex'), request, signal);
   };
 }
-async function confirmNative(binary: string, expectedHash: string, bytes: string, digest: string,
+export async function confirmNative(binary: string, expectedHash: string, bytes: string, digest: string,
   request: { challenge: string; expiresAt: number }, signal?: AbortSignal) {
     if (signal?.aborted) throw new Error('LOCAL_STATEMENT_REQUEST_CANCELLED');
     const file = lstatSync(binary);

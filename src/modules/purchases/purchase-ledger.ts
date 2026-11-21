@@ -3,6 +3,7 @@ import { canShareSavedResult } from './account-result-policy';
 import { accountStatement } from './account-statement';
 import type { ResultQuery, StatementQuery } from '../mcp/account-read-contract';
 import { MAX_SERIALIZED_RESOURCE_DELIVERY_BYTES } from '../resources/http-resource';
+import { RemoteReadPairings, pairingRequest, purchasePairingRequest, type ReadScope } from '../remote/pairings';
 import { LocalControlApprovals, type LocalControlReceipt } from '../authority/local-control-approval';
 import { PaymentFailureDetails, readPaymentFailure } from '../payment/pay-controller-diagnostics';
 import { ExecutionSafety, type ExternalExecutionFacts, type ExternalExecutionPermit } from './execution-safety';
@@ -97,6 +98,8 @@ function isLiveMode(mode: StoredPurchaseExecutionMode | undefined) {
 /** SQLite owns approval, budget reservation and the unique task purchase. No model writes. */
 export class PurchaseLedger {
   private db: DatabaseSync;
+  private remotePairingStore?: RemoteReadPairings;
+  remoteReadPairings() { return this.remotePairingStore ??= new RemoteReadPairings(this.db); }
   private localApprovals?: LocalGrantApprovals;
   private statementPairings?: LocalStatementPairings;
   localStatementPairings() { return this.statementPairings ??= new LocalStatementPairings(this.db); }
@@ -388,13 +391,38 @@ export class PurchaseLedger {
     if (!this.managed) return [];
     return this.db.prepare('SELECT * FROM card_members ORDER BY is_default DESC, created_at, id').all().map(row => this.parseCardMemberRow(row));
   }
-  createCardMember(label: string, now = this.now()) {
+  private insertCardMember(label: string, now: number) {
     if (!this.managed) throw new Error('CardMember identity requires a managed ledger');
     const cleanLabel = CardMemberSchema.shape.label.parse(label);
     const id = randomUUID();
-    this.atomic(() => this.db.prepare("INSERT INTO card_members (id,label,status,is_default,created_at,updated_at) VALUES (?,?,'ACTIVE',0,?,?)")
-      .run(id, cleanLabel, now, now));
-    return this.cardMember(id)!;
+    this.db.prepare("INSERT INTO card_members (id,label,status,is_default,created_at,updated_at) VALUES (?,?,'ACTIVE',0,?,?)")
+      .run(id, cleanLabel, now, now);
+    return id;
+  }
+  createCardMember(label: string, now = this.now()) {
+    return this.cardMember(this.atomic(() => this.insertCardMember(label, now)))!;
+  }
+  issueRemoteReadPairing(label: string, scopes: readonly ReadScope[], scope: MonetaryScope) {
+    const request = pairingRequest.parse({ label, scopes });
+    const now = this.now();
+    return this.atomic(() => this.remoteReadPairings().issue(this.insertCardMember(label, now), request, scope, now));
+  }
+  issueRemotePurchasePairing(label: string, scope: MonetaryScope) {
+    if (scope.environment !== 'simulated' || !scope.walletIdentity.startsWith('sandbox:')) throw Error('REMOTE_PURCHASE_SIMULATED_ONLY');
+    const request = purchasePairingRequest.parse({ label, scopes: ['purchase'] });
+    const now = this.now();
+    return this.atomic(() => this.remoteReadPairings().issue(this.insertCardMember(label, now), request, scope, now));
+  }
+  revokeSimulatedPairingGrant(principal: SpendPrincipal, grantId: string, resourceId: string, now: number) {
+    const scope = this.scope('simulated');
+    if (!scope.walletIdentity.startsWith('sandbox:')) throw Error('REMOTE_PURCHASE_SIMULATED_ONLY');
+    return this.atomic(() => {
+      const row = this.db.prepare("UPDATE spend_grants SET status='REVOKED',revoked_at=? WHERE id=? AND card_member_id=? AND connection_id=? AND connection_generation=? AND monetary_scope_id=? AND resource_id=? AND status='ACTIVE' RETURNING id")
+        .get(now, grantId, principal.cardMemberId, principal.connectionId, principal.connectionGeneration, monetaryScopeId(scope), resourceId);
+      if (!row) throw Error('REMOTE_PURCHASE_GRANT_CHANGED');
+      this.grantEvent(grantId, 'grant.REVOKED', now);
+      return { revoked: true };
+    });
   }
   renameCardMember(id: string, label: string, now = this.now()) {
     const cleanLabel = CardMemberSchema.shape.label.parse(label);
@@ -988,18 +1016,19 @@ export class PurchaseLedger {
     });
   }
   claim(approvalId: string, now = this.now(), validate?: (record: PurchaseRecord) => void, expectedMode?: PurchaseExecutionMode, permit?: ExternalExecutionPermit): SpendReservation {
-    return this.atomic(() => {
-      if (this.stopping) throw new Error('Service is stopping');
-      const record = this.recordForApproval(approvalId);
-      this.executionSafety.assert(record, permit, now);
-      if (expectedMode && record.executionMode !== expectedMode) throw new Error('PURCHASE_EXECUTION_MODE_MISMATCH');
-      validate?.(record);
-      this.assertReservedExecution(record, now);
-      this.db.prepare("UPDATE purchases SET status=? WHERE approval_id=? AND status='APPROVED'").run(purchaseStatusAfter(record.status, 'START_PAYMENT'), approvalId);
-      this.executionSafety.phase(record, 'CLAIMED');
-      this.event(record.intent.id, 'payment.PAYING');
-      return this.recordForApproval(approvalId);
-    });
+    return this.atomic(() => this.claimLocked(approvalId, now, validate, expectedMode, permit));
+  }
+  private claimLocked(approvalId: string, now: number, validate?: (record: PurchaseRecord) => void, expectedMode?: PurchaseExecutionMode, permit?: ExternalExecutionPermit) {
+    if (this.stopping) throw new Error('Service is stopping');
+    const record = this.recordForApproval(approvalId);
+    this.executionSafety.assert(record, permit, now);
+    if (expectedMode && record.executionMode !== expectedMode) throw new Error('PURCHASE_EXECUTION_MODE_MISMATCH');
+    validate?.(record);
+    this.assertReservedExecution(record, now);
+    this.db.prepare("UPDATE purchases SET status=? WHERE approval_id=? AND status='APPROVED'").run(purchaseStatusAfter(record.status, 'START_PAYMENT'), approvalId);
+    this.executionSafety.phase(record, 'CLAIMED');
+    this.event(record.intent.id, 'payment.PAYING');
+    return this.recordForApproval(approvalId);
   }
   savePayload(approvalId: string, payload: unknown, validate?: (record: PurchaseRecord) => void, original?: OriginalPaymentRecord, permit?: ExternalExecutionPermit) {
     this.atomic(() => {
@@ -1199,27 +1228,40 @@ export class PurchaseLedger {
     this.atomic(() => this.recordConfirmation(approvalId, transaction, verification, now));
   }
   finish(approvalId: string, result: { transaction: string; data: unknown }, now = Date.now(), deliveryClaim?: string) {
-    this.atomic(() => {
-      const data = z.json().parse(result.data);
-      const row = this.db.prepare('SELECT task_id,owner_card_member_id,status,execution_mode FROM purchases WHERE approval_id=?').get(approvalId);
-      if (!row) throw new Error('Unknown approval');
-      const record = this.recordForApproval(approvalId);
-      this.assertSafeDelivery(approvalId, data);
-      if (record?.executionMode === 'simulated') {
-        if (!result.transaction.startsWith('simulated-') || !['PAYING', 'PAID'].includes(record.status)) throw new Error('Simulated purchase cannot be completed from this state');
-        if (record.status !== 'PAID') {
-          const paid = this.db.prepare("UPDATE purchases SET status=?,transaction_id=?,confirmed_day=? WHERE approval_id=? AND status='PAYING' RETURNING id")
-            .get(purchaseStatusAfter(record.status, 'CONFIRM_SIMULATED_PAYMENT'), result.transaction, this.activeDay(now, record.monetaryScope), approvalId);
-          if (!paid) throw new Error('Simulated purchase cannot be completed from this state');
-          this.event(String(paid.id), 'payment.PAID');
-        } else if (record.transaction !== result.transaction) throw new Error('Simulated transaction changed');
-      } else if (!record || record.status !== 'PAID' || !this.hasVerifiedPaymentProof(record)) {
-        throw new Error('LIVE_PAYMENT_EVIDENCE_INVALID');
-      }
-      if (result.transaction !== record!.transaction && record!.executionMode !== 'simulated') throw new Error('DELIVERY_TRANSACTION_MISMATCH');
-      if (!this.delivery.complete(record!.intent.id, deliveryClaim)) return;
-      const saved = this.db.prepare('UPDATE purchases SET data=? WHERE approval_id=? AND data IS NULL RETURNING id').get(JSON.stringify(data), approvalId);
-      if (saved) this.event(String(saved.id), 'delivery.COMPLETE');
+    this.atomic(() => this.finishLocked(approvalId, result, now, deliveryClaim));
+  }
+  private finishLocked(approvalId: string, result: { transaction: string; data: unknown }, now: number, deliveryClaim?: string) {
+    const data = z.json().parse(result.data);
+    const row = this.db.prepare('SELECT task_id,owner_card_member_id,status,execution_mode FROM purchases WHERE approval_id=?').get(approvalId);
+    if (!row) throw new Error('Unknown approval');
+    const record = this.recordForApproval(approvalId);
+    this.assertSafeDelivery(approvalId, data);
+    if (record?.executionMode === 'simulated') {
+      if (!result.transaction.startsWith('simulated-') || !['PAYING', 'PAID'].includes(record.status)) throw new Error('Simulated purchase cannot be completed from this state');
+      if (record.status !== 'PAID') {
+        const paid = this.db.prepare("UPDATE purchases SET status=?,transaction_id=?,confirmed_day=? WHERE approval_id=? AND status='PAYING' RETURNING id")
+          .get(purchaseStatusAfter(record.status, 'CONFIRM_SIMULATED_PAYMENT'), result.transaction, this.activeDay(now, record.monetaryScope), approvalId);
+        if (!paid) throw new Error('Simulated purchase cannot be completed from this state');
+        this.event(String(paid.id), 'payment.PAID');
+      } else if (record.transaction !== result.transaction) throw new Error('Simulated transaction changed');
+    } else if (!record || record.status !== 'PAID' || !this.hasVerifiedPaymentProof(record)) {
+      throw new Error('LIVE_PAYMENT_EVIDENCE_INVALID');
+    }
+    if (result.transaction !== record!.transaction && record!.executionMode !== 'simulated') throw new Error('DELIVERY_TRANSACTION_MISMATCH');
+    if (!this.delivery.complete(record!.intent.id, deliveryClaim)) return;
+    const saved = this.db.prepare('UPDATE purchases SET data=? WHERE approval_id=? AND data IS NULL RETURNING id').get(JSON.stringify(data), approvalId);
+    if (saved) this.event(String(saved.id), 'delivery.COMPLETE');
+  }
+  /** No external action exists between claim and delivery in the deterministic simulator. */
+  settleSimulatedApproval(approvalId: string, now: number, data: unknown) {
+    return this.atomic(() => {
+      const record = this.claimLocked(approvalId, now, candidate => {
+        if (!candidate.monetaryScope.walletIdentity.startsWith('sandbox:') || candidate.monetaryScope.walletIdentity !== this.scope('simulated').walletIdentity ||
+            candidate.intent.resourceId !== 'market-snapshot' || candidate.intent.paymentScheme !== 'simulated')
+          throw Error('REMOTE_PURCHASE_SIMULATED_ONLY');
+      }, 'simulated');
+      this.finishLocked(approvalId, { transaction: 'simulated-' + record.intent.id, data }, now);
+      return this.recordForApproval(approvalId);
     });
   }
   unknown(approvalId: string, transaction?: string) {
@@ -1378,6 +1420,10 @@ export class PurchaseLedger {
     if (committed > atomicAmount(grant.totalLimit)) throw new Error('Spend grant no longer covers reserved payments');
   }
   private grantOperationCoversIntent(grant: SpendGrant, intent: SpendIntent) {
+    // Remote purchase connections never rotate in place. A separately issued pairing
+    // or local credential is not the principal named in this simulation grant.
+    if (intent.paymentScheme === 'simulated' && (grant.connectionId !== intent.authority?.connectionId ||
+        grant.connectionGeneration !== intent.authority.connectionGeneration)) return false;
     if (grant.operation === PAID_RESOURCE_PURCHASE_OPERATION) return true;
     // Existing grants and in-flight purchases keep their original stored binding.
     return grant.operation === LEGACY_MARKET_SNAPSHOT_OPERATION &&

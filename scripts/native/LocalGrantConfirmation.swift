@@ -10,6 +10,15 @@ private struct StatementPairing: Decodable {
     let version: Int; let environment: String; let scope: String; let agentLabel: String
     let registrationHash: String; let createdAt: Int64; let expiresAt: Int64; let challenge: String
 }
+private struct RemoteReadRequest: Decodable {
+    let version: Int; let challenge: String; let createdAt: Int64; let expiresAt: Int64
+    let label: String; let account: String; let environment: String; let scopes: [String]
+}
+private struct SimulatedPurchaseConsent: Decodable {
+    let version: Int; let action: String; let challenge: String; let createdAt: Int64; let expiresAt: Int64
+    let label: String; let account: String; let environment: String
+    let pairingId: String?; let resourceId: String?; let totalLimit: String?; let singleLimit: String?; let grantExpiresAt: Int64?
+}
 private struct GrantInput: Decodable { let totalLimit: String; let singleLimit: String; let expiresAt: Int64 }
 private struct Principal: Decodable { let cardMemberId: String; let connectionId: String; let connectionGeneration: Int }
 private struct Scope: Decodable {
@@ -115,6 +124,47 @@ struct LocalGrantConfirmation {
                 title: "允许 \(r.agentLabel) 查看账单？",
                 details: "范围：此账户所有 Agent 的主网消费记录、已付和预占金额。\n此连接仅可查询账单，不授予消费额度。\n\n连接标识：\(r.registrationHash.prefix(12))",
                 challenge: r.challenge, expiresAt: r.expiresAt, agentLabel: r.agentLabel)
+        }
+        if object?["kind"] as? String == "remote-simulated-purchase" {
+            let r = try JSONDecoder().decode(SimulatedPurchaseConsent.self, from: bytes)
+            guard r.version == 1, r.environment == "simulated", r.createdAt > 0, r.createdAt <= now, now < r.expiresAt,
+                  r.expiresAt - r.createdAt <= 120_000, !r.label.isEmpty, r.label.count <= 80,
+                  !r.account.isEmpty, r.account.count <= 256,
+                  [r.label, r.account].allSatisfy({ $0.rangeOfCharacter(from: .controlCharacters.union(.newlines)) == nil }) else { throw Failure.rejected }
+            _ = try hexData(r.challenge)
+            let title: String, details: String
+            switch r.action {
+            case "pair":
+                guard r.pairingId == nil, r.resourceId == nil, r.totalLimit == nil, r.singleLimit == nil, r.grantExpiresAt == nil else { throw Failure.rejected }
+                title = "配对模拟购买 Agent？"
+                details = "允许此 Agent 申请购买和查自己的订单。配对不分配消费额度，还需要另行确认 Grant。"
+            case "grant":
+                guard let id = r.pairingId, UUID(uuidString: id) != nil, r.resourceId == "market-snapshot",
+                      let total = r.totalLimit, let single = r.singleLimit, let t = UInt64(total), let v = UInt64(single),
+                      v > 0, v <= t, let expiry = r.grantExpiresAt, expiry > now else { throw Failure.rejected }
+                title = "确认模拟消费授权？"
+                let expiration = Date(timeIntervalSince1970: Double(expiry) / 1000).formatted(date: .abbreviated, time: .standard)
+                details = "商品：SOL Market Snapshot (market-snapshot)\n单笔上限：\(try amount(single))\n总额上限：\(try amount(total))\n到期：\(expiration)\n配对 ID：\(id)\n同一模拟钱包的共享日额度仍然生效。"
+            default: throw Failure.rejected
+            }
+            return Presentation(authenticationReason: "确认 Yosh 对 \(r.label) 的模拟购买设置（\(digest.prefix(8))）", title: title,
+                details: "Agent：\(r.label)\n账号：\(r.account)\n环境：隔离模拟钱包，无真实资金\n\n\(details)",
+                challenge: r.challenge, expiresAt: r.expiresAt, agentLabel: r.label)
+        }
+        if object?["kind"] as? String == "remote-read" {
+            let r = try JSONDecoder().decode(RemoteReadRequest.self, from: bytes)
+            let fields = [r.label, r.account, r.environment]
+            guard r.version == 1, r.createdAt > 0, r.createdAt <= now, now < r.expiresAt,
+                  r.expiresAt - r.createdAt <= 120_000, r.label.count <= 120,
+                  fields.allSatisfy({ !$0.isEmpty && $0.count <= 256 && $0.rangeOfCharacter(from: .controlCharacters.union(.newlines)) == nil }),
+                  !r.scopes.isEmpty, r.scopes.count == Set(r.scopes).count,
+                  Set(r.scopes).isSubset(of: ["statement", "result"]) else { throw Failure.rejected }
+            _ = try hexData(r.challenge)
+            let access = r.scopes.map { $0 == "statement" ? "查看账号内所有 Agent 的消费账单" : "读取账号内允许共享的已购结果" }.joined(separator: "；")
+            return Presentation(authenticationReason: "允许 \(r.label) 远程读取 Yosh（\(digest.prefix(8))）",
+                title: "允许这个 Agent 远程读取？",
+                details: "Agent：\(r.label)\n账号：\(r.account)\n环境：\(r.environment)\n\n允许：\(access)。\n\n这份连接不能付款。你可以单独撤销它；已送达的数据无法收回。",
+                challenge: r.challenge, expiresAt: r.expiresAt, agentLabel: r.label)
         }
         if object?["kind"] as? String == "control" {
             let r = try JSONDecoder().decode(ControlRequest.self, from: bytes)
