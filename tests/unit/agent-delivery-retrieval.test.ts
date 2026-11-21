@@ -1,12 +1,16 @@
 import { expect, it, vi } from 'vitest';
-const state = vi.hoisted(() => ({ record: null as null | { status: string; deliveryStatus: string; data: unknown }, owner: 'member-1' }));
+const state = vi.hoisted(() => ({ record: null as null | { status: string; deliveryStatus: string; data: unknown }, owner: 'member-1', capabilities: ['read'] }));
 vi.mock('../../src/modules/app/app-runtime', () => ({ appRuntime: () => ({
-  authenticateAgent: () => ({ cardMemberId: state.owner }),
+  authenticateAgent: (_request: Request, scope = 'read') => {
+    if (!state.capabilities.includes(scope)) throw new Error('AGENT_UNAUTHORIZED');
+    return { cardMemberId: state.owner };
+  },
   ledger: { getOwned: (_id: string, memberId: string) => memberId === 'member-1' ? state.record : null },
 }) }));
 import { GET } from '../../src/app/api/agent/purchases/[purchaseId]/delivery/route';
 
 it('returns bounded, resumable bytes only for an owned completed delivery', async () => {
+  state.owner = 'member-1'; state.capabilities = ['read'];
   const payload = { result: 'data'.repeat(12_000) };
   state.record = { status: 'PAID', deliveryStatus: 'COMPLETE', data: payload };
   const pieces: Buffer[] = [];
@@ -30,4 +34,18 @@ it('returns bounded, resumable bytes only for an owned completed delivery', asyn
   const pending = await GET(new Request('http://127.0.0.1/api/agent/purchases/owned/delivery'),
     { params: Promise.resolve({ purchaseId: 'owned' }) });
   expect(pending.status).toBe(404);
+});
+
+it('lets a purchase-only member read only their delivered order and denies a statement-only or revoked member', async () => {
+  const call = () => GET(new Request('http://127.0.0.1/api/agent/purchases/owned/delivery'),
+    { params: Promise.resolve({ purchaseId: 'owned' }) });
+  state.record = { status: 'PAID', deliveryStatus: 'COMPLETE', data: { answer: 42 } };
+  state.owner = 'member-1'; state.capabilities = ['request_purchase'];
+  expect((await call()).status).toBe(200);
+  state.owner = 'other';
+  expect((await call()).status).toBe(404);
+  state.owner = 'member-1'; state.capabilities = ['read_statement'];
+  expect((await call()).status).toBe(401);
+  state.capabilities = [];
+  expect((await call()).status).toBe(401);
 });

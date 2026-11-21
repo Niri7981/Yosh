@@ -1,4 +1,8 @@
-import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import type { ConfirmLocalGrant } from '../../src/modules/authority/native-grant-confirmation';
+import type { ConfirmStatementPairing } from '../../src/modules/authority/local-statement-pairing';
+import { handleAccountRead } from '../../src/modules/mcp/account-read-route';
+import { mkdtempSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
@@ -6,7 +10,9 @@ import { AppRuntime } from '../../src/modules/app/app-runtime';
 import { CodexIntegration } from '../../src/modules/mcp/codex-integration';
 import { readConnection } from '../../src/modules/mcp/connection';
 import { preparePayMainnetCutover } from '../../src/modules/payment/pay-mainnet-control';
-import { MAINNET_GENESIS, resolvePaymentEnvironment } from '../../src/modules/payment/payment-environment';
+import * as mppCharge from '../../src/modules/payment/mpp-resource-charge';
+import { MppChargeQuoteSchema } from '../../src/modules/payment/mpp-contract';
+import { MAINNET_GENESIS, TOKEN_PROGRAM, resolvePaymentEnvironment } from '../../src/modules/payment/payment-environment';
 import { preparePayUnsigned } from '../../src/modules/payment/pay-unsigned-preflight';
 import { loadBuyerSigner } from '../../src/modules/payment/wallet';
 import { PurchaseLedger } from '../../src/modules/purchases/purchase-ledger';
@@ -67,9 +73,9 @@ function fixture() {
     } else throw new Error('UNEXPECTED_FIXTURE_CODEX_COMMAND');
     persist(); return '';
   });
-  const open = (standalone = true, binary = payMcpPath) => {
-    const app = new AppRuntime(directory, { codex: { run }, initializeWallet: async () => ({ address: buyer, reused: true }),
-      ...(standalone ? { hosting: { kind: 'mainnet-standalone' as const, payMcpPath: binary, runtimeDigest } } : {}) });
+  const open = (standalone = true, binary = payMcpPath, confirmStatementPairing?: ConfirmStatementPairing, confirmPurchaseGrant?: ConfirmLocalGrant, fetcher?: typeof fetch, legacyMemberForRegistration?: (registration: string, label: string) => string | null) => {
+    const app = new AppRuntime(directory, { codex: { run }, fetcher, initializeWallet: async () => ({ address: buyer, reused: true }),
+      ...(standalone ? { hosting: { kind: 'mainnet-standalone' as const, payMcpPath: binary, runtimeDigest, purchaseResourceLookup: true, confirmStatementPairing, confirmPurchaseGrant, legacyMemberForRegistration, mppProtocolEnginePath: join(packaged, 'mpp-protocol-engine') } } : {}) });
     runtimes.add(app); return app;
   };
   return { directory, memberId, payMcpPath, runtimeDigest, configPath, recordPath: integration.recordPath, run, open, buyer, resource };
@@ -155,4 +161,332 @@ it('prepayment recovery after standalone restart uses its packaged Pay binary an
   expect(readConnection(f.directory)).toEqual(connection);
   expect(loadBuyerSigner).not.toHaveBeenCalled();
   expect(f.run).not.toHaveBeenCalled();
+});
+
+it('pairs only after native confirmation, scopes the credential, and honors revocation across launches', async () => {
+  const f = fixture();
+  const origin = 'http://127.0.0.1:3049';
+  const registration = { hostId: randomUUID(), label: 'Example host' };
+  let allow: () => void = () => { throw new Error('Missing pending confirmation'); };
+  const confirm = vi.fn(async () => new Promise<void>(resolve => { allow = resolve; }));
+  let app = f.open(true, f.payMcpPath, confirm);
+  const before = app.ledger.cardMembers();
+  const first = app.pairStatementHost(registration, origin);
+  const duplicate = app.pairStatementHost(registration, origin);
+  expect(app.ledger.cardMembers()).toEqual(before);
+  await expect(app.pairStatementHost({ ...registration, hostId: randomUUID() }, origin)).rejects.toThrow('LOCAL_CONFIRMATION_BUSY');
+  allow();
+  const paired = await first;
+  expect(await duplicate).toEqual(paired);
+  expect(confirm).toHaveBeenCalledTimes(1);
+  const descriptor = readConnection(f.directory, paired.memberId);
+  expect(descriptor.capabilities).toEqual(['read_statement']);
+  expect(app.memberOverview(paired.memberId).grants).toHaveLength(0);
+  const req = new Request(origin + '/api/agent/account/statement', { headers: { authorization: 'Bearer ' + descriptor.token } });
+  expect(handleAccountRead(app, 'statement', req).status).toBe(200);
+  expect(handleAccountRead(app, 'result', req).status).toBe(401);
+  expect(() => app.authenticateAgent(req, 'request_purchase')).toThrow('AGENT_UNAUTHORIZED');
+  await app.prepareQuit(); app.close(); runtimes.delete(app);
+  app = f.open(true, f.payMcpPath, confirm);
+  expect(await app.pairStatementHost(registration, origin)).toEqual(paired);
+  await expect(app.pairStatementHost({ ...registration, label: 'Other' }, origin)).rejects.toThrow('LOCAL_STATEMENT_IDENTITY_MISMATCH');
+  expect(handleAccountRead(app, 'statement', req).status).toBe(200);
+  await app.setMemberConnection(false, origin, paired.memberId);
+  await expect(app.pairStatementHost(registration, origin)).rejects.toThrow('LOCAL_STATEMENT_CONNECTION_REVOKED');
+  expect(handleAccountRead(app, 'statement', req).status).toBe(401);
+  expect(confirm).toHaveBeenCalledTimes(1);
+  await app.setMemberConnection(true, origin, paired.memberId);
+  expect(readConnection(f.directory, paired.memberId).capabilities).toEqual(['read_statement']);
+});
+
+it('makes no member on declined first use and does not link identities by a shared display label', async () => {
+  const f = fixture();
+  const confirm = vi.fn(async () => {}).mockRejectedValueOnce(new Error('LOCAL_CONFIRMATION_DECLINED'));
+  const app = f.open(true, f.payMcpPath, confirm);
+  const origin = 'http://127.0.0.1:3049', label = 'Same label';
+  const a = { hostId: randomUUID(), label }, b = { hostId: randomUUID(), label };
+  const initial = app.ledger.cardMembers();
+  await expect(app.pairStatementHost(a, origin)).rejects.toThrow('LOCAL_CONFIRMATION_DECLINED');
+  expect(app.ledger.cardMembers()).toEqual(initial);
+  const first = await app.pairStatementHost(a, origin), second = await app.pairStatementHost(b, origin);
+  expect(first.memberId).not.toBe(second.memberId);
+  expect(app.ledger.cardMembers()).toHaveLength(initial.length + 2);
+});
+
+it('rolls back enrollment when persisting the read credential fails, allowing a clean retry', async () => {
+  const f = fixture(), origin = 'http://127.0.0.1:3049';
+  const confirm = vi.fn(async () => {});
+  const app = f.open(true, f.payMcpPath, confirm);
+  const before = app.ledger.cardMembers();
+  const registration = { hostId: randomUUID(), label: 'Fixture client' };
+  const members = join(f.directory, 'members');
+  renameSync(members, members + '.saved');
+  writeFileSync(members, 'fixture: unwriteable directory');
+  await expect(app.pairStatementHost(registration, origin)).rejects.toThrow();
+  expect(app.ledger.cardMembers()).toEqual(before);
+  rmSync(members);
+  renameSync(members + '.saved', members);
+  const { memberId } = await app.pairStatementHost(registration, origin);
+  expect(app.ledger.cardMember(memberId)?.label).toBe('Fixture client');
+  expect(app.ledger.cardMembers()).toHaveLength(before.length + 1);
+  expect(confirm).toHaveBeenCalledTimes(2);
+});
+
+it('cannot consume an approval after the originating host disconnects', async () => {
+  const f = fixture(), origin = 'http://127.0.0.1:3049', lifetime = new AbortController();
+  let finish: () => void = () => { throw new Error('Missing confirmation'); };
+  const app = f.open(true, f.payMcpPath, async (_, signal) => {
+    expect(signal).toBe(lifetime.signal);
+    await new Promise<void>(resolve => { finish = resolve; });
+  });
+  const before = app.ledger.cardMembers();
+  const input = { hostId: randomUUID(), label: 'Disconnected host' };
+  const pairing = app.pairStatementHost(input, origin, lifetime.signal);
+  lifetime.abort();
+  finish();
+  await expect(pairing).rejects.toThrow('LOCAL_STATEMENT_REQUEST_CANCELLED');
+  expect(app.ledger.cardMembers()).toEqual(before);
+});
+
+it('binds one native purchase consent to its member, request and exact quote, independently of statement consent', async () => {
+  const f = fixture(), origin = 'http://127.0.0.1:3049';
+  const registration = {hostId: randomUUID(), label: 'Local CLI'};
+  const input = {...registration, resourceId: f.resource.resourceId, reason: 'Retrieve the sample', requestId: 'sample-order'};
+  const quote = {scheme: 'exact', amount: '1000', network: f.resource.network, asset: f.resource.mint,
+    payTo: f.resource.recipient, maxTimeoutSeconds: 300, extra: {feePayer: f.resource.recipient}};
+  const challenge = {x402Version: 2, resource: {url: f.resource.request.url}, accepts: [quote]};
+  const merchant = vi.fn<typeof fetch>(async url => {
+    expect(String(url)).toBe(f.resource.request.url);
+    return new Response(null, {status: 402, headers: {'payment-required': Buffer.from(JSON.stringify(challenge)).toString('base64')}});
+  });
+  const confirm = vi.fn<ConfirmLocalGrant>(async () => {});
+  const statement = vi.fn<ConfirmStatementPairing>(async () => {});
+  let app = f.open(true, f.payMcpPath, statement, confirm, merchant);
+  confirm.mockRejectedValueOnce(new Error('LOCAL_CONFIRMATION_DECLINED'));
+  const before = app.ledger.cardMembers();
+  await expect(app.authorizeHostPurchase({...input, existingOnly: true}, origin)).rejects.toThrow('LOCAL_PURCHASE_NOT_FOUND');
+  expect(merchant).not.toHaveBeenCalled(); expect(confirm).not.toHaveBeenCalled();
+  await expect(app.authorizeHostPurchase({...input, requestId: 'declined'}, origin)).rejects.toThrow('LOCAL_CONFIRMATION_DECLINED');
+  expect(app.ledger.cardMembers()).toEqual(before);
+  expect(app.ledger.listForAdministration(50)).toHaveLength(0);
+  const [plan, duplicate] = await Promise.all([app.authorizeHostPurchase(input, origin), app.authorizeHostPurchase(input, origin)]);
+  expect(duplicate).toEqual(plan); expect(confirm).toHaveBeenCalledTimes(2);
+  expect(statement).not.toHaveBeenCalled();
+  expect(confirm.mock.calls[1][0]).toMatchObject({binding: {input: {totalLimit: '1000', singleLimit: '1000'},
+    scope: {payTo: quote.payTo}}, purchase: {requestId: input.requestId, reason: input.reason}});
+  const credential = readConnection(f.directory, plan.memberId);
+  expect(credential.capabilities).toEqual(['request_purchase']);
+  const req = new Request(origin, {headers: {authorization: 'Bearer ' + credential.token}});
+  expect(handleAccountRead(app, 'statement', req).status).toBe(401);
+  const principal = app.authenticateAgent(req, 'request_purchase');
+  const facts = {caller_id: plan.memberId, operation_id: input.requestId, attempt_id: randomUUID(), execution_network: 'mainnet',
+    request: {method: 'GET', url: plan.url, headers: [['accept', 'application/json']], body: null}, amount_atomic: quote.amount,
+    asset: quote.asset, network: quote.network, recipient: quote.payTo, accepted: quote};
+  vi.stubGlobal('fetch', vi.fn<typeof fetch>(async (_url, init) => {
+    const method = JSON.parse(String(init?.body)).method;
+    if (method !== 'getGenesisHash' && method !== 'getLatestBlockhash') throw new Error('UNEXPECTED_FIXTURE_RPC');
+    return Response.json({jsonrpc: '2.0', id: 1, result: method === 'getGenesisHash' ? MAINNET_GENESIS
+      : {value: {blockhash: f.buyer, lastValidBlockHeight: 5000}}});
+  }));
+  app.setDailyLimit('1000'); app.setPaused(false);
+  await expect(app.payMcpOperation('authorize', {...facts, operation_id: 'unreviewed'}, principal, origin)).rejects.toThrow('LOCAL_PURCHASE_CONSENT_REQUIRED');
+  await expect(app.payMcpOperation('authorize', {...facts, accepted: {...quote, amount: '999'}}, principal, origin)).rejects.toThrow('LOCAL_PURCHASE_BINDING_MISMATCH');
+  expect(await app.payMcpOperation('authorize', facts, principal, origin)).toEqual({allow: true});
+  await app.payMcpOperation('plan', {facts: {...facts, payment_required: challenge}}, principal, origin);
+  expect(app.ledger.listForOwner(plan.memberId)[0].status).toBe('APPROVED');
+  expect(loadBuyerSigner).not.toHaveBeenCalled();
+  await app.prepareQuit(); app.close(); runtimes.delete(app);
+  app = f.open(true, f.payMcpPath, statement, confirm, merchant);
+  expect(await app.authorizeHostPurchase(input, origin)).toEqual(plan);
+  await expect(app.authorizeHostPurchase({...input, reason: 'Other request'}, origin)).rejects.toThrow('LOCAL_PURCHASE_BINDING_MISMATCH');
+  expect(confirm).toHaveBeenCalledTimes(2);
+  await app.pairStatementHost(registration, origin);
+  expect(statement).toHaveBeenCalledTimes(1);
+  expect(handleAccountRead(app, 'statement', req).status).toBe(401);
+  const updated = readConnection(f.directory, plan.memberId);
+  expect(updated.capabilities).toEqual(['request_purchase','read_statement']);
+  expect(handleAccountRead(app, 'statement', new Request(origin, {headers: {authorization: 'Bearer ' + updated.token}})).status).toBe(200);
+});
+
+it('keeps an established host identity and its standing grant across one-shot approvals and retries', async () => {
+  const f = fixture(), origin = 'http://127.0.0.1:3049';
+  const quote = {scheme: 'exact', amount: f.resource.amount, network: f.resource.network, asset: f.resource.mint,
+    payTo: f.resource.recipient, maxTimeoutSeconds: 300, extra: {feePayer: f.resource.recipient}};
+  const merchant = vi.fn<typeof fetch>(async url => {
+    expect(String(url)).toBe(f.resource.request.url);
+    return new Response(null, {status: 402, headers: {'payment-required': Buffer.from(JSON.stringify({
+      x402Version: 2, resource: {url: f.resource.request.url}, accepts: [quote]})).toString('base64')}});
+  });
+  const registration = {hostId: randomUUID(), label: 'Established client'};
+  const resolver = (id: string, label: string) => id === registration.hostId && label === registration.label ? 'default' : null;
+  const confirm = vi.fn<ConfirmLocalGrant>(async () => {});
+  const app = f.open(true, f.payMcpPath, undefined, confirm, merchant, resolver);
+  app.setAgentConnection(true, origin); await app.initializeWallet();
+  const credential = readConnection(f.directory), before = app.ledger.cardMembers();
+  const input = {...registration, requestId: 'first', resourceId: f.resource.resourceId, reason: 'Market price'};
+  expect(await app.authorizeHostPurchase(input, origin)).toMatchObject({memberId: f.memberId});
+  expect(app.ledger.cardMembers()).toEqual(before);
+  expect(readConnection(f.directory)).toEqual(credential);
+  expect(confirm).toHaveBeenCalledTimes(1);
+  await app.createSpendGrant({resourceId: f.resource.resourceId, singleLimit: '200', totalLimit: '10000', expiresAt: Date.now() + 3600_000});
+  const small = app.spendGrantSummary()!;
+  expect(await app.authorizeHostPurchase({...input, requestId: 'second'}, origin)).toMatchObject({memberId: f.memberId});
+  expect(confirm).toHaveBeenCalledTimes(2);
+  expect(app.ledger.spendGrantById(small.id)!.status).toBe('ACTIVE');
+  const broad = await app.createSpendGrant({resourceId: f.resource.resourceId, singleLimit: '2000', totalLimit: '10000', expiresAt: Date.now() + 3600_000});
+  for (const requestId of ['under-budget', 'also-under-budget', 'under-budget']) {
+    await app.authorizeHostPurchase({...input, requestId}, origin);
+    const permit = app.ledger.localPurchaseConsent(f.memberId, requestId);
+    expect(permit?.grantId).toEqual(broad.id);
+  }
+  expect(confirm).toHaveBeenCalledTimes(2);
+  expect(app.ledger.listForAdministration(50)).toHaveLength(0);
+  expect(loadBuyerSigner).not.toHaveBeenCalled();
+});
+
+it('uses the exact confirmed MPP challenge and independent fee ceiling, with no second merchant challenge or signature', async () => {
+  const f = fixture(), origin = 'http://127.0.0.1:3049', expiresAt = Date.now() + 240_000;
+  const input = {hostId: randomUUID(), label: 'Local agent', requestId: 'mpp-order', resourceId: 'mpp-api', reason: 'Query price'};
+  const request = {amount: '1000', currency: f.resource.mint, recipient: f.resource.recipient,
+    methodDetails: {network: 'mainnet', decimals: 6, tokenProgram: TOKEN_PROGRAM}};
+  const quote = MppChargeQuoteSchema.parse({protocol: 'mpp', method: 'solana', intent: 'charge', scheme: 'mpp_charge',
+    network: f.resource.network, asset: f.resource.mint, payTo: f.resource.recipient, amount: '1000', expiresAt,
+    challenge: {id: 'opaque-id', realm: 'fixture', method: 'solana', intent: 'charge', expires: new Date(expiresAt).toISOString(),
+      request: Buffer.from(JSON.stringify(request)).toString('base64url')}, challengeHeader: 'Payment fixture'});
+  const merchant = vi.spyOn(mppCharge, 'fetchMppResourceQuote').mockResolvedValue(quote);
+  const confirm = vi.fn<ConfirmLocalGrant>(async () => {});
+  const app = f.open(true, f.payMcpPath, undefined, confirm);
+  app.addRegisteredResource({resourceId: input.resourceId, displayName: 'MPP', providerId: 'fixture', paymentProtocol: 'mpp_solana_charge',
+    request: {method: 'GET', url: 'https://mpp.invalid/data', headers: {}, access: 'https'},
+    network: f.resource.network, mint: f.resource.mint, decimals: 6, recipientSource: 'live_challenge', maximumAmount: '1000'});
+  await expect(app.authorizeHostPurchase(input, origin)).rejects.toThrow('MPP_NETWORK_FEE_CONSENT_REQUIRED');
+  expect(confirm).not.toHaveBeenCalled();
+  const plan = await app.authorizeHostPurchase({...input, maximumNetworkFeeLamports: '10000'}, origin);
+  expect(confirm.mock.calls[0][0].binding.scope.maximumNetworkFeeLamports).toBe('10000');
+  expect(plan.protocol).toBe('mpp');
+  const connection = readConnection(f.directory, plan.memberId);
+  const principal = app.authenticateAgent(new Request(origin, {headers: {authorization: 'Bearer ' + connection.token}}), 'request_purchase');
+  app.setPaused(true);
+  const order = {requestId: input.requestId, resourceId: input.resourceId, reason: input.reason};
+  expect(await app.requestMppPurchase(order, origin, principal)).toMatchObject({status: 'DENIED'});
+  expect(app.ledger.getOwned(order.requestId, plan.memberId)?.intent.mpp).toEqual(quote);
+  expect(merchant).toHaveBeenCalledTimes(1);
+  expect(loadBuyerSigner).not.toHaveBeenCalled();
+});
+
+it('presents and binds the full registered GET query, enforcing the declared fields before consent', async () => {
+  const f = fixture(), origin = 'http://127.0.0.1:3049', endpoint = 'https://example.invalid/prices';
+  const input = {hostId: randomUUID(), label: 'Price agent', resourceId: 'price-api', requestId: 'price', reason: 'Get prices'};
+  const request = {query: {currency: 'usd', coins: 'BTC,ETH,SOL'}};
+  const fullUrl = endpoint + '?coins=BTC%2CETH%2CSOL&currency=usd';
+  const quote = {scheme: 'exact', amount: '1000', network: f.resource.network, asset: f.resource.mint, payTo: f.resource.recipient,
+    maxTimeoutSeconds: 300, extra: {feePayer: f.resource.recipient}};
+  const fetcher = vi.fn<typeof fetch>(async url => {
+    expect(String(url)).toBe(fullUrl);
+    return new Response(null, {status: 402, headers: {'payment-required': Buffer.from(JSON.stringify(
+      {x402Version: 2, resource: {url: endpoint}, accepts: [quote]})).toString('base64')}});
+  });
+  const confirm = vi.fn<ConfirmLocalGrant>(async () => {});
+  const app = f.open(true, f.payMcpPath, undefined, confirm, fetcher);
+  app.addRegisteredResource({resourceId: input.resourceId, displayName: 'Price API', providerId: 'fixture',
+    request: {method: 'GET', url: endpoint, headers: {}, access: 'https'}, requestInputs: {query: {
+      coins: {type: 'string', required: true}, currency: {type: 'string', required: true, enum: ['usd']}}},
+    network: f.resource.network, mint: f.resource.mint, decimals: 6, recipientSource: 'live_challenge', maximumAmount: '1000'});
+  await expect(app.authorizeHostPurchase({...input, request: {query: {address: 'wrong'}}}, origin)).rejects.toThrow();
+  expect(confirm).not.toHaveBeenCalled(); expect(fetcher).not.toHaveBeenCalled();
+  expect(await app.authorizeHostPurchase({...input, request}, origin)).toMatchObject({url: fullUrl});
+  expect(confirm.mock.calls[0][0].purchase?.url).toBe(fullUrl);
+  await expect(app.authorizeHostPurchase({...input, request: {query: {...request.query, coins: 'BTC'}}}, origin))
+    .rejects.toThrow('LOCAL_PURCHASE_BINDING_MISMATCH');
+});
+
+it('classifies the unsigned merchant exchange before opening a purchase prompt or reserving funds', async () => {
+  const f = fixture(), origin = 'http://127.0.0.1:3049';
+  const input = {hostId: randomUUID(), label: 'Fixture caller', resourceId: f.resource.resourceId, requestId: 'quote-error', reason: 'Read prices'};
+  const fetcher = vi.fn<typeof fetch>()
+    .mockRejectedValueOnce(Object.assign(new Error('private host'), {code: 'ENOTFOUND'}))
+    .mockResolvedValueOnce(new Response(null, {status: 503}))
+    .mockResolvedValueOnce(new Response(null, {status: 402, headers: {'payment-required': 'malformed'}}))
+    .mockRejectedValueOnce(new Error('RESOURCE_DESTINATION_UNSAFE'));
+  const confirm = vi.fn<ConfirmLocalGrant>();
+  const app = f.open(true, f.payMcpPath, undefined, confirm, fetcher);
+  const wallet = vi.spyOn(app, 'initializeWallet');
+  await expect(app.authorizeHostPurchase({...input, request: {query: {symbols: 'A,B'}}}, origin))
+    .rejects.toThrow('LOCAL_PURCHASE_QUERY_NOT_ALLOWED');
+  expect(wallet).not.toHaveBeenCalled();
+  expect(fetcher).not.toHaveBeenCalled();
+  for (const code of ['LOCAL_PURCHASE_QUOTE_UNAVAILABLE', 'LOCAL_PURCHASE_QUOTE_UNAVAILABLE',
+    'LOCAL_PURCHASE_QUOTE_INVALID', 'LOCAL_PURCHASE_DESTINATION_REJECTED']) {
+    await expect(app.authorizeHostPurchase(input, origin)).rejects.toThrow(code);
+  }
+  expect(confirm).not.toHaveBeenCalled();
+  expect(loadBuyerSigner).not.toHaveBeenCalled();
+  expect(app.ledger.listForAdministration(10)).toHaveLength(0);
+});
+
+it('uses a fixed registered price URL when an agent corrects an unsupported query on the same unpaid request', async () => {
+  const f = fixture(), origin = 'http://127.0.0.1:3049';
+  const endpoint = 'https://merchant.hosting.invalid/crypto-price';
+  const url = endpoint + '?coins=BTC%2CETH%2CSOL&currency=usd';
+  const resource = {...f.resource, request: {...f.resource.request, url}};
+  vi.stubEnv('YOSH_MAINNET_RESOURCES', JSON.stringify([resource]));
+  const input = {hostId: randomUUID(), label: 'Price client', requestId: 'price-order', resourceId: resource.resourceId, reason: 'Read prices'};
+  const quote = {scheme: 'exact', network: resource.network, asset: resource.mint, amount: resource.amount,
+    payTo: resource.recipient, maxTimeoutSeconds: 300, extra: {feePayer: resource.recipient}};
+  const merchant = vi.fn<typeof fetch>(async () => new Response(null, {status: 402, headers: {
+    'payment-required': Buffer.from(JSON.stringify({x402Version: 2, resource: {url: endpoint}, accepts: [quote]})).toString('base64'),
+  }}));
+  const confirm = vi.fn<ConfirmLocalGrant>(async () => { throw new Error('LOCAL_CONFIRMATION_DECLINED'); });
+  const app = f.open(true, f.payMcpPath, undefined, confirm, merchant);
+
+  await expect(app.authorizeHostPurchase({...input, request: {query: {symbols: 'BTC,ETH,SOL'}}}, origin))
+    .rejects.toThrow('LOCAL_PURCHASE_QUERY_NOT_ALLOWED');
+  expect(merchant).not.toHaveBeenCalled();
+  expect(confirm).not.toHaveBeenCalled();
+  await expect(app.authorizeHostPurchase(input, origin)).rejects.toThrow('LOCAL_CONFIRMATION_DECLINED');
+  expect(merchant.mock.calls.map(([target]) => String(target))).toEqual([url]);
+  expect(confirm).toHaveBeenCalledTimes(1);
+  expect(confirm.mock.calls[0][0]).toMatchObject({purchase: {requestId: input.requestId, url}, binding: {input: {singleLimit: '1000'}}});
+  expect(app.ledger.listForAdministration(10)).toHaveLength(0);
+  expect(app.ledger.managedSummary(Date.now(), 'live_mainnet')).toMatchObject({paid: '0', reserved: '0'});
+  expect(loadBuyerSigner).not.toHaveBeenCalled();
+});
+
+it('describes only the active GET purchase contract to a registered host before any consent or merchant call', () => {
+  const f = fixture();
+  const host = {hostId: randomUUID(), label: 'Installed agent'};
+  const verifyHost = vi.fn((id: string, label: string) => {
+    if (id !== host.hostId || label !== host.label) throw new Error('LOCAL_HOST_REGISTRATION_INVALID');
+    return null;
+  });
+  const confirm = vi.fn<ConfirmLocalGrant>(), merchant = vi.fn<typeof fetch>();
+  const app = f.open(true, f.payMcpPath, undefined, confirm, merchant, verifyHost);
+  const fixed = app.describeHostResource({...host, resourceId: f.resource.resourceId});
+  expect(fixed).toEqual({resourceId: f.resource.resourceId, name: f.resource.resourceId, method: 'GET', protocol: 'x402',
+    query: {mode: 'fixed', fields: [], requiresAtLeastOne: false}, networkFeeCap: 'omit'});
+  const lookup = (resourceId: string) => app.describeHostResource({...host, resourceId});
+  expect(lookup('you-web-search').query).toMatchObject({mode: 'dynamic', requiresAtLeastOne: true, fields: [{name: 'query'}]});
+  const request = {method: 'GET', url: 'https://merchant.invalid/api?key=private', headers: {}, access: 'https'};
+  const template = {displayName: 'Fixture', providerId: 'fixture', request, network: f.resource.network, mint: f.resource.mint,
+    decimals: 6, recipientSource: 'live_challenge', maximumAmount: '1000'};
+  app.addRegisteredResource({...template, resourceId: 'mpp-contract', paymentProtocol: 'mpp_solana_charge',
+    requestInputs: {query: {ticker: {type: 'string', required: true, enum: ['SOL'], maxLength: 3}, units: {type: 'string'}}}});
+  expect(lookup('mpp-contract')).toEqual({resourceId: 'mpp-contract', name: 'Fixture', method: 'GET', protocol: 'mpp', networkFeeCap: 'required',
+    query: {mode: 'dynamic', requiresAtLeastOne: false, fields: [
+      {name: 'ticker', type: 'string', required: true, minLength: 1, maxLength: 3, enum: ['SOL']},
+      {name: 'units', type: 'string', required: false, minLength: 1, maxLength: 300},
+    ]}});
+  for (const [id, requestVariant] of [
+    ['post-api', {...request, method: 'POST', headers: {'content-type': 'application/json'}, body: '{}'}],
+    ['different-accept', {...request, headers: {accept: 'text/html'}}],
+  ] as const) {
+    app.addRegisteredResource({...template, request: requestVariant, resourceId: id});
+    expect(() => lookup(id)).toThrow('LOCAL_AUTHORIZATION_RESOURCE_UNSUPPORTED');
+  }
+  app.disableRegisteredResource('mpp-contract', 'DISABLED');
+  expect(() => lookup('mpp-contract')).toThrow('LOCAL_AUTHORIZATION_RESOURCE_UNSUPPORTED');
+  expect(() => lookup('unknown')).toThrow('LOCAL_AUTHORIZATION_RESOURCE_UNSUPPORTED');
+  expect(() => app.describeHostResource({...host, label: 'unregistered', resourceId: f.resource.resourceId})).toThrow('LOCAL_HOST_REGISTRATION_INVALID');
+  expect(verifyHost).toHaveBeenCalledWith(host.hostId, host.label);
+  expect(confirm).not.toHaveBeenCalled(); expect(merchant).not.toHaveBeenCalled();
 });

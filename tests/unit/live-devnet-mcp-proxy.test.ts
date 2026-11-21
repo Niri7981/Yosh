@@ -77,10 +77,10 @@ it('Devnet chooses its descriptor and forwards only its live-network flag while 
   } finally { f.close(); }
 });
 
-it('Simulation lists status only and refuses curl/recovery before forwarding anything to Pay', async () => {
+it('Simulation lists status and account reads and refuses curl/recovery before forwarding anything to Pay', async () => {
   const f = fixture('simulated');
   try {
-    expect(f.tools().map(tool => tool.name)).toEqual(['get_spending_status']);
+    expect(f.tools().map(tool => tool.name)).toEqual(['get_spending_status', 'list_account_purchases', 'read_account_result']);
     const count = f.forwarded.length;
     for (const [id, name] of [[2, 'curl'], [3, 'recover_payment']] as const) {
       f.send(id, 'tools/call', { name, arguments: {} });

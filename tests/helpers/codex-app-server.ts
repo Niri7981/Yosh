@@ -4,9 +4,9 @@ import { once } from 'node:events';
 import { z } from 'zod';
 
 /** Real Codex host, no model turn, account login, or purchase invocation. */
-export function codexHost(executable: string, home: string, cwd: string, overrides: string[] = []) {
+export function codexHost(executable: string, home: string, cwd: string, overrides: string[] = [], env = process.env) {
   const child = spawn(executable, ['app-server', '--stdio', ...overrides.flatMap(value => ['-c', value])], {
-    cwd, env: { ...process.env, CODEX_HOME: home }, stdio: ['pipe', 'pipe', 'ignore'],
+    cwd, env: { ...env, CODEX_HOME: home }, stdio: ['pipe', 'pipe', 'ignore'],
   });
   const pending = new Map<number, { method: string; resolve: (value: unknown) => void; reject: (error: Error) => void }>();
   let nextId = 0;

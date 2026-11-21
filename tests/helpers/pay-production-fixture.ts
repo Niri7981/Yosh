@@ -16,6 +16,10 @@ import { z } from 'zod';
 import { vi } from 'vitest';
 import { POST } from '../../src/app/api/agent/purchases/route';
 import { GET } from '../../src/app/api/agent/route';
+import { GET as accountStatement } from '../../src/app/api/agent/account/statement/route';
+import { GET as accountResult } from '../../src/app/api/agent/account/result/route';
+import { GET as ownerPurchase } from '../../src/app/api/agent/purchase/route';
+import { GET as ownerDelivery } from '../../src/app/api/agent/purchases/[purchaseId]/delivery/route';
 import { AppRuntime } from '../../src/modules/app/app-runtime';
 import { readConnection } from '../../src/modules/mcp/connection';
 import { paidResource } from '../../src/modules/resources/paid-resources';
@@ -170,7 +174,15 @@ export async function productionPayFixture(options: { hooks?: ExecutionOptions['
     for (const [key, value] of Object.entries(incoming.headers)) if (typeof value === 'string') headers.set(key, value);
     const request = new Request(`${origin}${incoming.url ?? '/'}`, { method: incoming.method, headers,
       ...(incoming.method === 'POST' ? { body: await requestBody(incoming) } : {}) });
-    const response = incoming.method === 'GET' ? await GET(request) : await POST(request);
+    const path = new URL(request.url).pathname;
+    const reads = new Map([['/api/agent', GET], ['/api/agent/purchase', ownerPurchase],
+      ['/api/agent/account/statement', accountStatement], ['/api/agent/account/result', accountResult]]);
+    const handler = reads.get(path);
+    const delivery = /^\/api\/agent\/purchases\/([\w-]+)\/delivery$/.exec(path);
+    const response = incoming.method === 'GET' && handler ? await handler(request)
+      : incoming.method === 'GET' && delivery ? await ownerDelivery(request, { params: Promise.resolve({ purchaseId: delivery[1] }) })
+      : incoming.method === 'POST' && path === '/api/agent/purchases' ? await POST(request)
+      : new Response(null, { status: 404 });
     if (loseAgentResponse && incoming.method === 'POST') { loseAgentResponse = false; outgoing.destroy(); return; }
     outgoing.writeHead(response.status, Object.fromEntries(response.headers));
     outgoing.end(await response.text());
