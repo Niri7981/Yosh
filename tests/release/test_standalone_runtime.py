@@ -130,7 +130,7 @@ class StandaloneArtifactTests(unittest.TestCase):
         destination = self.root / 'build.noindex/mainnet-mpp-package'
         with mock.patch.object(packager, 'ROOT', self.root): packager.package(self.output, destination)
         plugin = destination / 'marketplace/plugins/yosh-local-dev'
-        self.assertEqual(json.loads((plugin / 'plugin.json').read_text())['version'], '0.2.13')
+        self.assertEqual(json.loads((plugin / 'plugin.json').read_text())['version'], '0.2.14')
         self.manifest['mainnetMpp'] = False; self.save_manifest()
         with self.assertRaisesRegex(ValueError, 'capability mismatch'): packager.verify_runtime(self.output)
         self.manifest['mainnetMpp'] = True
@@ -173,6 +173,59 @@ class StandaloneArtifactTests(unittest.TestCase):
         self.assertFalse(any('state/' in name for name in json.loads((destination / 'package-evidence.json').read_text())['files']))
         self.manifest['files']['wallet.json'] = '0' * 64; self.save_manifest()
         with self.assertRaisesRegex(ValueError, 'Unexpected runtime file'): packager.verify_runtime(self.output)
+
+    def test_first_use_installer_requires_verified_owner_helper_and_client(self):
+        mainnet = self.local_mainnet_runtime()
+        self.manifest['firstUsePairing'] = True
+        for name in ['first-use-mcp.cjs', 'register-local-agents.mjs']:
+            (self.runtime / name).write_text('isolated client fixture')
+            self.manifest['files'][name] = packager.sha(self.runtime / name)
+        self.save_manifest()
+        with self.assertRaisesRegex(ValueError, 'confirmation helper'):
+            packager.verify_runtime(self.output)
+        mainnet['files']['yosh-confirm'] = self.manifest['files']['yosh-confirm']
+        self.save_mainnet(mainnet)
+        icon = self.root / 'plugins/yosh-dev/assets/icon.png'; icon.parent.mkdir(parents=True); icon.write_bytes(b'fixture')
+        destination = self.root / 'build.noindex/pairing-package'
+        with mock.patch.object(packager, 'ROOT', self.root): packager.package(self.output, destination)
+        install = destination / 'marketplace/Install.command'
+        self.assertTrue(install.stat().st_mode & 0o100)
+        self.assertIn('install-agents', install.read_text())
+        plugin = destination / 'marketplace/plugins/yosh-local-dev'
+        self.assertEqual(json.loads((plugin / 'plugin.json').read_text())['version'], '0.2.15')
+        with zipfile.ZipFile(destination / 'yosh-local-dev.zip') as archive:
+            self.assertIn('yosh-standalone-marketplace/Install.command', archive.namelist())
+        self.manifest['firstUsePurchases'] = True
+        self.save_manifest()
+        with self.assertRaisesRegex(ValueError, 'retained backend'):
+            packager.verify_runtime(self.output)
+        mainnet['firstUsePurchases'] = True
+        self.save_mainnet(mainnet)
+        purchase_build = self.root / 'build.noindex/purchase-package'
+        with mock.patch.object(packager, 'ROOT', self.root): packager.package(self.output, purchase_build)
+        metadata = purchase_build / 'marketplace/plugins/yosh-local-dev/plugin.json'
+        self.assertEqual(json.loads(metadata.read_text())['version'], '0.2.16')
+        self.assertIn('--upgrade-legacy-clients', (purchase_build / 'marketplace/Install.command').read_text())
+        self.manifest['purchaseResourceLookup'] = True
+        self.save_manifest()
+        with self.assertRaisesRegex(ValueError, 'resource lookup'):
+            packager.verify_runtime(self.output)
+        mainnet['purchaseResourceLookup'] = True
+        self.save_mainnet(mainnet)
+        describe_build = self.root / 'build.noindex/resource-lookup-package'
+        with mock.patch.object(packager, 'ROOT', self.root): packager.package(self.output, describe_build)
+        describe_plugin = describe_build / 'marketplace/plugins/yosh-local-dev'
+        self.assertEqual(json.loads((describe_plugin / 'plugin.json').read_text())['version'], '0.2.17')
+        self.assertIn('describe_purchase_resource', (describe_plugin / 'skills/connect-local-yosh/SKILL.md').read_text())
+        self.manifest['firstUsePurchases'] = False
+        self.save_manifest()
+        with self.assertRaisesRegex(ValueError, 'resource lookup'):
+            packager.verify_runtime(self.output)
+        self.manifest['firstUsePurchases'] = True
+        self.save_manifest()
+        (self.runtime / 'first-use-mcp.cjs').write_text('wrong client bytes')
+        with self.assertRaisesRegex(ValueError, 'integrity'):
+            packager.verify_runtime(self.output)
 
     def test_mainnet_package_contains_its_own_runtime_and_preserves_plugin_identity(self):
         self.local_mainnet_runtime()
