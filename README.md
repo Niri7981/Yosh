@@ -4,15 +4,15 @@
 
 **Let your agent buy APIs within the limits you set.** Yosh keeps wallet keys in macOS Keychain, checks each purchase against your permissions and budget, and records both payment and delivery.
 
-Use Yosh directly as a plugin in Codex. The plugin starts its own local payment backend; **Yosh.app does not need to be open**. The native macOS App remains an optional management interface, backed by the same payment core.
+Connect Codex, Claude Code or Grok CLI to the same Yosh installation on your Mac. Each agent has its own identity and spending permissions. The wallet and account statement are shared. **Yosh.app can stay closed.**
 
 ## Plugin Edition
 
-**Plugin Edition 0.2.13** combines API discovery, Spend Grants, controlled Mainnet purchases and purchase queries in one plugin, with support for x402 and MPP Solana Charge. Mainnet uses the existing Yosh wallet and records. Devnet uses separate test funds and state. Every wallet, API and purchase call selects its network explicitly.
+The local MCP lets a registered agent read the shared statement, inspect a registered GET resource and request a purchase. The owner can grant statement access independently. A purchase requires an applicable Grant for the calling agent and resource, or native confirmation for that order. The local first-use tools use Mainnet. Tools that offer a choice of network require an explicit selection.
 
 | Entry point | Version and availability |
 | --- | --- |
-| Plugin Edition | **0.2.13** local package and authorization UI; MPP real-payment acceptance used **0.2.11**, with its running Mainnet backend retained during the UI updates. Not yet published in the public Codex plugin directory. |
+| Plugin Edition | **0.2.17** was tested on a Mac with a real Grok purchase. Current source builds **0.2.18** with an optional per-order price ceiling. Packages are distributed locally. |
 | Native macOS App | **0.1.1, build 7**. See the [stable App release record](docs/releases/v0.1.1.md) and [App guide](docs/guides/native-app-getting-started.md). |
 | Historical public download | The [website download](https://2049-web.vercel.app/) is **0.1.0 Beta**, not the current plugin package. |
 
@@ -24,16 +24,20 @@ On **November 17, 2026**, the standalone plugin completed a **0.001 USDC MPP Sol
 
 ## Get started with the plugin
 
-The verified host is Codex on Apple Silicon macOS. The local plugin package includes Node, Pay MCP and its backend; using the package does not require a source checkout or a separate Node installation.
+On Apple Silicon macOS, the local package includes Node, Pay MCP and the Yosh backend. The existing Mainnet wallet stays on the Mac.
 
 ### 1. Install the local package
 
-Use a verified Plugin Edition package supplied by the project or [build one from source](#development). After extracting its ZIP, add the included local marketplace and install the plugin:
+Use a verified Plugin Edition package supplied by the project or [build one from source](#development). Extract the ZIP and run the included `Install.command` to register the shared MCP with installed CLI hosts. Start a fresh host session and ask “Use Yosh to show my Mainnet statement.” On first statement access, confirm the agent name and scope on the Mac.
+
+To also install the full Codex plugin from the extracted marketplace, run
 
 ```sh
 codex plugin marketplace add /absolute/path/to/yosh-standalone-marketplace
 codex plugin add yosh-local-dev@yosh-standalone-testing
 ```
+
+For a purchase, ask for one registered API and give the agent a maximum amount. The agent can use `describe_purchase_resource` to see the fields before placing the order. For example, a 0.001 USDC cap on `request_purchase` is `maximumAmountAtomic: "1000"`. Each receipt records payment and delivery separately.
 
 The current development UI name is **Yosh Dev — 开发验收版**. `yosh-local-dev@yosh-standalone-testing` is the single plugin identity for both Mainnet and Devnet. These commands install from the local marketplace you supplied; another account will not find this package by searching the public directory.
 
@@ -116,7 +120,8 @@ Builds use pinned, verified Pay/pay-kit sources. The [source record](docs/releas
 | Recovery | Automated coverage for original-payment and delivery recovery. Actual merchant recovery remains unverified. |
 | Mainnet onboarding | Existing wallet/configuration reuse works. Fresh wallet creation/import and complete first-time setup remain future work. |
 | Distribution | Local macOS development package. Public plugin listing, notarized distribution and clean-machine acceptance remain future work. |
-| Other hosts and payment methods | Codex is the verified host. Other hosts, networks, assets and payment schemes need separate validation. |
+| Other hosts | Grok CLI completed a Mainnet purchase on the shared wallet. Claude Code connected and read the Mainnet ledger. Claude real-payment and Dot cloud-host acceptance were deferred. |
+| Remote access | The development relay supports scoped statement and saved-result reads. Remote purchases run against the isolated simulated wallet. See [remote reads](docs/architecture/remote-read-p1-20261119.md) and [sandbox purchases](docs/architecture/remote-purchase-p2-20261119.md). |
 
 MPP Session/channel payments, card payments, sponsored fees, splits and ATA creation are outside this version's supported scope. The [MPP architecture record](docs/architecture/mpp-solana-charge.md) documents protocol restrictions, pinned SDK inputs and recovery behavior.
 
@@ -126,14 +131,15 @@ Missing or expired authorization, pause, insufficient allowance, invalid quotes 
 
 Plugin development requires Apple Silicon macOS, Node.js 24.5+, npm, Python 3.9+, Rust/Cargo, and Xcode/macOS build tools. Dependency builds use pinned Pay/pay-kit checkouts, offline Cargo inputs and the verified Node archive listed in the [build notes](docs/architecture/codex-plugin-dev.md#reproducible-build).
 
-From a verified dependency artifact, build and package the combined Mainnet/Devnet plugin in new output directories:
+To build the 0.2.18 package with first-use registration and Mainnet MPP, use the verified dependencies and the [MPP protocol artifact](docs/architecture/mpp-solana-charge.md). Set the artifact path to your verified build.
 
 ```sh
 python3 -B scripts/build-standalone-dependencies.py verify \
   --output build.noindex/standalone-dependencies
 python3 -B scripts/build-standalone-dev.py \
   --dependencies build.noindex/standalone-dependencies \
-  --local-authorization --output build.noindex/plugin-runtime
+  --local-authorization --mainnet-mpp --mpp-artifact /path/to/verified-mpp-artifact \
+  --output build.noindex/plugin-runtime
 python3 -B scripts/package-standalone-plugin.py \
   --runtime-package build.noindex/plugin-runtime \
   --output build.noindex/plugin-package
@@ -141,7 +147,7 @@ python3 -B scripts/package-standalone-plugin.py \
 
 The first command verifies an artifact already produced by `build-standalone-dependencies.py build`; it does not download or create dependencies. Packaging produces a local `marketplace/`, plugin ZIP and checksum evidence under `build.noindex/plugin-package/`. These build commands do not install the plugin, start a backend, create a wallet or authorize a payment.
 
-The example above builds the baseline runtime. To include Mainnet MPP, supply a separately verified protocol build through `--mpp-artifact /path/to/mpp-artifact --mainnet-mpp` to `build-standalone-dev.py`. See the [MPP source and artifact requirements](docs/architecture/mpp-solana-charge.md). Installing a new package does not silently advance an existing Mainnet runtime: the explicit upgrade path verifies and drains its current owner before handoff.
+To upgrade an existing Mainnet runtime, follow the owner handoff in the [runtime record](docs/architecture/mainnet-standalone-runtime-20261113.md). It verifies the installed service and waits for active operations to finish.
 
 Run `npm run typecheck`, `npm run lint`, `npm run build` and the relevant tests before delivery. Mainnet acceptance is separate from fixture testing and requires explicit purchase authorization. [Standalone acceptance](docs/architecture/mainnet-standalone-runtime-20261113.md) documents the host checks and evidence boundaries. Native App builds retain their [stable release process](docs/releases/v0.1.1.md).
 
