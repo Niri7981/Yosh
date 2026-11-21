@@ -334,6 +334,12 @@ it('keeps an established host identity and its standing grant across one-shot ap
   expect(confirm).toHaveBeenCalledTimes(2);
   expect(app.ledger.spendGrantById(small.id)!.status).toBe('ACTIVE');
   const broad = await app.createSpendGrant({resourceId: f.resource.resourceId, singleLimit: '2000', totalLimit: '10000', expiresAt: Date.now() + 3600_000});
+  // A standing Grant can cover a higher price than the user requested for this particular order.
+  const capped = {...input, requestId: 'explicit-price-limit', maximumAmountAtomic: '999'};
+  await expect(app.authorizeHostPurchase(capped, origin)).rejects.toThrow('LOCAL_PURCHASE_PRICE_LIMIT_EXCEEDED');
+  expect(app.ledger.localPurchaseConsent(f.memberId, capped.requestId)).toBeUndefined();
+  expect(confirm).toHaveBeenCalledTimes(2);
+  await expect(app.authorizeHostPurchase({...capped, requestId: 'exact-price-limit', maximumAmountAtomic: '1000'}, origin)).resolves.toMatchObject({memberId: f.memberId});
   for (const requestId of ['under-budget', 'also-under-budget', 'under-budget']) {
     await app.authorizeHostPurchase({...input, requestId}, origin);
     const permit = app.ledger.localPurchaseConsent(f.memberId, requestId);

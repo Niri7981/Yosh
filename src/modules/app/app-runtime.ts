@@ -930,6 +930,9 @@ export class AppRuntime {
     // to those same bytes so a legitimate SDK round trip retains its identity.
     const quote = mppQuote ?? (await fetchResourceChallenge({...resource, request}, this.environment,
       this.dependencies.fetcher, undefined, {hostPurchase: true})).quote;
+    // An existing Grant can allow more than the user authorized for this request.
+    if (input.maximumAmountAtomic !== undefined && atomicAmount(quote.amount) > atomicAmount(input.maximumAmountAtomic))
+      throw new Error('LOCAL_PURCHASE_PRICE_LIMIT_EXCEEDED');
     const quoteExpiresAt = 'expiresAt' in quote ? quote.expiresAt : quotedAt + quote.maxTimeoutSeconds * 1000;
     if (quote.payTo === wallet) throw new Error('LOCAL_AUTHORIZATION_RECIPIENT_INVALID');
     const principal = current ?? {cardMemberId: randomUUID(), connectionId: randomUUID(), connectionGeneration: 1};

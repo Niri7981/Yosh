@@ -8,7 +8,7 @@ const ProgramFiles = z.object({ node: Digest, 'mainnet.cjs': Digest,
   'mainnet-mcp.cjs': Digest, 'pay-mcp': Digest, 'pay-protocol-engine': Digest, 'mainnet.sb': Digest, 'yosh-confirm': Digest.optional() }).strict();
 const BaseManifest = z.object({ kind: z.literal('yosh-mainnet-standalone'), apiVersion: z.literal(1),
   dataContract: z.literal('existing-mainnet-v1'), profile: z.literal('com.yosh.pay-development.v011rc5'),
-  productionEnabled: z.literal(false), firstUsePurchases: z.boolean().optional(), purchaseResourceLookup: z.boolean().optional(),
+  productionEnabled: z.literal(false), firstUsePurchases: z.boolean().optional(), purchaseResourceLookup: z.boolean().optional(), hostPurchaseAmountLimit: z.boolean().optional(),
   licenses: z.object({ 'Node-LICENSE': Digest, 'Pay-LICENSE': Digest, 'pay-kit-LICENSE': Digest }).strict() }).passthrough();
 // Capability and executable bytes are inseparable; older x402-only artifacts
 // remain valid but cannot acquire MPP capability from a process environment.
@@ -17,7 +17,8 @@ const Manifest = z.union([
     'mpp-protocol-engine': Digest, 'mpp-provenance.json': Digest }).strict() }),
   BaseManifest.extend({ mppProtocol: z.literal(false).optional(), files: ProgramFiles }),
 ]).refine(manifest => !manifest.firstUsePurchases || Boolean(manifest.files['yosh-confirm']))
-  .refine(manifest => !manifest.purchaseResourceLookup || manifest.firstUsePurchases === true);
+  .refine(manifest => !manifest.purchaseResourceLookup || manifest.firstUsePurchases === true)
+  .refine(manifest => !manifest.hostPurchaseAmountLimit || manifest.purchaseResourceLookup === true);
 const hash = (data: Uint8Array) => createHash('sha256').update(data).digest('hex');
 function programFile(path: string, limit = 256 * 1024 * 1024) {
   const stat = lstatSync(path);

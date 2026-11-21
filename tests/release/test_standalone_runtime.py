@@ -217,6 +217,16 @@ class StandaloneArtifactTests(unittest.TestCase):
         describe_plugin = describe_build / 'marketplace/plugins/yosh-local-dev'
         self.assertEqual(json.loads((describe_plugin / 'plugin.json').read_text())['version'], '0.2.17')
         self.assertIn('describe_purchase_resource', (describe_plugin / 'skills/connect-local-yosh/SKILL.md').read_text())
+        self.manifest['hostPurchaseAmountLimit'] = True
+        self.save_manifest()
+        with self.assertRaisesRegex(ValueError, 'price limits'):
+            packager.verify_runtime(self.output)
+        mainnet['hostPurchaseAmountLimit'] = True
+        self.save_mainnet(mainnet)
+        limit_build = self.root / 'build.noindex/purchase-limit-package'
+        with mock.patch.object(packager, 'ROOT', self.root): packager.package(self.output, limit_build)
+        metadata = limit_build / 'marketplace/plugins/yosh-local-dev/plugin.json'
+        self.assertEqual(json.loads(metadata.read_text())['version'], '0.2.18')
         self.manifest['firstUsePurchases'] = False
         self.save_manifest()
         with self.assertRaisesRegex(ValueError, 'resource lookup'):

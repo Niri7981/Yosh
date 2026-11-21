@@ -58,6 +58,8 @@ def verify_runtime(package):
         raise ValueError('First-use purchases require host pairing')
     if manifest.get('purchaseResourceLookup') and manifest.get('firstUsePurchases') is not True:
         raise ValueError('Purchase resource lookup requires first-use purchases')
+    if manifest.get('hostPurchaseAmountLimit') and not manifest.get('purchaseResourceLookup'):
+        raise ValueError('Per-request price limits require purchase resource lookup')
     if manifest.get('firstUsePairing'):
         if not standalone_mainnet: raise ValueError('First-use pairing requires standalone Mainnet')
         required += ['first-use-mcp.cjs', 'register-local-agents.mjs']
@@ -84,6 +86,8 @@ def verify_runtime(package):
             raise ValueError('First-use purchase consent is unavailable in the retained backend')
         if manifest.get('purchaseResourceLookup') and mainnet.get('purchaseResourceLookup') is not True:
             raise ValueError('Purchase resource lookup is unavailable in the retained backend')
+        if manifest.get('hostPurchaseAmountLimit') and mainnet.get('hostPurchaseAmountLimit') is not True:
+            raise ValueError('Per-request price limits are unavailable in the retained backend')
         mainnet_mpp = mainnet.get('mppProtocol') is True
         if bool(manifest.get('mainnetMpp')) != mainnet_mpp or (mainnet_mpp and not manifest.get('mppProtocol')):
             raise ValueError('Mainnet MPP capability mismatch')
@@ -96,7 +100,7 @@ def package(source, output):
     standalone_mainnet = manifest.get('mainnetStandalone') is True
     version = '0.2.16' if manifest.get('firstUsePurchases') else '0.2.15' if manifest.get('firstUsePairing') else '0.2.14' if manifest.get('mainnetMpp') else '0.2.7' if manifest.get('mppProtocol') else '0.2.4' if standalone_mainnet else '0.2.3' if local else '0.1.0'
     if manifest.get('purchaseResourceLookup'):
-        version = '0.2.17'
+        version = '0.2.18' if manifest.get('hostPurchaseAmountLimit') else '0.2.17'
     plugin_name = 'yosh-local-dev' if local else NAME
     output = output.absolute()
     if not output.resolve().is_relative_to((ROOT / 'build.noindex').resolve()) or output.is_symlink():

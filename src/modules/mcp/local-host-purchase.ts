@@ -1,10 +1,13 @@
 import { z } from 'zod';
+import { AtomicAmountSchema } from '../authority/atomic-money';
 import { PurchaseRequestInputSchema } from '../purchases/purchase-request-input';
 import { MAX_SERIALIZED_RESOURCE_DELIVERY_BYTES, ResourceRequestInputSchema } from '../resources/http-resource';
 import { PurchaseResourceLookup } from './purchase-resource-contract';
 import { AgentPurchaseSummary } from './purchase-read-contract';
 
 export const LocalHostPurchaseInput = PurchaseRequestInputSchema.pick({ requestId: true, resourceId: true, reason: true }).extend({
+  maximumAmountAtomic: z.string().max(19).regex(/^(0|[1-9]\d*)$/).refine(value => AtomicAmountSchema.safeParse(value).success)
+    .optional().describe('Set this whenever the user specifies a purchase price limit. Use decimal integer USDC base units (0.001 USDC = "1000"). Applies even with an existing Grant. Network fees have a separate cap.'),
   request: ResourceRequestInputSchema.pick({ query: true }).strict().optional()
     .describe('See describe_purchase_resource for the registered input. For fixed mode omit the entire request field. For dynamic mode supply only declared request.query fields.'),
   maximumNetworkFeeLamports: z.string().regex(/^[1-9]\d*$/).max(20).optional()
@@ -58,6 +61,7 @@ export const hostPurchaseTool = {
   annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
 };
 const preparationGuidance: Readonly<Record<string, string>> = {
+  LOCAL_PURCHASE_PRICE_LIMIT_EXCEEDED: 'The quoted price exceeds the maximum for this purchase. Stop and report the price-limit error. Keep the user’s cap.',
   LOCAL_PURCHASE_QUERY_NOT_ALLOWED: 'This resource is fixed. Check describe_purchase_resource. If it matches the intent, omit request entirely and keep the same requestId.',
   LOCAL_PURCHASE_INPUT_REQUIRED: 'Use describe_purchase_resource to find the required request.query fields. Keep the same requestId.',
   LOCAL_PURCHASE_INPUT_UNSUPPORTED: 'Use describe_purchase_resource to check supported request.query fields. Keep the same requestId.',
