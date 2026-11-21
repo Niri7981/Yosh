@@ -18,6 +18,9 @@ import { POST } from '../../src/app/api/agent/purchases/route';
 import { GET } from '../../src/app/api/agent/route';
 import { GET as accountStatement } from '../../src/app/api/agent/account/statement/route';
 import { GET as accountResult } from '../../src/app/api/agent/account/result/route';
+import { POST as remoteMcp } from '../../src/app/api/agent/remote-mcp/route';
+import { GET as listRemotePairings, POST as changeRemotePairing } from '../../src/app/api/app/remote-read-pairings/route';
+import type { ReadConsent } from '../../src/modules/remote/pairings';
 import { GET as ownerPurchase } from '../../src/app/api/agent/purchase/route';
 import { GET as ownerDelivery } from '../../src/app/api/agent/purchases/[purchaseId]/delivery/route';
 import { AppRuntime } from '../../src/modules/app/app-runtime';
@@ -64,7 +67,7 @@ async function requestBody(request: IncomingMessage) {
  * Only the merchant, chain and ephemeral signer are fixtures. Every HTTP request
  * is local; unexpected external endpoints and RPC submissions fail the test. */
 export async function productionPayFixture(options: { hooks?: ExecutionOptions['hooks'];
-  signerBarrier?: ReturnType<typeof deferred>; preflightBarrier?: ReturnType<typeof deferred>; grant?: boolean; payMcp?: boolean; quoteAmount?: string;
+  confirmRemoteReadPairing?: (facts: ReadConsent) => Promise<boolean>; signerBarrier?: ReturnType<typeof deferred>; preflightBarrier?: ReturnType<typeof deferred>; grant?: boolean; payMcp?: boolean; quoteAmount?: string;
   routeLevelQuote?: boolean; quoteExtensions?: PaymentRequired['extensions']; quoteAlternatives?: 'price' | 'metadata' | 'duplicate' } = {}) {
   const directory = mkdtempSync(join(tmpdir(), 'yosh-pay-production-'));
   chmodSync(directory, 0o700);
@@ -175,12 +178,14 @@ export async function productionPayFixture(options: { hooks?: ExecutionOptions['
     const request = new Request(`${origin}${incoming.url ?? '/'}`, { method: incoming.method, headers,
       ...(incoming.method === 'POST' ? { body: await requestBody(incoming) } : {}) });
     const path = new URL(request.url).pathname;
-    const reads = new Map([['/api/agent', GET], ['/api/agent/purchase', ownerPurchase],
+    const reads = new Map([['/api/app/remote-read-pairings', listRemotePairings], ['/api/agent', GET], ['/api/agent/purchase', ownerPurchase],
       ['/api/agent/account/statement', accountStatement], ['/api/agent/account/result', accountResult]]);
     const handler = reads.get(path);
     const delivery = /^\/api\/agent\/purchases\/([\w-]+)\/delivery$/.exec(path);
     const response = incoming.method === 'GET' && handler ? await handler(request)
       : incoming.method === 'GET' && delivery ? await ownerDelivery(request, { params: Promise.resolve({ purchaseId: delivery[1] }) })
+      : incoming.method === 'POST' && path === '/api/agent/remote-mcp' ? await remoteMcp(request)
+      : incoming.method === 'POST' && path === '/api/app/remote-read-pairings' ? await changeRemotePairing(request)
       : incoming.method === 'POST' && path === '/api/agent/purchases' ? await POST(request)
       : new Response(null, { status: 404 });
     if (loseAgentResponse && incoming.method === 'POST') { loseAgentResponse = false; outgoing.destroy(); return; }
@@ -230,7 +235,7 @@ export async function productionPayFixture(options: { hooks?: ExecutionOptions['
         }
         return;
       }
-      if (incoming.url?.startsWith('/api/agent')) { await agentRequest(incoming, outgoing); return; }
+      if (incoming.url?.startsWith('/api/agent') || incoming.url === '/api/app/remote-read-pairings') { await agentRequest(incoming, outgoing); return; }
       if (incoming.url === '/supported') {
         preflightStarted.resolve();
         await options.preflightBarrier?.promise;
@@ -306,7 +311,7 @@ export async function productionPayFixture(options: { hooks?: ExecutionOptions['
     vi.stubGlobal('fetch', networkFetch);
     execution = createIsolatedPayExecution({ directory, enginePath: ENGINE_PATH, merchantOrigin: origin, rpcUrl,
       signer, ...(options.payMcp ? { unsignedPreparation: context => { if (!authority) throw new Error('PAY_AUTHORITY_REQUIRED'); return authority.takeUnsigned(context); } } : {}), ...(options.hooks ? { hooks: options.hooks } : {}) });
-    const dependencies = { initializeWallet: async () => ({ address: memorySigner.address, reused: true }),
+    const dependencies = { confirmRemoteReadPairing: options.confirmRemoteReadPairing, initializeWallet: async () => ({ address: memorySigner.address, reused: true }),
       readWallets: async () => [{ id: 'mainnet' as const, label: 'Mainnet', address: null, status: 'missing' as const },
         { id: 'devnet' as const, label: 'Devnet · Test', address: memorySigner.address, status: 'available' as const }],
       timeZone: () => 'Asia/Shanghai', fetcher: execution.quoteFetcher, paymentExecutor: execution.executor };

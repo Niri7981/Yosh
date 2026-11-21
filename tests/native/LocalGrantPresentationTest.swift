@@ -20,6 +20,32 @@ struct LocalGrantPresentationTest {
         func render(_ value: [String: Any]) throws -> Presentation {
             try LocalGrantConfirmation.presentation(JSONSerialization.data(withJSONObject: value), digest: String(repeating: "d", count: 64))
         }
+        var remote: [String: Any] = ["version": 1, "kind": "remote-read", "createdAt": now, "expiresAt": now + 120_000,
+            "challenge": String(repeating: "a", count: 64), "environment": "live_devnet", "label": "Reader",
+            "account": "fixture-account", "scopes": ["statement"]]
+        let read = try render(remote)
+        precondition(read.details.contains("Reader") && read.details.contains("fixture-account") && read.details.contains("live_devnet"))
+        precondition(read.details.contains("消费账单") && !read.details.contains("已购结果"))
+        remote["scopes"] = ["result"]
+        let resultOnly = try render(remote)
+        precondition(resultOnly.details.contains("已购结果") && !resultOnly.details.contains("消费账单"))
+        remote["scopes"] = ["result", "purchase"]
+        do { _ = try render(remote); fatalError("Invalid remote scope accepted") } catch { }
+        var buy: [String:Any] = ["kind":"remote-simulated-purchase","action":"pair","version":1,
+            "label":"Remote buyer","account":"Sandbox A","environment":"simulated","challenge":String(repeating:"a",count:64),
+            "createdAt":now,"expiresAt":now + 120_000]
+        let pairing = try render(buy)
+        precondition(pairing.details.contains("配对不分配消费额度") && pairing.details.contains("无真实资金"))
+        buy["action"] = "grant"; buy["pairingId"] = UUID().uuidString; buy["resourceId"] = "market-snapshot"
+        buy["grantExpiresAt"] = now + 3_600_000; buy["singleLimit"] = "3000000"; buy["totalLimit"] = "6000000"
+        let testGrant = try render(buy)
+        for fact in ["Remote buyer","Sandbox A","market-snapshot","3.000000 Test USDC","6.000000 Test USDC","到期","共享日额度"] {
+            precondition(testGrant.details.contains(fact))
+        }
+        buy["environment"] = "live_mainnet"
+        do { _ = try render(buy); fatalError("Mainnet accepted as a simulated consent") } catch { }
+        buy["environment"] = "simulated"; buy["singleLimit"] = "6000001"
+        do { _ = try render(buy); fatalError("Invalid simulated limits accepted") } catch { }
         let mainnet = try render(request)
         precondition(mainnet.title == "核对 Yosh 主网授权")
         precondition(mainnet.details.contains("付款钱包：" + wallet))
@@ -96,6 +122,6 @@ struct LocalGrantPresentationTest {
         do { _ = try render(pairing); fatalError("Broader first-use scope accepted") } catch {}
         pairing["scope"] = "read_statement"; pairing["agentLabel"] = "bad\nlabel"
         do { _ = try render(pairing); fatalError("Agent label injection accepted") } catch {}
-        print("Native presentation: Mainnet/Devnet wallet and MPP fee consent passed. No UI or authentication invoked.")
+        print("Native presentation: remote-read consent, Mainnet/Devnet wallet and MPP fee consent passed. No UI or authentication invoked.")
     }
 }
