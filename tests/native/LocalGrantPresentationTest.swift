@@ -31,21 +31,21 @@ struct LocalGrantPresentationTest {
         precondition(resultOnly.details.contains("已购结果") && !resultOnly.details.contains("消费账单"))
         remote["scopes"] = ["result", "purchase"]
         do { _ = try render(remote); fatalError("Invalid remote scope accepted") } catch { }
-        var buy: [String:Any] = ["kind":"remote-simulated-purchase","action":"pair","version":1,
+        var remotePurchase: [String:Any] = ["kind":"remote-simulated-purchase","action":"pair","version":1,
             "label":"Remote buyer","account":"Sandbox A","environment":"simulated","challenge":String(repeating:"a",count:64),
             "createdAt":now,"expiresAt":now + 120_000]
-        let pairing = try render(buy)
-        precondition(pairing.details.contains("配对不分配消费额度") && pairing.details.contains("无真实资金"))
-        buy["action"] = "grant"; buy["pairingId"] = UUID().uuidString; buy["resourceId"] = "market-snapshot"
-        buy["grantExpiresAt"] = now + 3_600_000; buy["singleLimit"] = "3000000"; buy["totalLimit"] = "6000000"
-        let testGrant = try render(buy)
+        let remotePairing = try render(remotePurchase)
+        precondition(remotePairing.details.contains("配对不分配消费额度") && remotePairing.details.contains("无真实资金"))
+        remotePurchase["action"] = "grant"; remotePurchase["pairingId"] = UUID().uuidString; remotePurchase["resourceId"] = "market-snapshot"
+        remotePurchase["grantExpiresAt"] = now + 3_600_000; remotePurchase["singleLimit"] = "3000000"; remotePurchase["totalLimit"] = "6000000"
+        let testGrant = try render(remotePurchase)
         for fact in ["Remote buyer","Sandbox A","market-snapshot","3.000000 Test USDC","6.000000 Test USDC","到期","共享日额度"] {
             precondition(testGrant.details.contains(fact))
         }
-        buy["environment"] = "live_mainnet"
-        do { _ = try render(buy); fatalError("Mainnet accepted as a simulated consent") } catch { }
-        buy["environment"] = "simulated"; buy["singleLimit"] = "6000001"
-        do { _ = try render(buy); fatalError("Invalid simulated limits accepted") } catch { }
+        remotePurchase["environment"] = "live_mainnet"
+        do { _ = try render(remotePurchase); fatalError("Mainnet accepted as a simulated consent") } catch { }
+        remotePurchase["environment"] = "simulated"; remotePurchase["singleLimit"] = "6000001"
+        do { _ = try render(remotePurchase); fatalError("Invalid simulated limits accepted") } catch { }
         let mainnet = try render(request)
         precondition(mainnet.title == "核对 Yosh 主网授权")
         precondition(mainnet.details.contains("付款钱包：" + wallet))
