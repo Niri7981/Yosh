@@ -1027,9 +1027,31 @@ export class AppRuntime {
       const receipt = readAgentPurchase(this.ledger, current.cardMemberId, {operationId: input.requestId});
       if (receipt) {
         if (receipt.resourceId !== input.resourceId) throw new Error('LOCAL_PURCHASE_BINDING_MISMATCH');
-        const original = this.ledger.getOwned(receipt.purchaseId, current.cardMemberId)!;
+        const original = this.ledger.getOwned(receipt.purchaseId, current.cardMemberId)?.intent;
+        // Ordinary Pay orders have no local prompt hash. Prove this is the same
+        // registered GET and fits both ceilings before returning the saved order.
+        const mismatch = () => new Error('LOCAL_PURCHASE_BINDING_MISMATCH');
+        if (!original?.httpRequest || (input.maximumAmountAtomic !== undefined && atomicAmount(original.amount) > atomicAmount(input.maximumAmountAtomic)))
+          throw mismatch();
+        const mpp = Boolean(original.mpp), resource = this.registeredResource(input.resourceId);
+        if (!resource || resource.request.method !== 'GET' || resource.request.access !== 'https' ||
+            (resource.paymentProtocol === 'mpp_solana_charge') !== mpp || resource.providerId !== original.providerId) throw mismatch();
+        if (mpp) {
+          const binding = original.authority, grant = binding && this.ledger.spendGrantById(binding.grantId);
+          if (!input.maximumNetworkFeeLamports || !grant?.maximumNetworkFeeLamports || grant.version !== binding?.grantVersion ||
+              BigInt(grant.maximumNetworkFeeLamports) > BigInt(input.maximumNetworkFeeLamports)) throw mismatch();
+        } else if (input.maximumNetworkFeeLamports !== undefined) throw mismatch();
+        try {
+          const expected = authorizedRequestInstance(resource, input.request ?? {});
+          if (!mpp) expected.headers = {...expected.headers, accept: 'application/json'};
+          const canonical = (request: typeof expected) => {
+            const url = new URL(request.url); url.searchParams.sort();
+            return hash({...request, url: url.href});
+          };
+          if (canonical(expected) !== canonical(original.httpRequest)) throw mismatch();
+        } catch { throw mismatch(); }
         return LocalHostPurchasePlan.parse({memberId: current.cardMemberId, resourceId: input.resourceId, requestId: input.requestId,
-          protocol: original.intent.mpp ? 'mpp' : 'x402', url: original.intent.httpRequest?.url});
+          protocol: mpp ? 'mpp' : 'x402', url: original.httpRequest.url});
       }
     }
     if (existingOnly) throw new Error('LOCAL_PURCHASE_NOT_FOUND');

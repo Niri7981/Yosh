@@ -144,6 +144,31 @@ async function fixture(hostConsent?: ConfirmLocalGrant) {
     async close() { await app.prepareQuit(); app.close(); rmSync(directory, { recursive: true, force: true }); } };
 }
 
+it('only reuses a prior ordinary Pay order for the same host request and compatible caps', async () => {
+  const confirm = vi.fn<ConfirmLocalGrant>(async () => {}), f = await fixture(confirm);
+  try {
+    const origin = 'http://127.0.0.1:3049', facts = f.facts;
+    const resourceId = 'mainnet-fixture-data';
+    f.app.ledger.createSpendGrant({totalLimit: '5000', singleLimit: '1000', expiresAt: Date.now() + 3600000}, f.principal(), {
+      resourceId, providerId: 'fixture-provider', operation: PAID_RESOURCE_PURCHASE_OPERATION, network: facts.network,
+      assetId: facts.asset, assetDecimals: 6, payTo: facts.recipient, paymentScheme: 'exact'}, Date.now(), 'live_mainnet');
+    expect(await f.call('authorize')).toEqual({allow: true});
+    await f.call('plan', {facts});
+    const input = {hostId: randomUUID(), label: 'Existing fixture host', requestId: facts.operation_id,
+      resourceId, reason: 'Read original quote', request: {query: {coins: 'SOL'}}, maximumAmountAtomic: '1000'};
+    const receipt = readAgentPurchase(f.app.ledger, f.principal().cardMemberId, {operationId: input.requestId});
+    expect(receipt?.purchaseId).toBeTruthy();
+    const calls = f.rpc.mock.calls.length;
+    for (const change of [{request: {query: {coins: 'BTC'}}}, {request: undefined}, {maximumAmountAtomic: '999'}, {maximumNetworkFeeLamports: '1000'}]) {
+      await expect(f.app.authorizeHostPurchase({...input, ...change}, origin)).rejects.toThrow('LOCAL_PURCHASE_BINDING_MISMATCH');
+    }
+    await expect(f.app.authorizeHostPurchase({...input, existingOnly: true}, origin)).resolves.toMatchObject({url: facts.request.url, protocol: 'x402'});
+    expect(f.rpc).toHaveBeenCalledTimes(calls);
+    expect(confirm).not.toHaveBeenCalled();
+    expect(f.app.ledger.listForOwner(f.principal().cardMemberId, 50)).toHaveLength(1);
+  } finally { await f.close(); }
+});
+
 it('settles and delivers two independently confirmed host purchases from one Mainnet-profile fixture wallet', async () => {
   const confirm = vi.fn<ConfirmLocalGrant>(async () => {});
   const f = await fixture(confirm);
