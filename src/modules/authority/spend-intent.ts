@@ -28,6 +28,7 @@ export const SpendIntentSchema = z.object({
   /** Original bounded wire header, retained alongside the SDK-normalized V2 DTO. */
   paymentRequiredHeader: z.string().min(1).max(16_384).optional(),
   deliveryRecovery: DeliveryRecoveryCapabilitySchema.optional(),
+  resultAudience: z.enum(['owner', 'account']).optional(),
   deliveryPolicy: ResourceDeliveryPolicySchema.optional(),
   providerId: boundedIdentifier,
   offerId: boundedIdentifier.optional(),

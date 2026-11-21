@@ -6,7 +6,7 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { upgradeMainnetRuntime } from '../../src/modules/pay-dev/mainnet-runtime-upgrade';
 import { acquireDataDirectoryOwnership } from '../../src/modules/app/data-directory-owner';
 import { installMainnetRuntime, verifyMainnetRuntime } from '../../src/modules/pay-dev/mainnet-runtime-artifact';
-import { claimMainnetProcessLock, drainMainnetBackend, ensureMainnetBackend, inspectMainnetBackend, stopMainnetBackend, readMainnetOwner, writeMainnetOwner } from '../../src/modules/pay-dev/mainnet-standalone-owner';
+import { claimMainnetProcessLock, drainMainnetBackend, ensureMainnetBackend, inspectMainnetBackend, requireRunningResourceOwner, stopMainnetBackend, readMainnetOwner, writeMainnetOwner } from '../../src/modules/pay-dev/mainnet-standalone-owner';
 
 const cleanups: string[] = [];
 afterEach(() => { for (const path of cleanups.splice(0)) rmSync(path, { recursive: true, force: true }); });
@@ -120,6 +120,22 @@ it('drains the payment runtime even when advisory owner metadata cannot be writt
   expect(release).not.toHaveBeenCalled();
 });
 
+it('resource discovery only inspects the running standalone owner and leaves stopped or starting owners alone', async () => {
+  const { configuration, digest } = fixture();
+  const secret = configuration.environment.YOSH_MANAGEMENT_TOKEN;
+  const fetcher = vi.fn(transport(secret, () => undefined));
+  await expect(requireRunningResourceOwner({configuration, digest, fetcher})).rejects.toThrow('LOCAL_RESOURCE_OWNER_OFFLINE');
+  expect(fetcher).toHaveBeenCalledOnce();
+  expect(fetcher.mock.calls[0]).toMatchObject({0: configuration.origin + '/api/app/health', 1: {method: 'GET'}});
+  expect(readMainnetOwner(configuration.directory)).toBeUndefined();
+  const running = transport(secret, () => health(configuration.directory, digest));
+  await expect(requireRunningResourceOwner({configuration, digest, fetcher: running})).rejects.toThrow('MAINNET_BACKEND_STARTING');
+  writeMainnetOwner(configuration.directory, digest, true);
+  await expect(requireRunningResourceOwner({configuration, digest, fetcher: running})).resolves.toBeUndefined();
+  await expect(requireRunningResourceOwner({configuration, digest, fetcher: transport(secret, () => health(configuration.directory))}))
+    .rejects.toThrow('LOCAL_RESOURCE_LOOKUP_UNAVAILABLE');
+});
+
 it('rejects incompatible or mismatched running owners and preserves stopped version metadata', async () => {
   const { configuration, digest } = fixture();
   writeMainnetOwner(configuration.directory, 'a'.repeat(64), true);
@@ -182,6 +198,23 @@ it('cannot claim Mainnet MPP with the old file set', () => {
   const f = fixture(); const path = join(f.runtime, 'mainnet-manifest.json');
   writeFileSync(path, JSON.stringify({ ...JSON.parse(readFileSync(path, 'utf8')), mppProtocol: true }));
   expect(() => verifyMainnetRuntime(f.runtime)).toThrow('MAINNET_RUNTIME_INTEGRITY_FAILED');
+});
+it('requires a verified native consent helper for first-use purchases', () => {
+  const { runtime } = fixture();
+  const path = join(runtime, 'mainnet-manifest.json');
+  const manifest = { ...JSON.parse(readFileSync(path, 'utf8')), firstUsePurchases: true };
+  writeFileSync(path, JSON.stringify(manifest));
+  expect(() => verifyMainnetRuntime(runtime)).toThrow('MAINNET_RUNTIME_INTEGRITY_FAILED');
+  writeFileSync(join(runtime, 'yosh-confirm'), 'fixture-helper');
+  manifest.files['yosh-confirm'] = hash('fixture-helper');
+  writeFileSync(path, JSON.stringify(manifest));
+  expect(verifyMainnetRuntime(runtime).manifest.firstUsePurchases).toBe(true);
+  writeFileSync(path, JSON.stringify({ ...manifest, purchaseResourceLookup: true, firstUsePurchases: false }));
+  expect(() => verifyMainnetRuntime(runtime)).toThrow('MAINNET_RUNTIME_INTEGRITY_FAILED');
+  writeFileSync(path, JSON.stringify({ ...manifest, purchaseResourceLookup: true }));
+  expect(verifyMainnetRuntime(runtime).manifest.purchaseResourceLookup).toBe(true);
+  writeFileSync(join(runtime, 'yosh-confirm'), 'replaced helper');
+  expect(() => verifyMainnetRuntime(runtime)).toThrow('MAINNET_RUNTIME_INTEGRITY_FAILED');
 });
 it('explicit stopped-owner upgrade changes only the version fence, retaining financial bytes and rejecting stale startup', async () => {
   const f = fixture(); installMainnetRuntime(f.runtime, f.configuration.root);

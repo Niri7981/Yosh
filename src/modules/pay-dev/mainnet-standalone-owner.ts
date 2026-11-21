@@ -112,6 +112,13 @@ export async function inspectMainnetBackend({ configuration, digest, fetcher = f
   return { owner: 'standalone' as const, pid: owner.pid };
 }
 
+// A metadata read must never start the wallet or its pending-payment recovery.
+export async function requireRunningResourceOwner(options: Options) {
+  const owner = await inspectMainnetBackend(options);
+  if (!owner) throw new Error('LOCAL_RESOURCE_OWNER_OFFLINE');
+  if (owner.owner !== 'standalone') throw new Error('LOCAL_RESOURCE_LOOKUP_UNAVAILABLE');
+}
+
 export async function ensureMainnetBackend(options: Options & { launch: () => { failed: () => boolean }; timeoutMs?: number; pollMs?: number }) {
   const { configuration, digest, timeoutMs = 60_000, pollMs = 100 } = options;
   const deadline = Date.now() + timeoutMs;

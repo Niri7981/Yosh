@@ -1,5 +1,9 @@
 # Yosh macOS 第一版实施计划
 
+2026-11-21 本机共享钱包验收：Grok CLI 在 0.2.17 上读取已登记 API 的参数，使用自己的单笔 Grant 完成主网购买。本机系统确认后，共享账本显示已付款并已交付。Claude Code 已验证连接与主网查账，用户跳过其实付验收。后续构建的 0.2.18 支持在购买请求中传入本次价格上限，即使已有覆盖该商家的 Grant 也按本次限价检查。跨设备读取及模拟购买见 [P1](docs/architecture/remote-read-p1-20261119.md) 和 [P2](docs/architecture/remote-purchase-p2-20261119.md)。Dot 真机由用户另行验收。
+
+2026-11-20 本机开发版 0.2.15 已在现有 Mac 上安装。发行包的 `Install.command` 为已安装的本地 Grok、Claude Code、Codex 登记同一 stdio 入口，原有已配对的 Claude 和 Codex 保留身份。新登记的宿主在第一次查账时由 Yosh 弹出原生确认，签发限定共享主网账单的只读凭据。安装、工具发现和查询权限均不授予消费 Grant。Grok CLI 已用自己的配置完成 MCP 握手，发现 1 个工具。升级后 Codex 和 Claude 已登记入口读取同一主网汇总，30 项经济数据与配置指纹一致。真实 Grok 对话因 CLI 尚未登录停在首次查账前；系统确认、同轮返回以及 Grok 新会话复用尚待用户参与验收。
+
 2026-11-17 插件优先的 Mainnet MPP 验收：用户明确将旧 App 的 MPP 兼容交付推迟到插件实付成功之后。自 0.2.9 起取消安装版 App reader 哈希作为 MPP 登记、Grant 与新购买的前置条件；插件仍须使用经过校验的 Standalone artifact，复用原钱包、账本及独占锁，保留有效 MPP Grant、SOL 费用上限、共享额度和暂停校验。Standalone 沙箱禁止读取、写入或执行 App。原 App 不删除、不替换；旧版不能读取新增 MPP 记录的限制保留到下一阶段解决。用户创建 Grant 后才进行限定 API 的真实付款，再以新的 Codex Session 独立验收；当前开发与自动化测试不等于付款完成。
 
 2026-11-16 MPP Solana Charge：按用户本轮实现授权，在独立 `codex/mpp-solana-charge` 工作树扩展明确的 onchain 协议路由；复用原钱包身份、Grant、共享额度与账本。首阶段为原生 USDC/GET/Charge 的隔离实现与 Mock 验收，包含单独 SOL 网络费同意与原付款恢复；不支持真实银行卡、Session，不解除正式 Mainnet 门禁。后续用户已授权修复并交付 Mainnet 插件接入：仅验证过的 Standalone artifact 可声明 MPP 能力，原生确认仍绑定独立 SOL 费上限；实付验收须另有有效 Grant 和额度。范围、官方 SDK 来源、验收与限制见 [MPP Solana Charge](docs/architecture/mpp-solana-charge.md)。本段仅更新当前开发范围，不更改下面历史验收事实。

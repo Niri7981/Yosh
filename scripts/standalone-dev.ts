@@ -1,3 +1,7 @@
+import { resolveInstalledHost } from '../src/modules/mcp/installed-host';
+import { mcpMemberEnvironment } from '../src/modules/mcp/member-environment';
+import { signedLocalManagement } from '../src/modules/app/signed-local-management';
+import { configureRemoteReadConfirmation } from '../src/modules/remote/confirm';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { callMainnetAuthorization } from '../src/modules/authority/mainnet-authorization-client';
@@ -6,10 +10,10 @@ import { nativeGrantConfirmation, nativeControlConfirmation } from '../src/modul
 import { startLiveDevnetDevelopmentBackend } from '../src/modules/pay-dev/live-devnet-runtime';
 import { IS_LOCAL_AUTH_DEVELOPMENT as local } from '../src/modules/pay-dev/profile';
 /** Development-only process owner; no real wallet, web authority or auto-update. */
-import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { constants, copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { userInfo } from 'node:os';
+import { homedir, userInfo } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { z } from 'zod';
@@ -33,10 +37,12 @@ const Owner = z.object({ apiVersion: z.literal(API_VERSION), dataContract: z.lit
   runtimeDigest: z.string().regex(/^[a-f0-9]{64}$/), pid: z.number().int().positive(), ready: z.boolean() }).strict();
 const Manifest = z.object({ kind: z.literal(runtimeKind), apiVersion: z.literal(API_VERSION),
   dataContract: z.literal(SCHEMA_CONTRACT), productionEnabled: z.literal(false),
-  mppProtocol: z.boolean().optional(),
+  mppProtocol: z.boolean().optional(), firstUsePairing: z.boolean().optional(),
   files: z.record(z.string(), z.string().regex(/^[a-f0-9]{64}$/)) }).passthrough();
-const mppProtocol = local && Manifest.parse(JSON.parse(readFileSync(join(runtime, 'manifest.json'), 'utf8'))).mppProtocol === true;
+const packaged = Manifest.parse(JSON.parse(readFileSync(join(runtime, 'manifest.json'), 'utf8')));
+const mppProtocol = local && packaged.mppProtocol === true;
 const runtimeFiles = ['node', 'standalone.cjs', 'mcp.cjs', 'pay-mcp', 'pay-protocol-engine', 'offline.sb',
+  ...(local && packaged.firstUsePairing ? ['first-use-mcp.cjs', 'register-local-agents.mjs'] : []),
   ...(mppProtocol ? ['mpp-protocol-engine', 'mpp-provenance.json'] : []),
   ...(local ? ['local-mcp.cjs', 'mainnet.cjs', 'mainnet-mcp.cjs', 'mainnet-manifest.json', 'mainnet.sb',
     'yosh-confirm', 'spirit-design-sheet.png', 'instrument-serif.woff2', 'Instrument-Serif-OFL.txt'] : [])];
@@ -118,29 +124,8 @@ function installRuntime(directory: string, digest: string) {
 }
 
 async function management(directory: string, method: 'GET' | 'POST', path: string, body = '') {
-  const { managementSecret: secret } = Control.parse(privateJson(join(directory, 'standalone-control.json')));
-  const nonce = randomBytes(32).toString('hex'), timestamp = String(Date.now()), bodyHash = hash(body);
-  const message = ['2049-management-v1', method, path, timestamp, nonce, bodyHash].join('\n');
-  const response = await fetch(origin + path, { method, redirect: 'error', signal: AbortSignal.timeout(2000),
-    headers: { 'content-type': 'application/json', origin,
-      'x-2049-nonce': nonce, 'x-2049-timestamp': timestamp, 'x-2049-body-sha256': bodyHash,
-      'x-2049-proof': createHmac('sha256', secret).update(message).digest('hex') }, ...(body ? { body } : {}) });
-  const reader = response.body?.getReader();
-  const chunks: Uint8Array[] = []; let size = 0;
-  try {
-    if (reader) for (;;) {
-      const part = await reader.read(); if (part.done) break;
-      size += part.value.length;
-      if (size > 16384) throw new Error('STANDALONE_RESPONSE_TOO_LARGE');
-      chunks.push(part.value);
-    }
-  } finally { await reader?.cancel(); reader?.releaseLock(); }
-  const bytes = Buffer.concat(chunks);
-  const proof = response.headers.get('x-2049-response-proof') ?? '';
-  const expected = createHmac('sha256', secret).update(['2049-management-response-v1', nonce, String(response.status), hash(bytes)].join('\n')).digest();
-  if (!/^[a-f0-9]{64}$/.test(proof) || !timingSafeEqual(Buffer.from(proof, 'hex'), expected)) throw new Error('STANDALONE_BACKEND_AUTH_FAILED');
-  if (!response.ok) throw new Error('STANDALONE_BACKEND_NOT_READY');
-  return JSON.parse(bytes.toString('utf8')) as unknown;
+  const { managementSecret } = Control.parse(privateJson(join(directory, 'standalone-control.json')));
+  return signedLocalManagement(origin, managementSecret, method, path, body);
 }
 
 function readOwner(directory: string, digest: string) {
@@ -194,6 +179,7 @@ async function serve(directory: string, digest: string) {
       afterClose: async () => { await web?.close(); },
       localAuthorizationLink: () => { if (!web) throw new Error('LOCAL_WEB_NOT_READY'); return web.createLink(); } });
     const manifest = Manifest.parse(JSON.parse(readFileSync(join(runtime, 'manifest.json'), 'utf8')));
+    configureRemoteReadConfirmation(join(runtime, 'yosh-confirm'), manifest.files['yosh-confirm']);
     const assets = new Map<string, { bytes: Buffer; contentType: string }>([
       ['/spirit-design-sheet.png', { bytes: readFileSync(join(runtime, 'spirit-design-sheet.png')), contentType: 'image/png' }],
       ['/instrument-serif.woff2', { bytes: readFileSync(join(runtime, 'instrument-serif.woff2')), contentType: 'font/woff2' }],
@@ -267,17 +253,55 @@ async function upgradeRuntime(directory: string, digest: string) {
 }
 
 async function main() {
+  if (process.argv[2] === 'install-agents' && local && packaged.firstUsePairing) {
+    // Installing client programs uses the host's home; the wallet owner separately resolves the OS account.
+    const directory = join(realpathSync(homedir()), 'Library/Application Support', profile.directoryName);
+    const installed = installRuntime(directory, verifyRuntime());
+    const child = spawn(join(installed, 'node'), [join(installed, 'register-local-agents.mjs'), ...process.argv.slice(3)], {
+      stdio: 'inherit',
+    });
+    child.once('error', () => { process.exitCode = 1; });
+    child.once('exit', code => { process.exitCode = code ?? 1; });
+    return;
+  }
   const action = z.enum(['start', 'status', 'stop', 'mcp', 'serve', 'install-mcp', 'settings', 'connection', 'upgrade']).parse(process.argv[2]);
   if (process.argv.length !== 3 && (process.argv.length !== 5 || process.argv[3] !== '--data-dir')) throw new Error('STANDALONE_ARGUMENTS_INVALID');
+  const memberEnv = ['install-mcp', 'mcp', 'connection'].includes(action) ? mcpMemberEnvironment(process.env) : {};
+  const verifiedHost: Record<string, string> = {};
   const digest = verifyRuntime(); // Validate program bytes before touching data.
+  if (['install-mcp', 'mcp'].includes(action) && packaged.firstUsePairing) {
+    const host = resolveInstalledHost(runtime);
+    if (host.legacyMember === null) {
+      // A host can import a different client's MCP configuration. Hand off
+      // to its actual independent registration, before any account access.
+      const entry = join(runtime, 'first-use-mcp.cjs');
+      if (!process.execve) throw new Error('LOCAL_HOST_RUNTIME_UNAVAILABLE');
+      process.execve(executable, [executable, entry, '--registration', host.registration, '--label', host.label], {
+        HOME: userInfo().homedir, PATH: '/usr/bin:/bin', NODE_ENV: 'production',
+      });
+      throw new Error('LOCAL_HOST_HANDOFF_FAILED');
+    }
+    if ((memberEnv.YOSH_CARD_MEMBER_ID ?? 'default') !== host.legacyMember) throw new Error('LOCAL_HOST_BINDING_MISMATCH');
+    Object.assign(verifiedHost, { YOSH_VERIFIED_REGISTRATION: host.registration, YOSH_VERIFIED_HOST_LABEL: host.label,
+      YOSH_VERIFIED_LEGACY_MEMBER: host.legacyMember });
+  }
   const directory = process.argv[4] ?? join(userInfo().homedir, 'Library/Application Support', profile.directoryName);
   if (!isAbsolute(directory) || resolve(directory) !== directory || basename(directory) !== profile.directoryName
     || directory === runtime || directory.startsWith(runtime + '/')) throw new Error('STANDALONE_DATA_DIRECTORY_INVALID');
   mkdirSync(directory, { recursive: true, mode: 0o700 }); privateDirectory(directory);
   if (action === 'install-mcp') {
     const installed = installRuntime(directory, digest);
+    if (packaged.firstUsePairing) {
+      // Preserve the OS caller across the installed copy and verify it again.
+      // A direct invocation of either public command gets the same identity check.
+      if (!process.execve) throw new Error('LOCAL_HOST_RUNTIME_UNAVAILABLE');
+      const node = join(installed, 'node');
+      process.execve(node, [node, join(installed, 'standalone.cjs'), 'mcp', '--data-dir', directory],
+        { ...memberEnv, HOME: directory, PATH: '/usr/bin:/bin', NODE_ENV: 'test' });
+      throw new Error('LOCAL_HOST_HANDOFF_FAILED');
+    }
     const child = spawn(join(installed, 'node'), [join(installed, 'standalone.cjs'), 'mcp', '--data-dir', directory],
-      { cwd: directory, stdio: 'inherit', env: { HOME: directory, PATH: '/usr/bin:/bin', NODE_ENV: 'test' } });
+      { cwd: directory, stdio: 'inherit', env: { ...memberEnv, ...verifiedHost, HOME: directory, PATH: '/usr/bin:/bin', NODE_ENV: 'test' } });
     child.once('error', () => { process.exitCode = 1; });
     child.once('exit', code => { process.exitCode = code ?? 1; });
     process.once('SIGTERM', () => child.kill('SIGTERM'));
@@ -330,8 +354,9 @@ async function main() {
       if (!running) throw new Error('STANDALONE_START_FAILED');
     }
     if (local && ['settings', 'connection'].includes(action)) {
+      const suffix = memberEnv.YOSH_CARD_MEMBER_ID ? `?memberId=${memberEnv.YOSH_CARD_MEMBER_ID}` : '';
       console.log(JSON.stringify(await management(directory, action === 'settings' ? 'POST' : 'GET',
-        action === 'settings' ? '/api/app/local-authorization-link' : '/api/app/local-authorization-state', action === 'settings' ? '{}' : '')));
+        action === 'settings' ? '/api/app/local-authorization-link' : '/api/app/local-authorization-state' + suffix, action === 'settings' ? '{}' : '')));
       return;
     }
     if (action !== 'mcp') console.log(JSON.stringify({ profile: profile.bundleIdentifier, environment,
@@ -342,7 +367,7 @@ async function main() {
       ? [join(runtime, 'local-mcp.cjs'), '--data-dir', directory]
       : ['-D', `DATA=${directory}`, '-D', `RUNTIME=${runtime}`, '-D', `USERHOME=${userInfo().homedir}`, '-f', join(runtime, 'offline.sb'), executable,
       join(runtime, 'mcp.cjs'), '--data-dir', directory], { cwd: directory, stdio: 'inherit',
-      env: { HOME: directory, PATH: '/usr/bin:/bin', NODE_ENV: 'test', YOSH_PAY_DEV: '1', YOSH_PAY_DEV_ENV: environment } });
+      env: { ...memberEnv, ...verifiedHost, HOME: directory, PATH: '/usr/bin:/bin', NODE_ENV: 'test', YOSH_PAY_DEV: '1', YOSH_PAY_DEV_ENV: environment } });
     child.once('error', () => { process.exitCode = 1; });
     child.once('exit', code => { process.exitCode = code ?? 1; });
     process.once('SIGTERM', () => child.kill('SIGTERM'));

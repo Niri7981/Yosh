@@ -26,7 +26,7 @@ def verify_mainnet(runtime):
             or manifest.get('dataContract') != 'existing-mainnet-v1' \
             or manifest.get('profile') != 'com.yosh.pay-development.v011rc5' \
             or manifest.get('productionEnabled') is not False \
-            or set(manifest.get('files', {})) != set(MAINNET_FILES + (['mpp-protocol-engine', 'mpp-provenance.json'] if manifest.get('mppProtocol') is True else [])) \
+            or set(manifest.get('files', {})) != set(MAINNET_FILES + (['yosh-confirm'] if 'yosh-confirm' in manifest.get('files', {}) else []) + (['mpp-protocol-engine', 'mpp-provenance.json'] if manifest.get('mppProtocol') is True else [])) \
             or set(manifest.get('licenses', {})) != set(LICENSE_FILES):
         raise ValueError('Mainnet runtime contract mismatch')
     for name, digest in manifest['files'].items():
@@ -54,6 +54,15 @@ def verify_runtime(package):
         required += ['mainnet.cjs', 'mainnet-mcp.cjs', 'mainnet-manifest.json', 'mainnet.sb']
     if local and manifest.get('mainnetBridge'): required += ['mainnet-launch.mjs', 'mainnet-launch.sh']
     if local: required += ['local-mcp.cjs', 'yosh-confirm', 'spirit-design-sheet.png', 'instrument-serif.woff2', 'Instrument-Serif-OFL.txt']
+    if manifest.get('firstUsePurchases') and not manifest.get('firstUsePairing'):
+        raise ValueError('First-use purchases require host pairing')
+    if manifest.get('purchaseResourceLookup') and manifest.get('firstUsePurchases') is not True:
+        raise ValueError('Purchase resource lookup requires first-use purchases')
+    if manifest.get('hostPurchaseAmountLimit') and not manifest.get('purchaseResourceLookup'):
+        raise ValueError('Per-request price limits require purchase resource lookup')
+    if manifest.get('firstUsePairing'):
+        if not standalone_mainnet: raise ValueError('First-use pairing requires standalone Mainnet')
+        required += ['first-use-mcp.cjs', 'register-local-agents.mjs']
     if manifest.get('mppProtocol'):
         if not local: raise ValueError('MPP requires the isolated local Devnet profile')
         required += ['mpp-protocol-engine', 'mpp-provenance.json']
@@ -70,7 +79,16 @@ def verify_runtime(package):
             raise ValueError('License path rejected')
     if standalone_mainnet:
         verify_mainnet(runtime)
-        mainnet_mpp = json.loads((runtime / 'mainnet-manifest.json').read_text()).get('mppProtocol') is True
+        mainnet = json.loads((runtime / 'mainnet-manifest.json').read_text())
+        if manifest.get('firstUsePairing') and mainnet['files'].get('yosh-confirm') != manifest['files']['yosh-confirm']:
+            raise ValueError('First-use pairing requires the verified Mainnet confirmation helper')
+        if manifest.get('firstUsePurchases') and mainnet.get('firstUsePurchases') is not True:
+            raise ValueError('First-use purchase consent is unavailable in the retained backend')
+        if manifest.get('purchaseResourceLookup') and mainnet.get('purchaseResourceLookup') is not True:
+            raise ValueError('Purchase resource lookup is unavailable in the retained backend')
+        if manifest.get('hostPurchaseAmountLimit') and mainnet.get('hostPurchaseAmountLimit') is not True:
+            raise ValueError('Per-request price limits are unavailable in the retained backend')
+        mainnet_mpp = mainnet.get('mppProtocol') is True
         if bool(manifest.get('mainnetMpp')) != mainnet_mpp or (mainnet_mpp and not manifest.get('mppProtocol')):
             raise ValueError('Mainnet MPP capability mismatch')
     return manifest
@@ -80,7 +98,9 @@ def package(source, output):
     manifest = verify_runtime(source)
     local = manifest['kind'] == 'yosh-local-devnet'
     standalone_mainnet = manifest.get('mainnetStandalone') is True
-    version = '0.2.13' if manifest.get('mainnetMpp') else '0.2.7' if manifest.get('mppProtocol') else '0.2.4' if standalone_mainnet else '0.2.3' if local else '0.1.0'
+    version = '0.2.16' if manifest.get('firstUsePurchases') else '0.2.15' if manifest.get('firstUsePairing') else '0.2.14' if manifest.get('mainnetMpp') else '0.2.7' if manifest.get('mppProtocol') else '0.2.4' if standalone_mainnet else '0.2.3' if local else '0.1.0'
+    if manifest.get('purchaseResourceLookup'):
+        version = '0.2.18' if manifest.get('hostPurchaseAmountLimit') else '0.2.17'
     plugin_name = 'yosh-local-dev' if local else NAME
     output = output.absolute()
     if not output.resolve().is_relative_to((ROOT / 'build.noindex').resolve()) or output.is_symlink():
@@ -126,6 +146,19 @@ exec "$root/yosh-dev" install-mcp
         skill_content = '---\nname: connect-local-yosh\ndescription: Open the local Yosh setup page and check pairing without granting spending authority.\n---\n\nUse only this Yosh Dev plugin for development and acceptance; do not create separate Mainnet or Devnet plugins. Every wallet/API/purchase tool call must specify environment: mainnet or devnet. Never silently switch networks. Mainnet uses real funds and requires specific purchase authorization. Prefer get_spending_status for the original Yosh wallet balance. For Mainnet call open_local_settings with environment: mainnet; for Devnet use environment: devnet. Without a network the page waits for explicit selection before reading state. Give the user the returned local link. The user confirms exact changes in the native system window. Never manufacture consent or modify data files. After the user finishes, call local_setup_status to refresh Pay tools. If the host does not refresh tools, explain that reconnecting this Dev plugin is required. The Grant page offers Mainnet or Devnet. Mainnet requires the original backend with the web authorization bridge; it does not migrate the wallet or start a second mainnet service. Wallet creation remains isolated Devnet only. A Grant is created only after the user confirms its exact network, API, amounts and expiry. Do not fund or buy unless separately requested. Unknown payments keep the original purchase ID; recover_payment may execute the original payment and is not a read-only query.\n'
         if standalone_mainnet:
             skill_content = skill_content.replace('Mainnet requires the original backend with the web authorization bridge; it does not migrate the wallet or start a second mainnet service.', 'Mainnet uses the bundled standalone backend with the original wallet, Grants and ledger; no Yosh App is required. The backend verifies exclusive ownership and never migrates the wallet or starts a second service for the same ledger.')
+        if manifest.get('firstUsePurchases'):
+            skill_content = skill_content.replace('Every wallet/API/purchase tool call must specify environment: mainnet or devnet.',
+                'For tools that accept an environment, specify mainnet or devnet explicitly.')
+            skill_content += ('\nFor a shared Mainnet statement, call list_account_purchases. '
+                'For a requested purchase of a registered Mainnet GET resource, call request_purchase with its resourceId, '
+                'the reason and one stable requestId. Use the registered URL by default. Supply request.query only '
+                'for parameters explicitly declared by the resource. Keep the requestId on retry. Yosh handles first-use consent in the '
+                'Mac confirmation window and checks the calling agent’s spending authority. '
+                'Read the returned payment and delivery states before describing the result.\n')
+        if manifest.get('purchaseResourceLookup'):
+            skill_content += ('\nBefore buying an unfamiliar resource, call describe_purchase_resource with its resourceId. '
+                'For fixed queries, omit the entire request argument. For dynamic queries, use the declared fields '
+                'and constraints. Check the network fee cap requirement in the same result.\n')
         (skill / 'SKILL.md').write_text(skill_content)
     portable = {'$schema': 'https://agent-plugins.org/schemas/1.0.0/plugin.schema.json',
                 'name': plugin_name, 'version': version, 'description': 'Unified Yosh development plugin with local settings and explicit Mainnet/Devnet routing.' if local else 'App-free isolated Yosh Offline development runtime.',
@@ -142,6 +175,12 @@ exec "$root/yosh-dev" install-mcp
         'interface': {'displayName': 'Yosh Standalone Testing'}, 'plugins': [{'name': plugin_name,
             'source': {'source': 'local', 'path': './plugins/' + plugin_name},
             'policy': {'installation': 'AVAILABLE', 'authentication': 'ON_INSTALL'}, 'category': 'Developer tools'}]}, indent=2) + '\n')
+    if manifest.get('firstUsePairing'):
+        installer = marketplace / 'Install.command'
+        default_args = 'if [ "$#" -eq 0 ]; then set -- --upgrade-legacy-clients; fi\n' if manifest.get('firstUsePurchases') else ''
+        installer.write_text('#!/bin/sh\nset -eu\nroot="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"\n'
+                             + default_args + 'exec "$root/plugins/yosh-local-dev/yosh-dev" install-agents "$@"\n')
+        installer.chmod(0o755)
     archive = output / (plugin_name + '.zip')
     files = {}
     with zipfile.ZipFile(archive, 'x', compression=zipfile.ZIP_DEFLATED) as bundle:

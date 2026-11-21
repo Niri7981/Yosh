@@ -1,3 +1,9 @@
+import { LocalStatementPairings } from '../authority/local-statement-pairing';
+import { canShareSavedResult } from './account-result-policy';
+import { accountStatement } from './account-statement';
+import type { ResultQuery, StatementQuery } from '../mcp/account-read-contract';
+import { MAX_SERIALIZED_RESOURCE_DELIVERY_BYTES } from '../resources/http-resource';
+import { RemoteReadPairings, pairingRequest, purchasePairingRequest, type ReadScope } from '../remote/pairings';
 import { LocalControlApprovals, type LocalControlReceipt } from '../authority/local-control-approval';
 import { PaymentFailureDetails, readPaymentFailure } from '../payment/pay-controller-diagnostics';
 import { ExecutionSafety, type ExternalExecutionFacts, type ExternalExecutionPermit } from './execution-safety';
@@ -92,11 +98,53 @@ function isLiveMode(mode: StoredPurchaseExecutionMode | undefined) {
 /** SQLite owns approval, budget reservation and the unique task purchase. No model writes. */
 export class PurchaseLedger {
   private db: DatabaseSync;
+  private remotePairingStore?: RemoteReadPairings;
+  remoteReadPairings() { return this.remotePairingStore ??= new RemoteReadPairings(this.db); }
   private localApprovals?: LocalGrantApprovals;
+  private statementPairings?: LocalStatementPairings;
+  localStatementPairings() { return this.statementPairings ??= new LocalStatementPairings(this.db); }
+  hasStatementOnlyMember(id: string) {
+    if (!this.statementPairings && !this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='local_statement_pairings'").get()) return false;
+    return this.localStatementPairings().owns(id);
+  }
+  localPurchaseConsent(memberId: string, operationId?: string, selectedGrantId?: string) {
+    const paired = this.hasStatementOnlyMember(memberId);
+    const available = this.db.prepare("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='local_grant_requests'").get();
+    if (available && operationId) {
+      const row = this.db.prepare(`SELECT id FROM local_grant_requests WHERE state='CONSUMED'
+        AND json_extract(body,'$.binding.principal.cardMemberId')=? AND json_extract(body,'$.purchase.requestId')=?`).get(memberId, operationId);
+      if (row) return this.localGrantApprovals().read(String(row.id));
+    }
+    if (paired || (available && selectedGrantId && this.db.prepare("SELECT 1 FROM local_grant_requests WHERE grant_id=? AND json_type(body,'$.purchase')='object'").get(selectedGrantId)))
+      throw new Error('LOCAL_PURCHASE_CONSENT_REQUIRED');
+  }
+
+  reusableLocalGrant(principal: SpendPrincipal, scope: SpendGrantScope, amount: string, now: number) {
+    const monetary = this.scope('live_mainnet');
+    const row = this.db.prepare(`SELECT * FROM spend_grants WHERE status='ACTIVE' AND card_member_id=? AND monetary_scope_id=?
+      AND resource_id=? AND id NOT IN (SELECT grant_id FROM local_grant_requests WHERE grant_id IS NOT NULL AND json_type(body,'$.purchase')='object')`)
+      .get(principal.cardMemberId, monetaryScopeId(monetary), scope.resourceId);
+    if (!row) return;
+    const grant = this.parseGrantRow(row);
+    if (grant.expiresAt <= now || grant.connectionId !== principal.connectionId || grant.connectionGeneration !== principal.connectionGeneration
+      || grant.providerId !== scope.providerId || grant.operation !== scope.operation || grant.network !== scope.network
+      || grant.assetId !== scope.assetId || grant.assetDecimals !== scope.assetDecimals || grant.payTo !== scope.payTo || grant.paymentScheme !== scope.paymentScheme
+      || (scope.maximumNetworkFeeLamports !== undefined && BigInt(grant.maximumNetworkFeeLamports ?? '0') > BigInt(scope.maximumNetworkFeeLamports))
+      || BigInt(amount) > BigInt(grant.singleLimit) || BigInt(amount) + this.grantCommitted(grant.id, monetary) > BigInt(grant.totalLimit)) return;
+    return grant.id;
+  }
+
   private localControls?: LocalControlApprovals;
   localControlApprovals() { return this.localControls ??= new LocalControlApprovals(this.db); }
   /** Opt-in migration: existing App ledgers do not acquire plugin-only tables. */
-  localGrantApprovals() { return this.localApprovals ??= new LocalGrantApprovals(this.db); }
+  localGrantApprovals() {
+    if (!this.localApprovals) {
+      const store = new LocalGrantApprovals(this.db);
+      this.migrateLocalPurchaseReceiptGuard();
+      this.localApprovals = store;
+    }
+    return this.localApprovals;
+  }
   readonly executionSafety: ExecutionSafety;
   private readonly delivery: PurchaseDeliveryStore;
   readonly resources: RuntimeResourceRegistry;
@@ -167,7 +215,7 @@ export class PurchaseLedger {
       this.db.prepare('INSERT OR IGNORE INTO app_budget_clock (id,spending_day,time_zone,next_boundary,last_seen) VALUES (1,?,?,?,?)')
         .run(spendingDay(now, zone), zone, nextSpendingDayBoundary(now, zone), now);
     }
-    try { migrateMonetaryLedger(this.db, this.managed, this.walletIdentity, this.now()); migrateOriginalPaymentEvidence(this.db, this.now()); migrateMppOriginalTransactionOwnership(this.db, this.now()); migrateHttpPurchaseBindings(this.db, this.now()); migrateDeliveryRecovery(this.db, this.now()); migrateMainnetAuthority(this.db, this.managed, this.now()); this.migrateResourceScopedGrants(); this.migratePostGrantConsent(); this.resources = new RuntimeResourceRegistry(this.db, this.now); this.reconciliation = new PaymentReconciliation(this.db, this.now); this.delivery = new PurchaseDeliveryStore(this.db, this.now); this.walletLibrary = new WalletLibrary(this.db); this.walletAccounts = new WalletAccounts(this.db, this.now, approvalId => this.walletHistoricalPayer(approvalId)); }
+    try { migrateMonetaryLedger(this.db, this.managed, this.walletIdentity, this.now()); migrateOriginalPaymentEvidence(this.db, this.now()); migrateMppOriginalTransactionOwnership(this.db, this.now()); migrateHttpPurchaseBindings(this.db, this.now()); migrateDeliveryRecovery(this.db, this.now()); migrateMainnetAuthority(this.db, this.managed, this.now()); this.migrateResourceScopedGrants(); this.migratePostGrantConsent(); this.migrateLocalPurchaseReceiptGuard(); this.resources = new RuntimeResourceRegistry(this.db, this.now); this.reconciliation = new PaymentReconciliation(this.db, this.now); this.delivery = new PurchaseDeliveryStore(this.db, this.now); this.walletLibrary = new WalletLibrary(this.db); this.walletAccounts = new WalletAccounts(this.db, this.now, approvalId => this.walletHistoricalPayer(approvalId)); }
     catch (error) { this.db.close(); this.executionSafety.close(); throw error; }
   }
   scope(mode: StoredPurchaseExecutionMode = this.defaultMode, network?: string, asset?: string, decimals = 6,
@@ -292,6 +340,25 @@ export class PurchaseLedger {
       this.db.prepare("INSERT INTO app_schema_migrations (id,applied_at) VALUES ('013_resource_scoped_grants',?)").run(this.now());
     });
   }
+  private migrateLocalPurchaseReceiptGuard() {
+    if (!this.managed || !this.db.prepare("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='local_grant_requests'").get()
+      || this.db.prepare("SELECT 1 FROM app_schema_migrations WHERE id='local_purchase_receipt_guard_v1'").get()) return;
+    this.atomic(() => {
+      if (this.db.prepare("SELECT 1 FROM app_schema_migrations WHERE id='local_purchase_receipt_guard_v1'").get()) return;
+      // Old owners insert reservations without a receipt. Enforce this at the shared DB boundary,
+      // even after downgrade; existing purchases can still settle or recover without another reservation.
+      this.db.exec(`ALTER TABLE purchases ADD COLUMN local_purchase_receipt TEXT;
+        CREATE UNIQUE INDEX purchase_per_local_receipt ON purchases(local_purchase_receipt) WHERE local_purchase_receipt IS NOT NULL;
+        CREATE TRIGGER require_local_purchase_receipt BEFORE INSERT ON purchases
+          WHEN NEW.status='APPROVED' AND EXISTS (
+            SELECT 1 FROM local_grant_requests r WHERE r.grant_id=json_extract(NEW.purchase,'$.authority.grantId')
+            AND json_type(r.body,'$.purchase')='object' AND (
+              NEW.local_purchase_receipt IS NOT r.id OR r.state<>'CONSUMED'
+              OR NEW.owner_card_member_id IS NOT json_extract(r.body,'$.binding.principal.cardMemberId')))
+          BEGIN SELECT RAISE(ABORT,'LOCAL_PURCHASE_RECEIPT_REQUIRED'); END;
+        INSERT INTO app_schema_migrations(id,applied_at) VALUES ('local_purchase_receipt_guard_v1',unixepoch('now')*1000);`);
+    });
+  }
   private migratePostGrantConsent() {
     if (!this.managed || this.db.prepare("SELECT id FROM app_schema_migrations WHERE id='014_post_grant_consent'").get()) return;
     this.atomic(() => {
@@ -350,19 +417,73 @@ export class PurchaseLedger {
     if (!this.managed) return [];
     return this.db.prepare('SELECT * FROM card_members ORDER BY is_default DESC, created_at, id').all().map(row => this.parseCardMemberRow(row));
   }
-  createCardMember(label: string, now = this.now()) {
+  private insertCardMember(label: string, now: number) {
     if (!this.managed) throw new Error('CardMember identity requires a managed ledger');
     const cleanLabel = CardMemberSchema.shape.label.parse(label);
     const id = randomUUID();
-    this.atomic(() => this.db.prepare("INSERT INTO card_members (id,label,status,is_default,created_at,updated_at) VALUES (?,?,'ACTIVE',0,?,?)")
-      .run(id, cleanLabel, now, now));
-    return this.cardMember(id)!;
+    this.db.prepare("INSERT INTO card_members (id,label,status,is_default,created_at,updated_at) VALUES (?,?,'ACTIVE',0,?,?)")
+      .run(id, cleanLabel, now, now);
+    return id;
+  }
+  createCardMember(label: string, now = this.now()) {
+    return this.cardMember(this.atomic(() => this.insertCardMember(label, now)))!;
+  }
+  issueRemoteReadPairing(label: string, scopes: readonly ReadScope[], scope: MonetaryScope) {
+    const request = pairingRequest.parse({ label, scopes });
+    const now = this.now();
+    return this.atomic(() => this.remoteReadPairings().issue(this.insertCardMember(label, now), request, scope, now));
+  }
+  issueRemotePurchasePairing(label: string, scope: MonetaryScope) {
+    if (scope.environment !== 'simulated' || !scope.walletIdentity.startsWith('sandbox:')) throw Error('REMOTE_PURCHASE_SIMULATED_ONLY');
+    const request = purchasePairingRequest.parse({ label, scopes: ['purchase'] });
+    const now = this.now();
+    return this.atomic(() => this.remoteReadPairings().issue(this.insertCardMember(label, now), request, scope, now));
+  }
+  revokeSimulatedPairingGrant(principal: SpendPrincipal, grantId: string, resourceId: string, now: number) {
+    const scope = this.scope('simulated');
+    if (!scope.walletIdentity.startsWith('sandbox:')) throw Error('REMOTE_PURCHASE_SIMULATED_ONLY');
+    return this.atomic(() => {
+      const row = this.db.prepare("UPDATE spend_grants SET status='REVOKED',revoked_at=? WHERE id=? AND card_member_id=? AND connection_id=? AND connection_generation=? AND monetary_scope_id=? AND resource_id=? AND status='ACTIVE' RETURNING id")
+        .get(now, grantId, principal.cardMemberId, principal.connectionId, principal.connectionGeneration, monetaryScopeId(scope), resourceId);
+      if (!row) throw Error('REMOTE_PURCHASE_GRANT_CHANGED');
+      this.grantEvent(grantId, 'grant.REVOKED', now);
+      return { revoked: true };
+    });
   }
   renameCardMember(id: string, label: string, now = this.now()) {
     const cleanLabel = CardMemberSchema.shape.label.parse(label);
     const changed = this.atomic(() => this.db.prepare("UPDATE card_members SET label=?,updated_at=? WHERE id=? AND status='ACTIVE'").run(cleanLabel, now, id).changes);
     if (!changed) throw new Error('CARD_MEMBER_NOT_ACTIVE');
     return this.cardMember(id)!;
+  }
+  readAccountStatement(memberId: string, mode: StoredPurchaseExecutionMode, input: StatementQuery) {
+    // SQLite WAL readers see one snapshot even when another process commits a payment between the page and totals queries.
+    this.db.exec('BEGIN');
+    try {
+      this.assertCardMemberActive(memberId);
+      const statement = accountStatement(this.db, this.scope(mode), input);
+      this.db.exec('COMMIT');
+      return statement;
+    } catch (error) { this.db.exec('ROLLBACK'); throw error; }
+  }
+  readAccountResult(memberId: string, mode: StoredPurchaseExecutionMode, input: ResultQuery) {
+    this.assertCardMemberActive(memberId);
+    const row = this.db.prepare(`SELECT p.approval_id,p.owner_card_member_id,p.purchase,p.data,(SELECT max(at) FROM purchase_events WHERE purchase_id=p.id AND type='delivery.COMPLETE') AS recordedAt
+      FROM purchases p JOIN purchase_delivery d ON d.purchase_id=p.id WHERE p.id=? AND p.monetary_scope_id=? AND p.status='PAID' AND d.state='COMPLETE'
+      AND p.data IS NOT NULL AND (json_extract(p.purchase,'$.resultAudience')='account' OR (json_type(p.purchase,'$.resultAudience') IS NULL AND json_extract(p.purchase,'$.resourceScopeId')=?))`).get(input.purchaseId, monetaryScopeId(this.scope(mode)), PAID_RESOURCE_SCOPE_ID);
+    if (!row || typeof row.data !== 'string' || Buffer.byteLength(row.data) > MAX_SERIALIZED_RESOURCE_DELIVERY_BYTES) return null;
+    // Apply the same reflected-payment-credential protection as the owner's delivery reader, including for old persisted rows.
+    try {
+      const intent = parseStoredSpendIntent(JSON.parse(String(row.purchase)), typeof row.owner_card_member_id === 'string' ? row.owner_card_member_id : undefined);
+      const data: unknown = JSON.parse(row.data);
+      if (!canShareSavedResult(intent, data)) return null;
+      this.assertSafeDelivery(String(row.approval_id), data);
+    } catch { return null; }
+    const bytes = Buffer.from(row.data); const offset = input.offset ?? 0;
+    if (offset > bytes.length) return null;
+    const end = Math.min(offset + 16_384, bytes.length);
+    return { purchaseId: input.purchaseId, recordedAt: row.recordedAt, encoding: 'base64', contentType: 'application/json',
+      totalBytes: bytes.length, offset, chunk: bytes.subarray(offset, end).toString('base64'), nextOffset: end < bytes.length ? end : null };
   }
   isCardMemberActive(id: string) { return this.cardMember(id)?.status === 'ACTIVE'; }
   assertCardMemberActive(id: string) {
@@ -392,27 +513,36 @@ export class PurchaseLedger {
       id, ...(scope.environment === 'legacy_test' ? [scope.walletIdentity, scope.network, scope.assetId, scope.assetDecimals] : []));
   }
   createSpendGrant(raw: SpendGrantInput, rawPrincipal: SpendPrincipal, rawScope: SpendGrantScope, now = this.now(), mode?: PurchaseExecutionMode,
-    confirmation?: LocalGrantConfirmation) {
+    confirmation?: LocalGrantConfirmation, publishMember?: () => void) {
     assertExplicitAuthority(mode, rawScope.network, rawScope.assetId);
     if (!this.managed) throw new Error('Spend grants require a managed ledger');
     const monetary = this.scope(mode, rawScope.network, rawScope.assetId, rawScope.assetDecimals);
     const input = SpendGrantInputSchema.parse(raw); const principal = SpendPrincipalSchema.parse(rawPrincipal); const scope = SpendGrantScopeSchema.parse(rawScope);
-    this.assertCardMemberActive(principal.cardMemberId);
     const totalLimit = parseGrantAmount(input.totalLimit, 'totalLimit'); const singleLimit = parseGrantAmount(input.singleLimit, 'singleLimit');
     if (singleLimit > totalLimit) throw new Error('单笔上限不能大于授权总额。');
     if (input.expiresAt <= now + 60_000 || input.expiresAt > now + 7 * 24 * 60 * 60 * 1000) throw new Error('授权有效期必须在 1 分钟到 7 天之间。');
     const approvals = confirmation ? this.localGrantApprovals() : undefined;
+    const purchaseId = confirmation ? approvals!.read(confirmation.requestId).request.purchase?.requestId : undefined;
+    if (purchaseId && !this.db.prepare("SELECT 1 FROM app_schema_migrations WHERE id='local_single_purchase_grants_v1'").get()) {
+      this.atomic(() => this.db.exec(`ALTER TABLE spend_grants ADD COLUMN purchase_request_id TEXT;
+        DROP INDEX one_active_spend_grant_per_member_resource;
+        CREATE UNIQUE INDEX one_active_spend_grant_per_member_resource ON spend_grants(card_member_id,monetary_scope_id,resource_id)
+          WHERE status='ACTIVE' AND purchase_request_id IS NULL;
+        INSERT INTO app_schema_migrations(id,applied_at) VALUES('local_single_purchase_grants_v1',unixepoch('now')*1000);`));
+    }
     return this.atomic(() => {
       if (confirmation) approvals!.assertPending(confirmation, { input, principal, scope, mode }, now);
+      publishMember?.();
+      this.assertCardMemberActive(principal.cardMemberId);
       const scopeId = storeMonetaryScope(this.db, monetary);
       this.expireGrants(now);
-      const previous = this.db.prepare("UPDATE spend_grants SET status='REVOKED',revoked_at=? WHERE status='ACTIVE' AND card_member_id=? AND monetary_scope_id=? AND resource_id=? RETURNING id").all(now, principal.cardMemberId, scopeId, scope.resourceId);
+      const previous = purchaseId ? [] : this.db.prepare("UPDATE spend_grants SET status='REVOKED',revoked_at=? WHERE status='ACTIVE' AND card_member_id=? AND monetary_scope_id=? AND resource_id=? RETURNING id").all(now, principal.cardMemberId, scopeId, scope.resourceId);
       for (const row of previous) this.grantEvent(String(row.id), 'grant.REVOKED_REPLACED', now);
       const version = Number(this.db.prepare('SELECT COALESCE(MAX(version),0)+1 AS version FROM spend_grants').get()!.version);
       const id = randomUUID();
-      this.db.prepare(`INSERT INTO spend_grants (id,version,card_member_id,connection_id,connection_generation,resource_id,provider_id,operation,network,asset_id,asset_decimals,pay_to,payment_scheme,total_limit,single_limit,status,created_at,expires_at,revoked_at,monetary_scope_id,post_policy_hash)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'ACTIVE',?,?,NULL,?,?)`).run(id, version, principal.cardMemberId, principal.connectionId, principal.connectionGeneration, scope.resourceId, scope.providerId,
-        scope.operation, scope.network, scope.assetId, scope.assetDecimals, scope.payTo, scope.paymentScheme, totalLimit, singleLimit, now, input.expiresAt, scopeId, scope.postPolicyHash ?? null);
+      this.db.prepare(`INSERT INTO spend_grants (id,version,card_member_id,connection_id,connection_generation,resource_id,provider_id,operation,network,asset_id,asset_decimals,pay_to,payment_scheme,total_limit,single_limit,status,created_at,expires_at,revoked_at,monetary_scope_id,post_policy_hash${purchaseId ? ',purchase_request_id' : ''})
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'ACTIVE',?,?,NULL,?,?${purchaseId ? ',?' : ''})`).run(id, version, principal.cardMemberId, principal.connectionId, principal.connectionGeneration, scope.resourceId, scope.providerId,
+        scope.operation, scope.network, scope.assetId, scope.assetDecimals, scope.payTo, scope.paymentScheme, totalLimit, singleLimit, now, input.expiresAt, scopeId, scope.postPolicyHash ?? null, ...(purchaseId ? [purchaseId] : []));
       if (scope.paymentScheme === 'mpp_charge') {
         migrateMppGrantConsent(this.db, now);
         this.db.prepare('INSERT INTO mpp_grant_terms(grant_id,maximum_network_fee_lamports) VALUES (?,?)')
@@ -468,15 +598,26 @@ export class PurchaseLedger {
   }
   /** Identifies the latest matching grant so policy can persist an inactive-grant denial.
    * This binding is only an input to reserve(); claim/sign still require an ACTIVE grant. */
-  spendAuthorityForDecision(principal: SpendPrincipal, operation: string, now = this.now(), mode?: PurchaseExecutionMode, resourceId?: string): SpendAuthorityBinding | undefined {
+  spendAuthorityForDecision(principal: SpendPrincipal, operation: string, now = this.now(), mode?: PurchaseExecutionMode, resourceId?: string, operationId?: string): SpendAuthorityBinding | undefined {
     if (!this.managed) throw new Error('Spend grants require a managed ledger');
     const parsed = SpendPrincipalSchema.parse(principal);
     this.assertCardMemberActive(parsed.cardMemberId);
+    const consent = operationId ? this.localPurchaseConsent(parsed.cardMemberId, operationId) : undefined;
+    if (consent?.grantId) {
+      const grant = this.grantById(consent.grantId);
+      if (!grant || grant.cardMemberId !== parsed.cardMemberId || grant.resourceId !== resourceId) throw new Error('LOCAL_PURCHASE_BINDING_MISMATCH');
+      return {grantId: grant.id, grantVersion: grant.version, cardMemberId: parsed.cardMemberId, connectionId: parsed.connectionId,
+        connectionGeneration: parsed.connectionGeneration, operation: grant.operation};
+    }
     return this.atomic(() => {
       this.expireGrants(now);
       // Historical grants for the registered resource scope retain their stored operation.
+      // The original signed receipt also identifies single-order grants issued before
+      // purchase_request_id existed; don't infer that old NULL values are delegations.
+      const generalOnly = this.db.prepare("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='local_grant_requests'").get()
+        ? " AND NOT EXISTS (SELECT 1 FROM local_grant_requests r WHERE r.grant_id=spend_grants.id AND json_type(r.body,'$.purchase')='object')" : '';
       const row = operation === PAID_RESOURCE_PURCHASE_OPERATION
-        ? this.db.prepare(`SELECT * FROM spend_grants WHERE card_member_id=? AND monetary_scope_id=? AND (operation=? OR (operation=? AND resource_id=?)) ${resourceId ? 'AND resource_id=?' : ''} ORDER BY version DESC LIMIT 1`)
+        ? this.db.prepare(`SELECT * FROM spend_grants WHERE card_member_id=? AND monetary_scope_id=? AND (operation=? OR (operation=? AND resource_id=?)) ${resourceId ? 'AND resource_id=?' : ''}${generalOnly} ORDER BY version DESC LIMIT 1`)
           .get(parsed.cardMemberId, monetaryScopeId(this.scope(mode)), operation, LEGACY_MARKET_SNAPSHOT_OPERATION, PAID_RESOURCE_SCOPE_ID, ...(resourceId ? [resourceId] : []))
         : this.db.prepare('SELECT * FROM spend_grants WHERE card_member_id=? AND monetary_scope_id=? AND operation=? ORDER BY version DESC LIMIT 1').get(parsed.cardMemberId, monetaryScopeId(this.scope(mode)), operation);
       if (!row) return undefined;
@@ -794,6 +935,12 @@ export class PurchaseLedger {
     if (monetary.environment !== (mode === 'UNKNOWN' ? 'legacy_test' : mode) || monetary.network !== intent.network || monetary.assetId !== intent.assetId || monetary.assetDecimals !== intent.assetDecimals) throw new Error('MONETARY_SCOPE_MISMATCH');
     if (mode === 'live_mainnet' && monetaryScopeId(monetary) !== monetaryScopeId(this.scope('live_mainnet'))) throw new Error('MONETARY_SCOPE_MISMATCH');
     if (ownerCardMemberId && intent.authority && ownerCardMemberId !== intent.authority.cardMemberId) throw new Error('PURCHASE_REQUEST_OWNER_MISMATCH');
+    const member = ownerCardMemberId ?? intent.authority?.cardMemberId;
+    const consent = member ? this.localPurchaseConsent(member, external?.operationId, intent.authority?.grantId) : undefined;
+    if (consent && now >= consent.request.purchase!.quoteExpiresAt && !this.getOwned(intent.idempotencyKey, member!)) throw new Error('LOCAL_AUTHORIZATION_EXPIRED');
+    if (consent && (intent.authority?.grantId !== consent.grantId || member !== external?.callerId
+      || consent.request.binding.scope.resourceId !== intent.resourceId || consent.request.purchase!.requestHash !== hash(intent.httpRequest)
+      || consent.request.purchase!.quoteHash !== hash(quote))) throw new Error('LOCAL_PURCHASE_BINDING_MISMATCH');
     return this.atomic(() => {
       const memberId = ownerCardMemberId ?? intent.authority?.cardMemberId;
       const existing = (memberId ? this.getOwned(intent.idempotencyKey, memberId) : this.getLegacy(intent.idempotencyKey));
@@ -819,9 +966,10 @@ export class PurchaseLedger {
       const controls = this.controls(undefined, monetary);
       let decision = evaluateSpendAuthority(intent, { committed, hasUnknownPayment: Boolean(unresolved) }, now, controls);
       if (this.requireSpendGrant) decision = this.evaluateGrant(intent, decision, committed, controls, now, monetary);
-      this.db.prepare('INSERT INTO purchases (id,task_id,approval_id,purchase,quote,decision,status,amount,owner_card_member_id,execution_mode,monetary_scope_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)')
+      const receipt = consent && decision.decision === 'APPROVED' ? consent.request.id : undefined;
+      this.db.prepare(`INSERT INTO purchases (id,task_id,approval_id,purchase,quote,decision,status,amount,owner_card_member_id,execution_mode,monetary_scope_id${receipt ? ',local_purchase_receipt' : ''}) VALUES (?,?,?,?,?,?,?,?,?,?,?${receipt ? ',?' : ''})`)
         .run(intent.id, intent.idempotencyKey, randomUUID(), JSON.stringify(intent), JSON.stringify(quote), JSON.stringify(decision), decision.decision, intent.amount,
-          ownerCardMemberId ?? intent.authority?.cardMemberId ?? null, mode === 'UNKNOWN' ? null : mode, storeMonetaryScope(this.db, monetary));
+          ownerCardMemberId ?? intent.authority?.cardMemberId ?? null, mode === 'UNKNOWN' ? null : mode, storeMonetaryScope(this.db, monetary), ...(receipt ? [receipt] : []));
       if (intent.mpp && decision.decision === 'APPROVED') {
         migrateMppGrantConsent(this.db, now);
         const scopeId = monetaryScopeId(monetary), merchantOrigin = new URL(intent.httpRequest!.url).origin;
@@ -897,18 +1045,19 @@ export class PurchaseLedger {
     });
   }
   claim(approvalId: string, now = this.now(), validate?: (record: PurchaseRecord) => void, expectedMode?: PurchaseExecutionMode, permit?: ExternalExecutionPermit): SpendReservation {
-    return this.atomic(() => {
-      if (this.stopping) throw new Error('Service is stopping');
-      const record = this.recordForApproval(approvalId);
-      this.executionSafety.assert(record, permit, now);
-      if (expectedMode && record.executionMode !== expectedMode) throw new Error('PURCHASE_EXECUTION_MODE_MISMATCH');
-      validate?.(record);
-      this.assertReservedExecution(record, now);
-      this.db.prepare("UPDATE purchases SET status=? WHERE approval_id=? AND status='APPROVED'").run(purchaseStatusAfter(record.status, 'START_PAYMENT'), approvalId);
-      this.executionSafety.phase(record, 'CLAIMED');
-      this.event(record.intent.id, 'payment.PAYING');
-      return this.recordForApproval(approvalId);
-    });
+    return this.atomic(() => this.claimLocked(approvalId, now, validate, expectedMode, permit));
+  }
+  private claimLocked(approvalId: string, now: number, validate?: (record: PurchaseRecord) => void, expectedMode?: PurchaseExecutionMode, permit?: ExternalExecutionPermit) {
+    if (this.stopping) throw new Error('Service is stopping');
+    const record = this.recordForApproval(approvalId);
+    this.executionSafety.assert(record, permit, now);
+    if (expectedMode && record.executionMode !== expectedMode) throw new Error('PURCHASE_EXECUTION_MODE_MISMATCH');
+    validate?.(record);
+    this.assertReservedExecution(record, now);
+    this.db.prepare("UPDATE purchases SET status=? WHERE approval_id=? AND status='APPROVED'").run(purchaseStatusAfter(record.status, 'START_PAYMENT'), approvalId);
+    this.executionSafety.phase(record, 'CLAIMED');
+    this.event(record.intent.id, 'payment.PAYING');
+    return this.recordForApproval(approvalId);
   }
   savePayload(approvalId: string, payload: unknown, validate?: (record: PurchaseRecord) => void, original?: OriginalPaymentRecord, permit?: ExternalExecutionPermit) {
     this.atomic(() => {
@@ -1108,27 +1257,40 @@ export class PurchaseLedger {
     this.atomic(() => this.recordConfirmation(approvalId, transaction, verification, now));
   }
   finish(approvalId: string, result: { transaction: string; data: unknown }, now = Date.now(), deliveryClaim?: string) {
-    this.atomic(() => {
-      const data = z.json().parse(result.data);
-      const row = this.db.prepare('SELECT task_id,owner_card_member_id,status,execution_mode FROM purchases WHERE approval_id=?').get(approvalId);
-      if (!row) throw new Error('Unknown approval');
-      const record = this.recordForApproval(approvalId);
-      this.assertSafeDelivery(approvalId, data);
-      if (record?.executionMode === 'simulated') {
-        if (!result.transaction.startsWith('simulated-') || !['PAYING', 'PAID'].includes(record.status)) throw new Error('Simulated purchase cannot be completed from this state');
-        if (record.status !== 'PAID') {
-          const paid = this.db.prepare("UPDATE purchases SET status=?,transaction_id=?,confirmed_day=? WHERE approval_id=? AND status='PAYING' RETURNING id")
-            .get(purchaseStatusAfter(record.status, 'CONFIRM_SIMULATED_PAYMENT'), result.transaction, this.activeDay(now, record.monetaryScope), approvalId);
-          if (!paid) throw new Error('Simulated purchase cannot be completed from this state');
-          this.event(String(paid.id), 'payment.PAID');
-        } else if (record.transaction !== result.transaction) throw new Error('Simulated transaction changed');
-      } else if (!record || record.status !== 'PAID' || !this.hasVerifiedPaymentProof(record)) {
-        throw new Error('LIVE_PAYMENT_EVIDENCE_INVALID');
-      }
-      if (result.transaction !== record!.transaction && record!.executionMode !== 'simulated') throw new Error('DELIVERY_TRANSACTION_MISMATCH');
-      if (!this.delivery.complete(record!.intent.id, deliveryClaim)) return;
-      const saved = this.db.prepare('UPDATE purchases SET data=? WHERE approval_id=? AND data IS NULL RETURNING id').get(JSON.stringify(data), approvalId);
-      if (saved) this.event(String(saved.id), 'delivery.COMPLETE');
+    this.atomic(() => this.finishLocked(approvalId, result, now, deliveryClaim));
+  }
+  private finishLocked(approvalId: string, result: { transaction: string; data: unknown }, now: number, deliveryClaim?: string) {
+    const data = z.json().parse(result.data);
+    const row = this.db.prepare('SELECT task_id,owner_card_member_id,status,execution_mode FROM purchases WHERE approval_id=?').get(approvalId);
+    if (!row) throw new Error('Unknown approval');
+    const record = this.recordForApproval(approvalId);
+    this.assertSafeDelivery(approvalId, data);
+    if (record?.executionMode === 'simulated') {
+      if (!result.transaction.startsWith('simulated-') || !['PAYING', 'PAID'].includes(record.status)) throw new Error('Simulated purchase cannot be completed from this state');
+      if (record.status !== 'PAID') {
+        const paid = this.db.prepare("UPDATE purchases SET status=?,transaction_id=?,confirmed_day=? WHERE approval_id=? AND status='PAYING' RETURNING id")
+          .get(purchaseStatusAfter(record.status, 'CONFIRM_SIMULATED_PAYMENT'), result.transaction, this.activeDay(now, record.monetaryScope), approvalId);
+        if (!paid) throw new Error('Simulated purchase cannot be completed from this state');
+        this.event(String(paid.id), 'payment.PAID');
+      } else if (record.transaction !== result.transaction) throw new Error('Simulated transaction changed');
+    } else if (!record || record.status !== 'PAID' || !this.hasVerifiedPaymentProof(record)) {
+      throw new Error('LIVE_PAYMENT_EVIDENCE_INVALID');
+    }
+    if (result.transaction !== record!.transaction && record!.executionMode !== 'simulated') throw new Error('DELIVERY_TRANSACTION_MISMATCH');
+    if (!this.delivery.complete(record!.intent.id, deliveryClaim)) return;
+    const saved = this.db.prepare('UPDATE purchases SET data=? WHERE approval_id=? AND data IS NULL RETURNING id').get(JSON.stringify(data), approvalId);
+    if (saved) this.event(String(saved.id), 'delivery.COMPLETE');
+  }
+  /** No external action exists between claim and delivery in the deterministic simulator. */
+  settleSimulatedApproval(approvalId: string, now: number, data: unknown) {
+    return this.atomic(() => {
+      const record = this.claimLocked(approvalId, now, candidate => {
+        if (!candidate.monetaryScope.walletIdentity.startsWith('sandbox:') || candidate.monetaryScope.walletIdentity !== this.scope('simulated').walletIdentity ||
+            candidate.intent.resourceId !== 'market-snapshot' || candidate.intent.paymentScheme !== 'simulated')
+          throw Error('REMOTE_PURCHASE_SIMULATED_ONLY');
+      }, 'simulated');
+      this.finishLocked(approvalId, { transaction: 'simulated-' + record.intent.id, data }, now);
+      return this.recordForApproval(approvalId);
     });
   }
   unknown(approvalId: string, transaction?: string) {
@@ -1287,6 +1449,10 @@ export class PurchaseLedger {
     if (committed > atomicAmount(grant.totalLimit)) throw new Error('Spend grant no longer covers reserved payments');
   }
   private grantOperationCoversIntent(grant: SpendGrant, intent: SpendIntent) {
+    // Remote purchase connections never rotate in place. A separately issued pairing
+    // or local credential is not the principal named in this simulation grant.
+    if (intent.paymentScheme === 'simulated' && (grant.connectionId !== intent.authority?.connectionId ||
+        grant.connectionGeneration !== intent.authority.connectionGeneration)) return false;
     if (grant.operation === PAID_RESOURCE_PURCHASE_OPERATION) return true;
     // Existing grants and in-flight purchases keep their original stored binding.
     return grant.operation === LEGACY_MARKET_SNAPSHOT_OPERATION &&

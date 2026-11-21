@@ -1,3 +1,4 @@
+import { paymentStatusFor } from './purchase-state';
 import { payOperationPurchaseId } from '../payment/pay-authority-adapter';
 import type { PurchaseLedger } from './purchase-ledger';
 import { AgentPurchaseReadInput, AgentPurchaseSummary } from '../mcp/purchase-read-contract';
@@ -20,8 +21,7 @@ export function readAgentPurchase(ledger: PurchaseLedger, owner: string, raw: un
   const operationId = provenance?.origin === 'external_pay' && provenance.caller_id === owner
     ? String(provenance.operation_id) : input.operationId ?? null;
   return AgentPurchaseSummary.parse({ purchaseId: record.intent.idempotencyKey, operationId, status: record.status,
-    paymentStatus: record.status === 'PAID' ? 'PAID' : record.status === 'PAYING' ? 'PAYING'
-      : record.status === 'PAYMENT_UNKNOWN' ? 'PAYMENT_UNKNOWN' : record.status === 'FAILED' ? 'FAILED' : 'NOT_STARTED',
+    paymentStatus: paymentStatusFor(record.status),
     deliveryStatus: record.deliveryStatus, failure: ledger.executionFailure(record.intent.id), policyCode: /^[A-Z][A-Z0-9_]{1,100}$/.test(record.decision.reason)
       ? record.decision.reason : 'POLICY_REASON_UNAVAILABLE',
     resourceId: record.intent.resourceId, amount: record.intent.amount.toString(), network: record.intent.network,

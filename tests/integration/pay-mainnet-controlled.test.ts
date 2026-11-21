@@ -7,7 +7,10 @@ import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
 import { resolve } from 'node:path';
-import { generateKeyPairSigner } from '@solana/kit';
+import { generateKeyPairSigner, getBase58Decoder } from '@solana/kit';
+import { encodePaymentResponseHeader } from '@x402/core/http';
+import type { ConfirmLocalGrant } from '../../src/modules/authority/native-grant-confirmation';
+import { readAgentPurchase } from '../../src/modules/purchases/agent-purchase-read';
 import { VersionedTransaction } from '@solana/web3.js';
 import { afterEach, expect, it, vi } from 'vitest';
 import { AppRuntime } from '../../src/modules/app/app-runtime';
@@ -60,7 +63,7 @@ it('stopped upgrade preserves committed WAL after an actual SIGKILL without dele
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
-async function fixture() {
+async function fixture(hostConsent?: ConfirmLocalGrant) {
   for (const key of Object.keys(process.env)) if (/^(YOSH_|APP2049_|SOLANA_|DEMO_)/.test(key) || key === 'USDC_MINT') vi.stubEnv(key, undefined);
   const signer = await generateKeyPairSigner(), recipient = await generateKeyPairSigner(), sponsor = await generateKeyPairSigner();
   const environment = resolvePaymentEnvironment({ YOSH_EXECUTION_MODE: 'live_mainnet', YOSH_ENABLE_MAINNET_EXECUTION: '1' });
@@ -81,6 +84,9 @@ async function fixture() {
     deliveryRecovery: { kind: 'idempotent_replay' as const } };
   vi.stubEnv('YOSH_MAINNET_RESOURCES', JSON.stringify([resource]));
   const dependencies = { initializeWallet: async () => ({ address: signer.address, reused: true }),
+    ...(hostConsent ? { hosting: { kind: 'mainnet-standalone' as const, runtimeDigest: 'a'.repeat(64),
+      payMcpPath: join(directory, 'pay-mcp'), confirmPurchaseGrant: hostConsent,
+      legacyMemberForRegistration: (_id: string, label: string) => label === 'Existing fixture host' ? 'default' : null } } : {}),
     readWallets: async () => [{ id: 'mainnet' as const, label: 'Ephemeral Mainnet-profile fixture', address: signer.address, status: 'available' as const }] };
   let app = new AppRuntime(directory, dependencies);
   const origin = 'http://127.0.0.1:3049';
@@ -88,7 +94,7 @@ async function fixture() {
   const memberId = app.ledger.defaultCardMember().id;
   const principal = () => app.authenticateAgent(new Request(`${origin}/pay/authorize`, { headers: { authorization: `Bearer ${readConnection(directory).token}` } }), 'request_purchase');
   app.ledger.setPaused(false, 'live_mainnet');
-  app.ledger.createSpendGrant({ totalLimit: '5000', singleLimit: '1000', expiresAt: Date.now() + 3600_000 }, principal(), {
+  if (!hostConsent) app.ledger.createSpendGrant({ totalLimit: '5000', singleLimit: '1000', expiresAt: Date.now() + 3600_000 }, principal(), {
     resourceId: resource.resourceId, providerId: resource.providerId, operation: PAID_RESOURCE_PURCHASE_OPERATION,
     network: resource.network, assetId: resource.mint, assetDecimals: 6, payTo: recipient.address, paymentScheme: 'exact' }, Date.now(), 'live_mainnet');
   const config = loadPaymentConfig(process.env, 'live_mainnet', signer.address);
@@ -137,6 +143,83 @@ async function fixture() {
     async reopen() { await app.prepareQuit(); app.close(); app = new AppRuntime(directory, dependencies); await app.initializeWallet(); },
     async close() { await app.prepareQuit(); app.close(); rmSync(directory, { recursive: true, force: true }); } };
 }
+
+it('only reuses a prior ordinary Pay order for the same host request and compatible caps', async () => {
+  const confirm = vi.fn<ConfirmLocalGrant>(async () => {}), f = await fixture(confirm);
+  try {
+    const origin = 'http://127.0.0.1:3049', facts = f.facts;
+    const resourceId = 'mainnet-fixture-data';
+    f.app.ledger.createSpendGrant({totalLimit: '5000', singleLimit: '1000', expiresAt: Date.now() + 3600000}, f.principal(), {
+      resourceId, providerId: 'fixture-provider', operation: PAID_RESOURCE_PURCHASE_OPERATION, network: facts.network,
+      assetId: facts.asset, assetDecimals: 6, payTo: facts.recipient, paymentScheme: 'exact'}, Date.now(), 'live_mainnet');
+    expect(await f.call('authorize')).toEqual({allow: true});
+    await f.call('plan', {facts});
+    const input = {hostId: randomUUID(), label: 'Existing fixture host', requestId: facts.operation_id,
+      resourceId, reason: 'Read original quote', request: {query: {coins: 'SOL'}}, maximumAmountAtomic: '1000'};
+    const receipt = readAgentPurchase(f.app.ledger, f.principal().cardMemberId, {operationId: input.requestId});
+    expect(receipt?.purchaseId).toBeTruthy();
+    const calls = f.rpc.mock.calls.length;
+    for (const change of [{request: {query: {coins: 'BTC'}}}, {request: undefined}, {maximumAmountAtomic: '999'}, {maximumNetworkFeeLamports: '1000'}]) {
+      await expect(f.app.authorizeHostPurchase({...input, ...change}, origin)).rejects.toThrow('LOCAL_PURCHASE_BINDING_MISMATCH');
+    }
+    await expect(f.app.authorizeHostPurchase({...input, existingOnly: true}, origin)).resolves.toMatchObject({url: facts.request.url, protocol: 'x402'});
+    expect(f.rpc).toHaveBeenCalledTimes(calls);
+    expect(confirm).not.toHaveBeenCalled();
+    expect(f.app.ledger.listForOwner(f.principal().cardMemberId, 50)).toHaveLength(1);
+  } finally { await f.close(); }
+});
+
+it('settles and delivers two independently confirmed host purchases from one Mainnet-profile fixture wallet', async () => {
+  const confirm = vi.fn<ConfirmLocalGrant>(async () => {});
+  const f = await fixture(confirm);
+  const origin = 'http://127.0.0.1:3049';
+  const submissions: string[] = [], memberIds = new Set<string>();
+  const originalRpc = f.rpc.getMockImplementation()!;
+  try {
+    for (const label of ['New fixture host', 'Existing fixture host']) {
+      const signature = getBase58Decoder().decode(new Uint8Array(64).fill(memberIds.size + 1));
+      const payload = await signedPaymentFixture(f.signer, f.config, f.facts.accepted);
+      const transaction = VersionedTransaction.deserialize(Buffer.from(String(payload.payload.transaction), 'base64'));
+      transaction.signatures = transaction.signatures.map(() => new Uint8Array(64));
+      Object.assign(f.prepared, {transaction: Buffer.from(transaction.serialize()).toString('base64'),
+        recentBlockhash: transaction.message.recentBlockhash});
+      vi.mocked(reconcileStoredOriginalPayment).mockResolvedValue({status: 'CONFIRMED', transaction: signature});
+      f.rpc.mockImplementation(async (url, init) => {
+        if (new URL(String(url)).hostname !== 'merchant.integration.invalid') return originalRpc(url, init);
+        const payment = new Headers(init?.headers).get('payment-signature');
+        if (!payment) return new Response(null, {status: 402, headers: {
+          'payment-required': Buffer.from(JSON.stringify(f.facts.payment_required)).toString('base64')}});
+        submissions.push(payment);
+        return Response.json({result: label}, {headers: {'payment-response': encodePaymentResponseHeader({
+          success: true, network: f.config.network, transaction: signature, payer: f.signer.address,
+        })}});
+      });
+      const input = {hostId: randomUUID(), label, reason: 'Test one price lookup', resourceId: 'mainnet-fixture-data',
+        requestId: 'one-price-per-member', request: {query: {coins: 'SOL'}}};
+      const plan = await f.app.authorizeHostPurchase(input, origin);
+      const memberId = plan.memberId;
+      expect(memberIds.has(memberId)).toBe(false);
+      memberIds.add(memberId);
+      expect(Object.fromEntries(new URL(plan.url).searchParams)).toEqual({currency: 'usd', coins: 'SOL'});
+      const descriptor = readConnection(f.directory, memberId);
+      const principal = f.app.authenticateAgent(new Request(origin, {headers: {authorization: 'Bearer ' + descriptor.token}}), 'request_purchase');
+      const facts = {...f.facts, request: {...f.facts.request, url: plan.url},
+        caller_id: memberId, operation_id: input.requestId, attempt_id: randomUUID()};
+      const economicFacts = Object.fromEntries(Object.entries(facts).filter(([key]) => key !== 'payment_required'));
+      expect(await f.app.payMcpOperation('authorize', economicFacts, principal, origin)).toEqual({allow: true});
+      await f.app.payMcpOperation('plan', {facts}, principal, origin);
+      await f.app.payMcpOperation('execute', {facts, unsigned: f.prepared}, principal, origin);
+      const receipt = readAgentPurchase(f.app.ledger, memberId, {operationId: input.requestId});
+      expect(receipt).toMatchObject({status: 'PAID', deliveryStatus: 'COMPLETE', amount: '1000', transaction: signature});
+      expect(f.app.ledger.getOwned(receipt!.purchaseId, memberId)?.data).toEqual({result: label});
+      expect(await f.app.authorizeHostPurchase(input, origin)).toEqual(plan);
+    }
+    expect(confirm).toHaveBeenCalledTimes(2);
+    expect(new Set(submissions).size).toBe(2);
+    expect(submissions).toHaveLength(2);
+    expect(f.app.ledger.managedSummary(Date.now(), 'live_mainnet')).toMatchObject({paid: '2000', reserved: '0'});
+  } finally { await f.close(); }
+});
 
 it.each(['preflight', 'simulation', 'signer_load', 'submission'] as const)('preserves the actual %s failure across the purchase boundary without changing payment accounting', async stage => {
   const f = await fixture();

@@ -16,13 +16,13 @@ afterEach(() => { for (const directory of directories.splice(0)) rmSync(director
 const code = buildSync({ entryPoints: [resolve('scripts/pay-dev-mcp.ts')], bundle: true, write: false,
   platform: 'node', format: 'cjs', packages: 'external', define: { __YOSH_PLUGIN_DEV__: 'true' }, minifySyntax: true }).outputFiles[0].text;
 
-function fixture(policyCode: string, missing = false, mppError?: string) {
+function fixture(policyCode: string, missing = false, mppError?: string, capabilities = ['read', 'request_purchase'], internalPurchase = false) {
   const parent = realpathSync(mkdtempSync(join(tmpdir(), 'yosh-purchase-read-'))); directories.push(parent);
   const directory = join(parent, 'Yosh Codex Plugin Dev'); mkdirSync(directory, { mode: 0o700 });
   const memberId = randomUUID(); const token = 'a'.repeat(43); const origin = 'http://127.0.0.1:14449';
   writeFileSync(join(directory, 'pay-dev-runtime.json'), JSON.stringify({ version: 1, profile: 'isolated-pay-dev', origin, memberId }), { mode: 0o600 });
   writeFileSync(join(directory, 'mcp-connection.json'), JSON.stringify({ origin, token, cardMemberId: memberId,
-    connectionId: randomUUID(), generation: 1, capabilities: ['read', 'request_purchase'] }), { mode: 0o600 });
+    connectionId: randomUUID(), generation: 1, capabilities }), { mode: 0o600 });
   const wrapper = join(parent, 'mcp.cjs'); writeFileSync(wrapper, 'fixture-wrapper'); writeFileSync(join(parent, 'pay-mcp'), 'fixture-controlled-worker');
   const host = new PassThrough(), output = new PassThrough(), errors = new PassThrough();
   const child = Object.assign(new ChildProcess(), { stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough() });
@@ -34,6 +34,7 @@ function fixture(policyCode: string, missing = false, mppError?: string) {
     assetId: 'fixture-asset', assetDecimals: 6, transaction: null };
   const fetcher = vi.fn(async (input: string, options: RequestInit) => {
     expect(options.headers).toMatchObject({ authorization: `Bearer ${token}` });
+    if (input.endsWith('/api/agent/session')) return capabilities.includes('read') ? Response.json({ ok: true }) : new Response(null, { status: 401 });
     if (input.endsWith('/api/agent/purchase?operationId=original-op'))
       return missing ? Response.json({ code: 'PURCHASE_NOT_FOUND' }, { status: 404 }) : Response.json(summary);
     if (input.includes('/api/agent/purchases/pay_original/delivery?offset=0'))
@@ -45,7 +46,7 @@ function fixture(policyCode: string, missing = false, mppError?: string) {
   });
   runInNewContext(code, { module: { exports: {} }, require: (name: string): unknown =>
     name === 'node:child_process' ? { spawn: () => child } : requireDependency(name),
-    process: { argv: [process.execPath, wrapper, '--data-dir', directory], env: {}, getuid: process.getuid,
+    process: { argv: [process.execPath, wrapper, '--data-dir', directory], env: internalPurchase ? { YOSH_INTERNAL_PURCHASE: '1' } : {}, getuid: process.getuid,
       stdin: host, stdout: output, stderr: errors, once: vi.fn(), exitCode: 0 },
     Buffer, URL, URLSearchParams, Request, Response, AbortSignal, TextEncoder, TextDecoder, Error, setTimeout, clearTimeout, fetch: fetcher });
   const send = (id: number, name: string, args: unknown) => host.write(`${JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args } })}\n`);
@@ -59,13 +60,33 @@ function fixture(policyCode: string, missing = false, mppError?: string) {
   };
   const result = (id: number) => z.object({ result: z.object({ isError: z.boolean().optional(),
     content: z.array(z.object({ type: z.literal('text'), text: z.string() })) }) }).parse(responses.find(response => z.object({ id: z.literal(id) }).safeParse(response).success)).result;
-  return { child, responses, forwarded, fetcher, send, result, listTools, summary, close() { host.end(); child.emit('close', 0); } };
+  return { host, child, responses, forwarded, fetcher, send, result, listTools, summary, close() { host.end(); child.emit('close', 0); } };
 }
+
+it.each([
+  { capabilities: ['request_purchase'], internal: false, tracksCodex: false },
+  { capabilities: ['read_statement', 'request_purchase'], internal: false, tracksCodex: false },
+  { capabilities: ['read', 'request_purchase'], internal: true, tracksCodex: false },
+  { capabilities: ['read', 'request_purchase'], internal: false, tracksCodex: true },
+])('uses host liveness only for the existing host session ($capabilities, internal=$internal)', async ({ capabilities, internal, tracksCodex }) => {
+  const f = fixture('APPROVED', false, undefined, capabilities, internal);
+  try {
+    f.host.write(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) + '\n');
+    const ping = f.responses.map(value => z.object({ id: z.string(), method: z.literal('ping') }).safeParse(value)).find(result => result.success);
+    if (ping?.success) f.host.write(JSON.stringify({ jsonrpc: '2.0', id: ping.data.id, result: {} }) + '\n');
+    expect(Boolean(ping?.success)).toBe(tracksCodex);
+    f.send(53, 'get_purchase', { operationId: 'original-op' });
+    await vi.waitFor(() => expect(f.result(53).isError).not.toBe(true));
+    expect(f.fetcher.mock.calls.some(([path]) => path.endsWith('/api/agent/session'))).toBe(tracksCodex);
+    expect(f.result(53).content[0].text).toContain('original-op');
+    expect(f.child.stdin.writableEnded).toBe(false);
+  } finally { f.close(); }
+});
 
 it('the plugin lists only upstream curl and blocks guessed upstream tools before forwarding', () => {
   const f = fixture('PAYMENTS_PAUSED');
   try {
-    expect(f.listTools()).toEqual(['curl', 'get_spending_status', 'get_purchase', 'get_purchase_delivery',
+    expect(f.listTools()).toEqual(['curl', 'get_spending_status', 'get_purchase', 'get_purchase_delivery', 'list_account_purchases', 'read_account_result',
       'request_mpp_purchase', 'quote_mpp_resource', 'discover_x402_resource', 'register_x402_resource', 'quote_x402_resource']);
     const before = f.forwarded.length;
     const forbidden = ['create_skill', 'get_balance', 'get_catalog_entry', 'list_catalog', 'search_catalog',

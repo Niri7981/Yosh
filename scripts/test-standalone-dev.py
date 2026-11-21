@@ -85,7 +85,7 @@ def main():
         actual_tools = {tool['name'] for tool in listed['tools']}
         # Existing wrapper exposes recover_payment only for live networks. This
         # Offline package must preserve its seven-tool allowlist, not widen it.
-        assert actual_tools == {'get_spending_status', 'get_purchase', 'get_purchase_delivery',
+        assert actual_tools == {'get_spending_status', 'get_purchase', 'get_purchase_delivery', 'list_account_purchases', 'read_account_result',
             'quote_x402_resource', 'discover_x402_resource', 'register_x402_resource', 'curl'}, sorted(actual_tools)
         status = request('tools/call', {'name': 'get_spending_status', 'arguments': {}})
         assert not status.get('isError')

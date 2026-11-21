@@ -1,3 +1,8 @@
+import { createLocalHostClient } from '../src/modules/mcp/local-host-client';
+import { PurchaseResourceLookup } from '../src/modules/mcp/purchase-resource-contract';
+import { describeLocalResource, describePurchaseResourceTool, hostPurchaseTool, LocalHostPurchaseToolInput, requestLocalPurchase } from '../src/modules/mcp/local-host-purchase';
+import { parseHostRegistration } from '../src/modules/mcp/local-host-registration';
+import { mcpMemberEnvironment } from '../src/modules/mcp/member-environment';
 import { combinedTools, routeTool, type EnvironmentTools } from '../src/modules/mcp/environment-routing';
 import { localToolErrorCode } from '../src/modules/mcp/local-tool-error';
 /** Setup tools remain available before pairing. Once paired, forward to the
@@ -15,12 +20,22 @@ import { IS_LOCAL_AUTH_DEVELOPMENT } from '../src/modules/pay-dev/profile';
 declare const __YOSH_PLUGIN_VERSION__: string | undefined;
 const LOCAL_PLUGIN_VERSION = typeof __YOSH_PLUGIN_VERSION__ === 'string' ? __YOSH_PLUGIN_VERSION__ : '0.2.4';
 const execute = promisify(execFile);
+const memberEnv = mcpMemberEnvironment(process.env);
 const root = dirname(resolve(process.argv[1]));
 const directory = z.string().min(1).parse(process.argv[3]);
 if (!IS_LOCAL_AUTH_DEVELOPMENT || process.argv.length !== 4 || process.argv[2] !== '--data-dir') throw new Error('LOCAL_PLUGIN_ARGUMENTS_INVALID');
+// The outer install-mcp verified the actual host executable against its registration.
+function legacyHostClient() {
+  const { YOSH_VERIFIED_REGISTRATION: registration, YOSH_VERIFIED_HOST_LABEL: label, YOSH_VERIFIED_LEGACY_MEMBER: legacy } = process.env;
+  if (registration === undefined && label === undefined && legacy === undefined) return;
+  if (!registration || !label || legacy !== (memberEnv.YOSH_CARD_MEMBER_ID ?? 'default')) throw new Error('LOCAL_HOST_BINDING_MISMATCH');
+  return createLocalHostClient(root, parseHostRegistration(['--registration', registration, '--label', label]));
+}
+const hostClient = legacyHostClient();
+
 async function command(action: 'settings' | 'connection') {
   const result = await execute(join(root, 'node'), [join(root, 'standalone.cjs'), action, '--data-dir', directory],
-    { timeout: 15_000, maxBuffer: 16384, env: { HOME: directory, PATH: '/usr/bin:/bin', NODE_ENV: 'test' } });
+    { timeout: 15_000, maxBuffer: 16384, env: { ...(action === 'connection' ? memberEnv : {}), HOME: directory, PATH: '/usr/bin:/bin', NODE_ENV: 'test' } });
   return JSON.parse(result.stdout) as unknown;
 }
 const Connection = z.object({ enabled: z.boolean(), connectionState: z.string(), paused: z.boolean() });
@@ -49,7 +64,7 @@ async function mainnet() {
     try {
       await next.connect(new StdioClientTransport({ command: join(root, 'node'),
         args: [join(root, 'mainnet.cjs'), 'install-mcp'], cwd: root, stderr: 'ignore',
-        env: { HOME: directory, PATH: '/usr/bin:/bin', NODE_ENV: 'production' } }));
+        env: { ...memberEnv, HOME: directory, PATH: '/usr/bin:/bin', NODE_ENV: 'production' } }));
       next.onclose = () => { if (mainnetClient === next) mainnetClient = undefined; };
       mainnetClient = next; return next;
     } catch (error) { await next.close(); throw error; }
@@ -71,7 +86,7 @@ async function pay() {
     const next = new Client({ name: 'yosh-local-proxy', version: LOCAL_PLUGIN_VERSION });
     try {
       await next.connect(new StdioClientTransport({ command: join(root, 'node'), args: [join(root, 'mcp.cjs'), '--data-dir', directory],
-        cwd: directory, stderr: 'ignore', env: { HOME: directory, PATH: '/usr/bin:/bin', NODE_ENV: 'test', YOSH_PAY_DEV: '1', YOSH_PAY_DEV_ENV: 'devnet' } }));
+        cwd: directory, stderr: 'ignore', env: { ...memberEnv, HOME: directory, PATH: '/usr/bin:/bin', NODE_ENV: 'test', YOSH_PAY_DEV: '1', YOSH_PAY_DEV_ENV: 'devnet' } }));
       client = next; return next;
     } catch (error) { await next.close(); throw error; }
   })().finally(() => { connecting = undefined; });
@@ -79,10 +94,22 @@ async function pay() {
 }
 const text = (value: unknown) => ({ content: [{ type: 'text' as const, text: JSON.stringify(value) }] });
 server.setRequestHandler(ListToolsRequestSchema, async () => {
-  return { tools: [...setup, ...await refreshInventory()] };
+  const registeredTools = hostClient ? [
+    { ...describePurchaseResourceTool, inputSchema: z.toJSONSchema(PurchaseResourceLookup) },
+    { ...hostPurchaseTool, inputSchema: z.toJSONSchema(LocalHostPurchaseToolInput) },
+  ] : [];
+  return { tools: [...setup, ...registeredTools, ...await refreshInventory()] };
 });
-server.setRequestHandler(CallToolRequestSchema, async request => {
+server.setRequestHandler(CallToolRequestSchema, async (request, { signal }) => {
   try {
+    if (request.params.name === describePurchaseResourceTool.name) {
+      if (!hostClient) throw new Error('LOCAL_HOST_REGISTRATION_REQUIRED');
+      return await describeLocalResource(hostClient.describeResource, request.params.arguments, signal);
+    }
+    if (request.params.name === hostPurchaseTool.name) {
+      if (!hostClient) throw new Error('LOCAL_HOST_REGISTRATION_REQUIRED');
+      return await requestLocalPurchase(hostClient.purchase, LocalHostPurchaseToolInput.parse(request.params.arguments), signal);
+    }
     if (request.params.name === 'open_local_settings') {
       const { environment } = z.object({ environment: z.enum(['mainnet', 'devnet']).optional() }).strict().parse(request.params.arguments ?? {});
       const result = z.object({ url: z.url() }).strict().parse(await command('settings'));
@@ -109,5 +136,6 @@ server.setRequestHandler(CallToolRequestSchema, async request => {
   }
 });
 void server.connect(new StdioServerTransport());
-const close = async () => { await client?.close(); await mainnetClient?.close(); await server.close(); };
+const close = async () => { await server.close(); await client?.close(); await mainnetClient?.close(); };
+process.stdin.once('end', () => { void close(); });
 process.once('SIGTERM', () => { void close(); }); process.once('SIGINT', () => { void close(); });

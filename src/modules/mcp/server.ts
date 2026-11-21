@@ -1,3 +1,4 @@
+import { accountTools, accountReadPath } from './account-read-contract';
 import { YOSH_VERSION } from '../app/product-version';
 import { AgentResourceRegistrationInput } from '../resources/agent-resource-registration';
 import { DiscoveryInput } from '../resources/mainnet-resource-discovery';
@@ -35,7 +36,7 @@ export function createAgentServer(read: AgentRead, requestPurchase: AgentPurchas
   discover: AgentDiscover = async () => { throw new Error('RESOURCE_DISCOVERY_UNAVAILABLE'); },
   delivery: AgentDelivery = async () => { throw new Error('DELIVERY_NOT_AVAILABLE'); },
   quoteResource: AgentQuote = async () => { throw new Error('RESOURCE_QUOTE_UNAVAILABLE'); },
-  registerResource: AgentDiscover = async () => { throw new Error('RESOURCE_REGISTRATION_UNAVAILABLE'); }) {
+  registerResource: AgentDiscover = async () => { throw new Error('RESOURCE_REGISTRATION_UNAVAILABLE'); }, accountRead?: (path: string) => Promise<unknown>) {
   const server = new McpServer({ name: 'Yosh', version: YOSH_VERSION });
   const annotations = { readOnlyHint: true, destructiveHint: false, openWorldHint: false };
   for (const [name, operation, description] of [
@@ -47,6 +48,12 @@ export function createAgentServer(read: AgentRead, requestPurchase: AgentPurchas
       catch (error) { return { isError: true, content: [{ type: 'text' as const, text: error instanceof AgentReadError
         ? `${error.code}: Yosh could not complete this read; no payment was requested.`
         : 'APP_UNAVAILABLE: 请启动 Yosh 并启用 Agent 连接；请求未付款。' }] }; }
+    });
+  }
+  if (accountRead) for (const { name, description, schema } of accountTools) {
+    server.registerTool(name, { description, inputSchema: schema, annotations }, async (input: unknown) => {
+      try { return { content: [{ type: 'text' as const, text: JSON.stringify(await accountRead(accountReadPath(name, input))) }] }; }
+      catch (error) { return { isError: true, content: [{ type: 'text' as const, text: error instanceof Error && ['AGENT_UNAUTHORIZED','ACCOUNT_READ_INPUT_INVALID','ACCOUNT_RESULT_NOT_AVAILABLE'].includes(error.message) ? error.message : 'ACCOUNT_READ_UNAVAILABLE' }] }; }
     });
   }
   server.registerTool('discover_x402_resource', {

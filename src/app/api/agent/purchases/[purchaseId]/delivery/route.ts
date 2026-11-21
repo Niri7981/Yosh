@@ -9,7 +9,11 @@ export async function GET(request: Request, context: Context) {
   const app = appRuntime();
   let principal;
   try { principal = app.authenticateAgent(request); }
-  catch { return Response.json({ code: 'AGENT_UNAUTHORIZED' }, { status: 401 }); }
+  catch {
+    // A buyer can read its own completed order. Shared statement access is separately consented.
+    try { principal = app.authenticateAgent(request, 'request_purchase'); }
+    catch { return Response.json({ code: 'AGENT_UNAUTHORIZED' }, { status: 401 }); }
+  }
   const id = z.string().regex(/^[a-zA-Z0-9_-]{1,80}$/).safeParse((await context.params).purchaseId);
   const query = new URL(request.url).searchParams;
   const offset = z.coerce.number().int().min(0).max(MAX_SERIALIZED_RESOURCE_DELIVERY_BYTES).safeParse(query.get('offset') ?? '0');

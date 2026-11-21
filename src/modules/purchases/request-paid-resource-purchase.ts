@@ -106,7 +106,7 @@ export async function requestPaidResourcePurchase(raw: unknown, options: {
   const authority = options.ledger.spendAuthorityForDecision(principal, PAID_RESOURCE_PURCHASE_OPERATION, now, executionMode,
     IS_CODEX_PLUGIN_DEVELOPMENT ? PAID_RESOURCE_SCOPE_ID : undefined);
   const intent = SpendIntentSchema.parse({ id: randomUUID(), idempotencyKey: input.requestId, requestHash,
-    resourceId: descriptor.id, resourceScopeId: PAID_RESOURCE_SCOPE_ID, resourcePath: descriptor.path,
+    resourceId: descriptor.id, resourceScopeId: PAID_RESOURCE_SCOPE_ID, resourcePath: descriptor.path, resultAudience: 'account',
     httpRequest: request, x402Challenge: challenge, deliveryRecovery: TEST_CACHED_DELIVERY,
     providerId: descriptor.providerId, reason: input.reason, amount: quote.amount, currency: 'USDC', assetDecimals: 6,
     assetId: quote.asset, network: quote.network, payTo: quote.payTo, paymentScheme: quote.scheme,

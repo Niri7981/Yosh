@@ -12,6 +12,10 @@ export function parseStoredPurchaseStatus(value: unknown): PurchaseStatus {
   return PurchaseStatusSchema.parse(value);
 }
 
+export function paymentStatusFor(status: PurchaseStatus) {
+  return status === 'PAID' || status === 'PAYING' || status === 'PAYMENT_UNKNOWN' || status === 'FAILED' ? status : 'NOT_STARTED';
+}
+
 export type PurchaseTransition =
   | 'START_PAYMENT'
   | 'EXPIRE_APPROVAL'

@@ -103,16 +103,29 @@ export function validateResourceChallenge(raw: unknown, declared: X402Resource, 
 }
 
 /** One fresh challenge for the exact approved request; no redirect or unsigned retry. */
-export async function fetchResourceChallenge(resource: X402Resource, environment: PaymentEnvironment, fetcher?: typeof fetch, selectedQuote?: unknown) {
+export async function fetchResourceChallenge(resource: X402Resource, environment: PaymentEnvironment, fetcher?: typeof fetch, selectedQuote?: unknown,
+  options: { preserveOfferMetadata?: boolean; hostPurchase?: boolean } = {}) {
   const { resource: declared } = validatedResource(resource, environment);
   const { url, method, headers, body } = declared.request;
-  const response = declared.request.access === 'https'
-    ? await safeResourceFetch(url, { method, headers, ...(body === undefined ? {} : { body }), redirect: 'error', signal: AbortSignal.timeout(10_000) }, fetcher)
-    : await (fetcher ?? fetch)(url, { method, headers, ...(body === undefined ? {} : { body }), redirect: 'error', signal: AbortSignal.timeout(10_000) });
+  const init = { method, headers, ...(body === undefined ? {} : { body }), redirect: 'error' as const, signal: AbortSignal.timeout(10_000) };
+  let response: Response;
   try {
+    response = declared.request.access === 'https' ? await safeResourceFetch(url, init, fetcher) : await (fetcher ?? fetch)(url, init);
+  } catch (error) {
+    if (!options.hostPurchase) throw error;
+    if (error instanceof Error && error.message === 'RESOURCE_DESTINATION_UNSAFE') throw new Error('LOCAL_PURCHASE_DESTINATION_REJECTED');
+    if (error instanceof Error && error.message === 'RESOURCE_RESPONSE_TOO_LARGE') throw new Error('LOCAL_PURCHASE_QUOTE_INVALID');
+    throw new Error('LOCAL_PURCHASE_QUOTE_UNAVAILABLE');
+  }
+  try {
+    if (options.hostPurchase && (response.status >= 500 || response.status === 429 || response.status === 408))
+      throw new Error('LOCAL_PURCHASE_QUOTE_UNAVAILABLE');
     if (response.status !== 402 || (response.url && response.url !== url)) throw new Error('INVALID_X402_QUOTE');
     const paymentRequiredHeader = response.headers.get('PAYMENT-REQUIRED') ?? '';
-    const parsed = validateResourceChallenge(readPaymentRequiredHeader(paymentRequiredHeader), declared, environment, selectedQuote);
+    const parsed = validateResourceChallenge(readPaymentRequiredHeader(paymentRequiredHeader, options.hostPurchase || options.preserveOfferMetadata), declared, environment, selectedQuote);
     return { endpoint: url, request: declared.request, paymentRequiredHeader, ...parsed };
+  } catch (error) {
+    if (!options.hostPurchase || (error instanceof Error && error.message === 'LOCAL_PURCHASE_QUOTE_UNAVAILABLE')) throw error;
+    throw new Error('LOCAL_PURCHASE_QUOTE_INVALID');
   } finally { await response.body?.cancel(); }
 }

@@ -100,7 +100,7 @@ def main():
                     report = json.loads(result['content'][0]['text'])
                     assert report['realFunds'] is False and report['paused'] and report['enabled'] is False
                 else:
-                    assert set(server['tools']) == {'get_spending_status', 'get_purchase', 'get_purchase_delivery',
+                    assert set(server['tools']) == {'get_spending_status', 'get_purchase', 'get_purchase_delivery', 'list_account_purchases', 'read_account_result',
                         'quote_x402_resource', 'discover_x402_resource', 'register_x402_resource', 'curl'}
                     result = host.call('mcpServer/tool/call', {'threadId': thread, 'server': server['name'], 'tool': 'get_spending_status', 'arguments': {}})
                     assert not result.get('isError')

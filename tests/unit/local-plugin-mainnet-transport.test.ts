@@ -1,4 +1,5 @@
 import { buildSync } from 'esbuild';
+import { randomUUID } from 'node:crypto';
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -9,6 +10,7 @@ import { z } from 'zod';
 
 it('uses its own Mainnet entry and rechecks readiness before cached-client dispatch without an App', async () => {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'yosh-mainnet-transport-')));
+  const member = randomUUID();
   const directory = join(root, 'data'); mkdirSync(directory);
   symlinkSync(process.execPath, join(root, 'node'));
   writeFileSync(join(root, 'standalone.cjs'), 'console.log(JSON.stringify({enabled:false,connectionState:"disconnected",paused:true}));');
@@ -17,7 +19,7 @@ it('uses its own Mainnet entry and rechecks readiness before cached-client dispa
 const fs = require('node:fs'), path = require('node:path');
 const action = process.argv[2], log = path.join(__dirname, 'calls.jsonl');
 const record = value => fs.appendFileSync(log, JSON.stringify(value) + '\\n');
-record({action, cwd:process.cwd(), app:process.env.YOSH_MAINNET_APP ?? null});
+record({action, cwd:process.cwd(), member:process.env.YOSH_CARD_MEMBER_ID ?? null, app:process.env.YOSH_MAINNET_APP ?? null});
 if (action === 'start') {
   if (fs.existsSync(path.join(__dirname, 'reject-start'))) process.exit(1);
   console.log(JSON.stringify({running:true}));
@@ -40,15 +42,17 @@ if (action === 'start') {
     outfile: join(root, 'local-mcp.cjs') });
   const client = new Client({ name: 'mainnet-transport-test', version: '1' });
   const calls = () => readFileSync(join(root, 'calls.jsonl'), 'utf8').trim().split('\n')
-    .map(line => z.object({ action: z.string(), cwd: z.string().optional(), app: z.null().optional(), arguments: z.record(z.string(), z.unknown()).optional() }).parse(JSON.parse(line)));
+    .map(line => z.object({ action: z.string(), member: z.string().nullable().optional(), cwd: z.string().optional(), app: z.null().optional(), arguments: z.record(z.string(), z.unknown()).optional() }).parse(JSON.parse(line)));
   const count = (action: string) => calls().filter(call => call.action === action).length;
   try {
     await client.connect(new StdioClientTransport({ command: process.execPath,
       args: [join(root, 'local-mcp.cjs'), '--data-dir', directory], cwd: root, stderr: 'pipe',
-      env: { HOME: directory, PATH: '/usr/bin:/bin', NODE_ENV: 'test', YOSH_MAINNET_APP: '/Applications/forbidden.app' } }));
+      env: { HOME: directory, PATH: '/usr/bin:/bin', NODE_ENV: 'test', YOSH_CARD_MEMBER_ID: member, YOSH_MAINNET_APP: '/Applications/forbidden.app' } }));
     const tools = (await client.listTools()).tools;
     expect(tools.find(tool => tool.name === 'get_spending_status')?.inputSchema.properties?.environment).toMatchObject({ enum: ['mainnet'] });
     expect(count('install-mcp')).toBe(1);
+    expect(calls().find(call => call.action === 'install-mcp')?.member).toBe(member);
+    expect(calls().filter(call => call.action === 'start').every(call => call.member === null)).toBe(true);
     const firstStarts = count('start');
     const result = await client.callTool({ name: 'get_spending_status', arguments: { environment: 'mainnet' } });
     expect(result.isError).not.toBe(true);

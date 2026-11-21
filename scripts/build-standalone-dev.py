@@ -80,11 +80,17 @@ def main():
     shutil.copy2(provenance, output / 'dependency-provenance.json')
     env = {key: os.environ[key] for key in ['HOME', 'PATH', 'TMPDIR', 'LANG'] if key in os.environ}
     inputs = {}
+    first_use = args.local_authorization and not args.retain_mainnet_runtime
     entries = [('standalone-dev.ts', 'standalone.cjs', False), ('pay-dev-mcp.ts', 'mcp.cjs', False)]
     if args.local_authorization:
         entries += [('local-plugin-mcp.ts', 'local-mcp.cjs', False)]
         if not args.retain_mainnet_runtime:
             entries += [('mainnet-standalone.ts', 'mainnet.cjs', True), ('pay-dev-mcp.ts', 'mainnet-mcp.cjs', True)]
+    if first_use:
+        entries.append(('first-use-mcp.ts', 'first-use-mcp.cjs', False))
+        registration = 'scripts/register-local-agents.mjs'
+        shutil.copy2(ROOT / registration, runtime / 'register-local-agents.mjs')
+        inputs[registration] = builder.digest(ROOT / registration)
     for source_name, name, mainnet in entries:
         metadata = output / (name + '.inputs.json')
         subprocess.run([str(runtime / 'node'), str(ROOT / 'node_modules/esbuild/bin/esbuild'),
@@ -93,7 +99,7 @@ def main():
             '--define:__YOSH_PLUGIN_DEV__=' + ('false' if mainnet else 'true'),
             '--define:__YOSH_STANDALONE_DEV__=' + ('false' if mainnet else 'true'),
             '--define:__YOSH_RC5__=' + ('true' if mainnet else 'false'),
-            '--define:__YOSH_PLUGIN_VERSION__=' + json.dumps('0.2.13' if args.mainnet_mpp else '0.2.7' if args.mpp_artifact else '0.2.4'),
+            '--define:__YOSH_PLUGIN_VERSION__=' + json.dumps('0.2.18' if first_use else '0.2.14' if args.mainnet_mpp else '0.2.7' if args.mpp_artifact else '0.2.4'),
             '--outfile=' + str(runtime / name), '--metafile=' + str(metadata)], cwd=ROOT, env=env, check=True)
         for path in json.loads(metadata.read_text())['inputs']:
             inputs[path] = builder.digest(ROOT / path)
@@ -122,12 +128,13 @@ def main():
         inputs['scripts/mainnet-runtime.sb'] = builder.digest(ROOT / 'scripts/mainnet-runtime.sb')
         builder.write_json(runtime / 'mainnet-manifest.json', {
             'kind': 'yosh-mainnet-standalone', 'apiVersion': 1, 'dataContract': 'existing-mainnet-v1',
-            'mppProtocol': bool(args.mainnet_mpp),
+            'mppProtocol': bool(args.mainnet_mpp), 'firstUsePurchases': bool(first_use),
+            'purchaseResourceLookup': bool(first_use), 'hostPurchaseAmountLimit': bool(first_use),
             'profile': 'com.yosh.pay-development.v011rc5', 'version': '0.1.0-dev', 'productionEnabled': False,
             'sourceHead': builder.git(ROOT, 'rev-parse', 'HEAD').decode().strip(),
             'dependencyArtifactSha256': builder.digest(artifact),
             'files': {name: builder.digest(runtime / name) for name in
-                      ['node', 'mainnet.cjs', 'mainnet-mcp.cjs', 'pay-mcp', 'pay-protocol-engine', 'mainnet.sb'] +
+                      ['node', 'mainnet.cjs', 'mainnet-mcp.cjs', 'pay-mcp', 'pay-protocol-engine', 'mainnet.sb', 'yosh-confirm'] +
                       (['mpp-protocol-engine', 'mpp-provenance.json'] if args.mainnet_mpp else [])},
             'licenses': {name: builder.digest(runtime / 'licenses' / name) for name in
                          ['Node-LICENSE', 'Pay-LICENSE', 'pay-kit-LICENSE']},
@@ -137,6 +144,9 @@ def main():
         packager = importlib.util.module_from_spec(spec); spec.loader.exec_module(packager)
         retained = args.retain_mainnet_runtime.resolve(strict=True)
         packager.verify_mainnet(retained)
+        if 'yosh-confirm' in json.loads((retained / 'mainnet-manifest.json').read_text())['files']:
+            if builder.digest(retained / 'yosh-confirm') != builder.digest(runtime / 'yosh-confirm'):
+                raise ValueError('Retained Mainnet confirmation helper differs')
         for name in ['node', 'pay-mcp', 'pay-protocol-engine']:
             if builder.digest(retained / name) != builder.digest(runtime / name):
                 raise ValueError('Retained Mainnet shared dependency differs')
@@ -147,6 +157,7 @@ def main():
             shutil.copy2(retained / name, runtime / name)
     manifest = {'kind': 'yosh-local-devnet' if args.local_authorization else 'yosh-standalone-offline-dev', 'apiVersion': 2 if args.local_authorization else 1, 'dataContract': 'local-devnet-v1' if args.local_authorization else 'standalone-offline-v1',
         'productionEnabled': False, 'mainnetBridge': False, 'mainnetStandalone': bool(args.local_authorization),
+        'firstUsePairing': bool(first_use), 'firstUsePurchases': bool(first_use), 'purchaseResourceLookup': bool(first_use), 'hostPurchaseAmountLimit': bool(first_use),
         'mppProtocol': bool(args.mpp_artifact), 'mainnetMpp': bool(args.mainnet_mpp),
         'retainedMainnetManifestSha256': builder.digest(runtime / 'mainnet-manifest.json') if args.retain_mainnet_runtime else None,
         'signing': 'dependency-ad-hoc-only', 'version': '0.1.0-dev',

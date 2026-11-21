@@ -25,7 +25,7 @@ ROOT = Path(__file__).resolve().parents[1]
 NAME = 'Yosh Codex Plugin Dev'
 IDENTITY = 'com.yosh.codex-plugin-dev'
 ORIGIN = 'http://127.0.0.1:14449'
-TOOLS = {'get_spending_status', 'get_purchase', 'get_purchase_delivery',
+TOOLS = {'get_spending_status', 'get_purchase', 'get_purchase_delivery', 'list_account_purchases', 'read_account_result',
          'quote_x402_resource', 'discover_x402_resource', 'register_x402_resource',
          'curl', 'recover_payment'}
 SAFE_FIELDS = {'purchaseId', 'operationId', 'status', 'code', 'policyCode', 'reasonCode',
