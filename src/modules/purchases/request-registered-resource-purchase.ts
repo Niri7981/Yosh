@@ -80,7 +80,7 @@ export async function requestRegisteredResourcePurchase(raw: unknown, options: {
   const winner = ledger.getOwned(input.requestId, principal.cardMemberId);
   if (winner) return reuse(winner);
   const now = options.now?.() ?? Date.now();
-  const authority = ledger.spendAuthorityForDecision(principal, PAID_RESOURCE_PURCHASE_OPERATION, now, config.mode, resource.resourceId);
+  const authority = ledger.spendAuthorityForDecision(principal, PAID_RESOURCE_PURCHASE_OPERATION, now, config.mode, resource.resourceId, options.externalExecution?.operationId);
   const intent = createX402SpendIntent({ idempotencyKey: input.requestId, resource: approvedRequest, challenge, environment: config,
     buyer: config.buyer, reason: input.reason, now: quoteRequestedAt, authority,
     requestInputFingerprint: hash({ query: input.query ?? null, request: input.request ?? null }), paymentRequiredHeader, selectedQuote: quote });

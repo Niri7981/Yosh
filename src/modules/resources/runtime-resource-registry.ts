@@ -163,6 +163,8 @@ export class RuntimeResourceRegistry {
       if (Number(row.expires_at) < this.now()) throw new ResourceRegistryError('RESOURCE_DISCOVERY_EXPIRED');
       const snapshot = z.object({ proposal: z.unknown(), sample: ResourceRequestInputSchema, documentation: ResourceDocumentationSchema }).parse(JSON.parse(String(row.snapshot)));
       const definition = (fixtureAdmission ? FixtureRuntimeResourceSchema : RuntimeResourceSchema).parse({ ...z.record(z.string(), z.unknown()).parse(snapshot.proposal),
+        // Discovery and agent registration never opt a merchant response into account sharing.
+        resultAudience: undefined,
         resourceId: input.resourceId, providerId: input.providerId, displayName: input.displayName });
       fixtureAdmission?.(definition);
       authorizedRequestInstance(definition, snapshot.sample);

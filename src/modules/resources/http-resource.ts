@@ -105,6 +105,7 @@ export const X402ResourceSchema = z.object({
   resourceId: z.string().min(1).max(200), providerId: z.string().min(1).max(200),
   displayName: z.string().min(1).max(120).optional(),
   request: HttpResourceRequestSchema, deliveryRecovery: DeliveryRecoveryCapabilitySchema.optional(),
+  resultAudience: z.enum(['owner', 'account']).optional(),
   deliveryPolicy: ResourceDeliveryPolicySchema.optional(),
   /** Dynamic fields; every other query/body value remains fixed by request. */
   requestInputs: ResourceRequestInputsSchema.optional(),
