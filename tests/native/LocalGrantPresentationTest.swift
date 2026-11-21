@@ -25,6 +25,14 @@ struct LocalGrantPresentationTest {
         precondition(mainnet.details.contains("付款钱包：" + wallet))
         precondition(mainnet.authenticationReason.contains("主网真实资金授权"))
         precondition(!mainnet.authenticationReason.contains("测试"))
+        var buy = request
+        buy["purchase"] = ["requestId": "sample-order", "url": "https://example.invalid/data", "reason": "Get a quote", "quoteExpiresAt": now + 60_000]
+        let purchase = try render(buy)
+        precondition(purchase.title.contains("支付 0.001000 USDC"))
+        precondition(purchase.details.contains("https://example.invalid/data") && purchase.details.contains("sample-order"))
+        precondition(purchase.authenticationReason.contains("Fixture Agent"))
+        buy["purchase"] = ["requestId": "sample-order", "url": "https://example.invalid/data", "reason": "pay\nAmount: 0", "quoteExpiresAt": now + 60_000]
+        do { _ = try render(buy); fatalError("Multiline agent reason accepted") } catch { }
         request.removeValue(forKey: "payerWallet")
         do { _ = try render(request); fatalError("Missing Mainnet wallet accepted") } catch { }
         request["payerWallet"] = "wrong\n钱包"
@@ -76,6 +84,18 @@ struct LocalGrantPresentationTest {
             "agentLabel": "Fixture", "action": ["type": "pause", "paused": true]]
         let controlPresentation = try render(control)
         precondition(controlPresentation.authenticationReason.contains("测试设置"))
+        var pairing: [String: Any] = [
+            "version": 1, "kind": "statement_pairing", "environment": "mainnet", "scope": "read_statement",
+            "registrationHash": String(repeating: "c", count: 64), "challenge": String(repeating: "a", count: 64),
+            "createdAt": now, "expiresAt": now + 120_000, "agentLabel": "Independent agent"]
+        let statement = try render(pairing)
+        precondition(statement.title.contains("Independent agent"))
+        precondition(statement.authenticationReason.contains("共享主网账单"))
+        precondition(statement.details.contains("不授予消费额度"))
+        pairing["scope"] = "request_purchase"
+        do { _ = try render(pairing); fatalError("Broader first-use scope accepted") } catch {}
+        pairing["scope"] = "read_statement"; pairing["agentLabel"] = "bad\nlabel"
+        do { _ = try render(pairing); fatalError("Agent label injection accepted") } catch {}
         print("Native presentation: Mainnet/Devnet wallet and MPP fee consent passed. No UI or authentication invoked.")
     }
 }
