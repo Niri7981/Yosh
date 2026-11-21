@@ -1,3 +1,4 @@
+import { MppChargeQuoteSchema } from '../payment/mpp-contract';
 import { SolanaPublicKeySchema } from '../resources/http-resource';
 import { MAINNET_NETWORK, MAINNET_USDC_MINT } from '../payment/payment-environment';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
@@ -25,6 +26,9 @@ export const LocalGrantRequest = z.object({
   agentLabel: label.max(120), apiLabel: label,
   // Optional for old persisted requests; new Mainnet confirmations require it.
   payerWallet: SolanaPublicKeySchema.optional(),
+  purchase: z.object({ requestId: z.string().regex(/^[a-zA-Z0-9_-]{1,80}$/), url: z.url().max(2048), reason: z.string().min(1).max(240).regex(/^[^\p{Cc}\p{Cf}\p{Zl}\p{Zp}]+$/u),
+    quoteExpiresAt: z.number().int().positive().safe(), mppQuote: MppChargeQuoteSchema.optional(), delegatedGrantId: z.uuid().optional(),
+    requestHash: hex, quoteHash: hex, inputHash: hex }).strict().optional(),
   resourceHash: hex, binding: LocalGrantBinding,
 }).strict().refine(value => value.environment === 'mainnet'
   ? value.binding.mode === 'live_mainnet' && value.binding.scope.network === MAINNET_NETWORK
@@ -48,6 +52,9 @@ export class LocalGrantApprovals {
         id TEXT PRIMARY KEY, body TEXT NOT NULL, digest TEXT NOT NULL,
         state TEXT NOT NULL CHECK(state IN ('PENDING','CANCELLED','CONSUMED')),
         grant_id TEXT UNIQUE, consumed_at INTEGER);
+      CREATE UNIQUE INDEX IF NOT EXISTS local_purchase_member_operation ON local_grant_requests
+        (json_extract(body,'$.binding.principal.cardMemberId'),json_extract(body,'$.purchase.requestId'))
+        WHERE json_type(body,'$.purchase')='object' AND state<>'CANCELLED';
       CREATE TRIGGER IF NOT EXISTS local_grant_request_content_immutable
         BEFORE UPDATE OF id,body,digest ON local_grant_requests
         BEGIN SELECT RAISE(ABORT,'frozen authorization is immutable'); END;
@@ -73,7 +80,18 @@ export class LocalGrantApprovals {
     if (localGrantDigest(request) !== row.digest || request.id !== id) throw new Error('LOCAL_AUTHORIZATION_CORRUPT');
     return { request, digest: String(row.digest),
       state: z.enum(['PENDING', 'CANCELLED', 'CONSUMED']).parse(row.state),
-      grantId: row.grant_id === null ? null : z.uuid().parse(row.grant_id) };
+      grantId: row.grant_id === null ? (row.state === 'CONSUMED' ? request.purchase?.delegatedGrantId ?? null : null) : z.uuid().parse(row.grant_id) };
+  }
+
+  findPurchase(sessionHash: string) {
+    const row = this.db.prepare("SELECT id FROM local_grant_requests WHERE json_extract(body,'$.sessionHash')=? AND json_type(body,'$.purchase')='object' ORDER BY rowid DESC LIMIT 1").get(sessionHash);
+    return row ? this.read(String(row.id)) : undefined;
+  }
+
+  useDelegation(requestId: string) {
+    const frozen = this.read(requestId);
+    if (!frozen.request.purchase?.delegatedGrantId || frozen.state !== 'PENDING') throw new Error('LOCAL_PURCHASE_CONSENT_REQUIRED');
+    this.db.prepare("UPDATE local_grant_requests SET state='CONSUMED', consumed_at=? WHERE id=? AND state='PENDING'").run(Date.now(), requestId);
   }
 
   cancel(id: string, sessionHash: string) {

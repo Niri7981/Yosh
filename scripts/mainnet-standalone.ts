@@ -1,3 +1,11 @@
+import { LocalHostPurchaseOwnerInput } from '../src/modules/mcp/local-host-purchase';
+import { PurchaseResourceLookup } from '../src/modules/mcp/purchase-resource-contract';
+import { MAX_LOCAL_REQUEST_BYTES } from '../src/modules/http/request-size-limits';
+import { authorizeLocalHostPurchase, describeLocalHostResource, pairLocalStatementHost } from '../src/modules/authority/mainnet-authorization-client';
+import { parseHostRegistration } from '../src/modules/mcp/local-host-registration';
+import { legacyMemberForRegistration, resolveInstalledHost } from '../src/modules/mcp/installed-host';
+import { nativeGrantConfirmation, nativeStatementConfirmation } from '../src/modules/authority/native-grant-confirmation';
+import { mcpMemberEnvironment } from '../src/modules/mcp/member-environment';
 import { spawn } from 'node:child_process';
 import { closeSync, constants, fstatSync, openSync, realpathSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -6,7 +14,7 @@ import { z } from 'zod';
 import { assertMainnetProxyStartupEnvironment, loadMainnetStandaloneConfiguration } from '../src/modules/pay-dev/mainnet-standalone-configuration';
 import { installMainnetRuntime, verifyMainnetRuntime } from '../src/modules/pay-dev/mainnet-runtime-artifact';
 import { upgradeMainnetRuntime } from '../src/modules/pay-dev/mainnet-runtime-upgrade';
-import { claimMainnetProcessLock, drainMainnetBackend, ensureMainnetBackend, inspectMainnetBackend, readMainnetOwner,
+import { claimMainnetProcessLock, drainMainnetBackend, ensureMainnetBackend, inspectMainnetBackend, readMainnetOwner, requireRunningResourceOwner,
   stopMainnetBackend, writeMainnetOwner } from '../src/modules/pay-dev/mainnet-standalone-owner';
 import { startMainnetDevelopmentBackend } from '../src/modules/pay-dev/mainnet-runtime';
 import { filterMainnetTools, permittedMainnetCall } from '../src/modules/mcp/mainnet-plugin-scope';
@@ -63,6 +71,13 @@ async function serve(digest: string, initial: Configuration) {
     const verified = verifyMainnetRuntime(runtime).manifest;
     backend = await startMainnetDevelopmentBackend({ directory: configuration.directory, port: configuration.port,
       hosting: { kind: 'mainnet-standalone', runtimeDigest: digest, payMcpPath: join(runtime, 'pay-mcp'),
+        ...(verified.files['yosh-confirm'] ? {
+          confirmStatementPairing: nativeStatementConfirmation(join(runtime, 'yosh-confirm'), verified.files['yosh-confirm']),
+          ...(verified.firstUsePurchases === true ? {
+            legacyMemberForRegistration, purchaseResourceLookup: verified.purchaseResourceLookup === true,
+            confirmPurchaseGrant: nativeGrantConfirmation(join(runtime, 'yosh-confirm'), verified.files['yosh-confirm']),
+          } : {}),
+        } : {}),
         ...(verified.mppProtocol ? { mppProtocolEnginePath: join(runtime, 'mpp-protocol-engine') } : {}) } });
     writeMainnetOwner(configuration.directory, digest, !stopRequested);
     const running = backend;
@@ -88,7 +103,8 @@ function mcp(installed: string, configuration: Configuration) {
   const child = spawn('/usr/bin/sandbox-exec', ['-f', join(installed, 'mainnet.sb'), join(installed, 'node'),
     join(installed, 'mainnet-mcp.cjs'), '--data-dir', configuration.root], {
     cwd: installed, stdio: ['pipe', 'pipe', 'ignore'],
-    env: { HOME: configuration.environment.HOME, PATH: '/usr/bin:/bin', NODE_ENV: 'production' } });
+    env: { ...mcpMemberEnvironment(process.env), ...(process.env.YOSH_INTERNAL_PURCHASE === '1' ? { YOSH_INTERNAL_PURCHASE: '1' } : {}),
+      HOME: configuration.environment.HOME, PATH: '/usr/bin:/bin', NODE_ENV: 'production' } });
   const input = createInterface({ input: process.stdin }), output = createInterface({ input: child.stdout });
   const lists = new Set<string | number>();
   const Envelope = z.object({ id: z.union([z.string(), z.number()]).optional(), method: z.string().optional(),
@@ -122,11 +138,29 @@ function mcp(installed: string, configuration: Configuration) {
   process.once('SIGINT', () => { child.kill('SIGINT'); });
 }
 
+async function readHostInput(): Promise<unknown> {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const value of process.stdin) {
+    const chunk = Buffer.from(value);
+    size += chunk.length;
+    if (size > MAX_LOCAL_REQUEST_BYTES) throw new Error('LOCAL_PURCHASE_INPUT_INVALID');
+    chunks.push(chunk);
+  }
+  return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+}
+
 async function main() {
-  if (process.argv.length !== 3) throw new Error('MAINNET_ARGUMENTS_INVALID');
-  const action = z.enum(['start', 'status', 'stop', 'serve', 'install-mcp', 'upgrade']).parse(process.argv[2]);
-  const { digest } = verifyMainnetRuntime(runtime);
+  const action = z.enum(['start', 'status', 'stop', 'serve', 'install-mcp', 'upgrade', 'pair-statement', 'authorize-host-purchase', 'describe-host-resource']).parse(process.argv[2]);
+  const host = action === 'pair-statement' || action === 'authorize-host-purchase' || action === 'describe-host-resource' ? parseHostRegistration(process.argv.slice(3)) : undefined;
+  if (!host && process.argv.length !== 3) throw new Error('MAINNET_ARGUMENTS_INVALID');
+  const { digest, manifest } = verifyMainnetRuntime(runtime);
   if (realpathSync(process.execPath) !== realpathSync(join(runtime, 'node'))) throw new Error('MAINNET_PACKAGED_NODE_REQUIRED');
+  if (action === 'describe-host-resource' && !manifest.purchaseResourceLookup) throw new Error('LOCAL_RESOURCE_LOOKUP_UNAVAILABLE');
+  if (host && manifest.firstUsePurchases) {
+    const caller = resolveInstalledHost(runtime);
+    if (caller.registration !== host.registration || caller.label !== host.label) throw new Error('LOCAL_HOST_BINDING_MISMATCH');
+  }
   const configuration = await loadMainnetStandaloneConfiguration(runtime);
   if (action === 'serve') { await serve(digest, configuration); return; }
   if (action === 'upgrade') {
@@ -142,9 +176,33 @@ async function main() {
     console.log(JSON.stringify({ environment: 'mainnet', running: Boolean(status), ...status,
       candidateRuntimeDigest: digest, ...(status?.owner === 'standalone' ? { runtimeDigest: digest } : {}) })); return;
   }
-  const installed = installMainnetRuntime(runtime, configuration.root);
-  const installedConfiguration = await loadMainnetStandaloneConfiguration(installed);
-  const status = await ensureMainnetBackend({ configuration: installedConfiguration, digest, launch: () => launch(installed, installedConfiguration) });
+  async function readyRuntime() {
+    const installed = installMainnetRuntime(runtime, configuration.root);
+    const installedConfiguration = await loadMainnetStandaloneConfiguration(installed);
+    const status = await ensureMainnetBackend({ configuration: installedConfiguration, digest, launch: () => launch(installed, installedConfiguration) });
+    return { installed, installedConfiguration, status };
+  }
+  if (host) {
+    if (action === 'describe-host-resource') {
+      const input = PurchaseResourceLookup.parse(await readHostInput());
+      await requireRunningResourceOwner({ configuration, digest });
+      console.log(JSON.stringify(await describeLocalHostResource(host.registration, host.label, input))); return;
+    }
+    // Verify the signed health and digest on every statement. Reinstall/check
+    // the backend copy only on cold start, never trust a cached loopback port.
+    const owner = await inspectMainnetBackend({ configuration, digest }).catch((error: unknown) => {
+      if (!(error instanceof Error) || error.message !== 'MAINNET_BACKEND_STARTING') throw error;
+      return undefined;
+    });
+    if (!owner) await readyRuntime();
+    if (action === 'authorize-host-purchase') {
+      const input = LocalHostPurchaseOwnerInput.parse(await readHostInput());
+      console.log(JSON.stringify(await authorizeLocalHostPurchase(host.registration, host.label, input))); return;
+    }
+    const { memberId } = await pairLocalStatementHost(host.registration, host.label);
+    console.log(JSON.stringify({ memberId })); return;
+  }
+  const { installed, installedConfiguration, status } = await readyRuntime();
   if (action === 'install-mcp') { mcp(installed, installedConfiguration); return; }
   console.log(JSON.stringify({ environment: 'mainnet', running: true, ...status, candidateRuntimeDigest: digest,
     ...(status.owner === 'standalone' ? { runtimeDigest: digest, runtimeDirectory: installed } : {}) }));

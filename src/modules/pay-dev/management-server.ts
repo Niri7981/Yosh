@@ -7,6 +7,7 @@ import type { createPayAuthorityAdapter } from '../payment/pay-authority-adapter
 import { McpSessionEventSchema } from '../mcp/session';
 import * as notifications from '../../app/api/app/notifications/route';
 import * as overview from '../../app/api/app/overview/route';
+import { StatementRegistration } from '../authority/local-statement-pairing';
 import * as health from '../../app/api/app/health/route';
 import * as settings from '../../app/api/app/settings/route';
 import * as grant from '../../app/api/app/grant/route';
@@ -27,6 +28,8 @@ import * as agentDiscovery from '../../app/api/agent/discovery/route';
 import * as agentResources from '../../app/api/agent/resources/route';
 import * as agentQuote from '../../app/api/agent/quote/route';
 import * as agentMppQuote from '../../app/api/agent/mpp/quote/route';
+import * as accountStatement from '../../app/api/agent/account/statement/route';
+import * as accountResult from '../../app/api/agent/account/result/route';
 import * as agentPurchase from '../../app/api/agent/purchase/route';
 import * as agentMppPurchase from '../../app/api/agent/mpp/purchases/route';
 import * as agentDelivery from '../../app/api/agent/purchases/[purchaseId]/delivery/route';
@@ -36,6 +39,44 @@ import { smallJson } from '../http/local-request';
 import { IS_CODEX_PLUGIN_DEVELOPMENT } from './profile';
 import { readPluginOfflineQuote } from './codex-plugin-resource-tools';
 
+export function handleLocalHostResource(request: Request, app: Pick<AppRuntime, 'describeHostResource'>) {
+  return managementRoute(request, true, async verified => {
+    const input = await smallJson(verified);
+    try { return Response.json(app.describeHostResource(input)); }
+    catch (error) {
+      if (error instanceof Error) {
+        if (error.message === 'LOCAL_AUTHORIZATION_RESOURCE_UNSUPPORTED')
+          throw new ManagementApiError(error.message, 404, '此资源不可用于本机购买。');
+        if (error.message === 'LOCAL_HOST_REGISTRATION_INVALID')
+          throw new ManagementApiError(error.message, 403, '调用方尚未登记。');
+        if (error.message === 'LOCAL_RESOURCE_LOOKUP_UNAVAILABLE')
+          throw new ManagementApiError(error.message, 503, '当前无法查阅已登记的购买参数。');
+      }
+      throw error;
+    }
+  });
+}
+
+export function handleLocalHostPurchase(request: Request, app: Pick<AppRuntime, 'authorizeHostPurchase'>, origin: string) {
+  return managementRoute(request, true, async verified => {
+    const input = await smallJson(verified);
+    try { return Response.json(await app.authorizeHostPurchase(input, origin, request.signal), {headers: {'cache-control': 'no-store'}}); }
+    catch (error) {
+      if (!(error instanceof Error)) throw error;
+      const parameter = /^RESOURCE_REQUEST_INPUT_(UNSUPPORTED|REQUIRED|INVALID)$/.exec(error.message);
+      if (parameter) throw new ManagementApiError('LOCAL_PURCHASE_INPUT_' + parameter[1], 422, '请核对该 API 登记的请求参数。');
+      if (error.message === 'LOCAL_PURCHASE_QUERY_NOT_ALLOWED')
+        throw new ManagementApiError(error.message, 422, '此 API 使用已登记的固定地址，请省略 request。');
+      if (error.message === 'LOCAL_PURCHASE_QUOTE_UNAVAILABLE')
+        throw new ManagementApiError(error.message, 502, '暂时未能取得商家的报价。');
+      if (error.message === 'LOCAL_PURCHASE_QUOTE_INVALID' || error.message === 'LOCAL_PURCHASE_DESTINATION_REJECTED')
+        throw new ManagementApiError(error.message, 422, '商家地址或报价未通过校验。');
+      if (/^(?:LOCAL_(?:CONFIRMATION|STATEMENT|AUTHORIZATION|PURCHASE)|MPP_NETWORK_FEE)_[A-Z_]+$/.test(error.message))
+        throw new ManagementApiError(error.message, 403, '本次购买未获授权。');
+      throw error;
+    }
+  });
+}
 
 /** Shared authenticated management server. The payment path stays in AppRuntime
  * and Pay; only Offline supplies a simulator and isolated authority executor. */
@@ -57,16 +98,32 @@ export async function serveDevelopmentRuntime<T extends { memberId: string }>(op
     })],
     ['GET /api/app/local-authorization-state', request => managementRoute(request, false, async () => {
       if (!options.localAuthorizationLink) throw new ManagementApiError('LOCAL_AUTHORIZATION_UNAVAILABLE', 404, 'Local setup is unavailable.');
-      const state = app.memberOverview(descriptor.memberId);
+      const query = new URL(request.url).searchParams;
+      const ids = query.getAll('memberId');
+      if ([...query.keys()].some(key => key !== 'memberId') || ids.length > 1 || (ids.length && !z.uuid().safeParse(ids[0]).success))
+        throw new ManagementApiError('INVALID_MEMBER_ID', 400, 'Invalid member selection.');
+      const state = app.memberOverview(ids[0] ?? descriptor.memberId);
       return Response.json({ enabled: state.connection.enabled, connectionState: state.connection.integration?.state ?? 'disconnected', paused: state.budget.paused });
     })],
     // Reuse the product's member-authenticated read. Payment entry stays Pay MCP.
     ['GET /api/agent', request => new URL(request.url).searchParams.get('operation') === 'status'
       ? agent.GET(request) : Promise.resolve(Response.json({ code: 'INVALID_OPERATION' }, { status: 400 }))],
+    ['GET /api/agent/account/statement', accountStatement.GET], ['GET /api/agent/account/result', accountResult.GET],
     ['GET /api/agent/purchase', agentPurchase.GET],
     ['POST /api/agent/mpp/purchases', agentMppPurchase.POST],
     ['GET /api/app/notifications', notifications.GET], ['GET /api/app/overview', overview.GET], ['GET /api/app/health', health.GET],
     ['PUT /api/app/settings', settings.PUT], ['PUT /api/app/grant', grant.PUT],
+    ['POST /api/app/local-host-resource', request => handleLocalHostResource(request, app)],
+    ['POST /api/app/local-host-purchase', request => handleLocalHostPurchase(request, app, origin)],
+    ['POST /api/app/local-statement-pairing', request => managementRoute(request, true, async verified => {
+      const input = StatementRegistration.parse(await smallJson(verified));
+      try { return Response.json(await app.pairStatementHost(input, origin, request.signal)); }
+      catch (error) {
+        if (error instanceof Error && /^LOCAL_(?:CONFIRMATION|STATEMENT|AUTHORIZATION)_[A-Z_]+$/.test(error.message))
+          throw new ManagementApiError(error.message, 403, '未能启用账单读取。');
+        throw error;
+      }
+    })],
     ['GET /api/app/members', members.GET], ['POST /api/app/members', members.POST],
     ['POST /api/app/lifecycle', lifecycle.POST], ['GET /api/app/execution', executionMode.GET],
     ['POST /api/app/mainnet-standalone-lifecycle', standaloneLifecycle.POST],
@@ -84,6 +141,8 @@ export async function serveDevelopmentRuntime<T extends { memberId: string }>(op
   let stopping = false;
   let ready = false;
   const server = createServer(async (incoming, outgoing) => {
+    const lifetime = new AbortController();
+    outgoing.once('close', () => { if (!outgoing.writableEnded) lifetime.abort(); });
     let correlation: { callerId: string; operationId: string; attemptId: string | null; stage: 'plan' | 'execute' | 'recover' } | undefined;
     try {
       if (incoming.headers.host !== `127.0.0.1:${port}` || !['127.0.0.1', '::ffff:127.0.0.1'].includes(incoming.socket.remoteAddress ?? ''))
@@ -97,7 +156,7 @@ export async function serveDevelopmentRuntime<T extends { memberId: string }>(op
       if (url.origin !== origin) throw new Error('PAY_DEVELOPMENT_LOOPBACK_REQUIRED');
       const headers = new Headers();
       for (const [name, value] of Object.entries(incoming.headers)) if (typeof value === 'string') headers.set(name, value);
-      const request = new Request(url, { method, headers, ...(chunks.length ? { body: Buffer.concat(chunks) } : {}) });
+      const request = new Request(url, { method, headers, signal: lifetime.signal, ...(chunks.length ? { body: Buffer.concat(chunks) } : {}) });
       let response: Response;
       if (options.localAuthorizationOnly && url.pathname.startsWith('/api/app/') && method !== 'GET'
         && !['/api/app/lifecycle','/api/app/local-authorization-link'].includes(url.pathname)) {

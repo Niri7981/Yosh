@@ -8,7 +8,10 @@ export async function GET(request: Request) {
   const app = appRuntime();
   let principal;
   try { principal = app.authenticateAgent(request); }
-  catch { return Response.json({ code: 'AGENT_UNAUTHORIZED' }, { status: 401 }); }
+  catch {
+    try { principal = app.authenticateAgent(request, 'request_purchase'); }
+    catch { return Response.json({ code: 'AGENT_UNAUTHORIZED' }, { status: 401 }); }
+  }
   const query = new URL(request.url).searchParams;
   const input = AgentPurchaseReadInput.safeParse(Object.fromEntries(query));
   if (!input.success || [...query.keys()].length !== 1)

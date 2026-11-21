@@ -23,6 +23,7 @@ async function callApp(path: string, init?: RequestInit) {
   });
   if (!response.ok) {
     if (response.status === 401) throw new AgentReadError('AGENT_UNAUTHORIZED');
+    if (path.startsWith('/api/agent/account/')) throw new Error(response.status === 404 ? 'ACCOUNT_RESULT_NOT_AVAILABLE' : response.status === 400 ? 'ACCOUNT_READ_INPUT_INVALID' : 'ACCOUNT_READ_UNAVAILABLE');
     if (path.startsWith('/api/agent?')) throw new AgentReadError('AGENT_READ_FAILED');
     if (['/api/agent/discovery', '/api/agent/quote'].includes(path) && response.status === 409) throw new AgentPostApprovalError();
     if (path === '/api/agent/resources') {
@@ -54,6 +55,7 @@ const server = createAgentServer(
   (purchaseId, offset) => callApp(`/api/agent/purchases/${encodeURIComponent(purchaseId)}/delivery?offset=${offset}`),
   (resourceId, sample) => callApp('/api/agent/quote', { method: 'POST', body: JSON.stringify({ resourceId, sample }) }),
   input => callApp('/api/agent/resources', { method: 'POST', body: JSON.stringify(input) }),
+  path => callApp(path),
 );
 if (configuration.mcpProvider === 'codex') {
   let sessionId = randomUUID();

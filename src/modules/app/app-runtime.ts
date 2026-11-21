@@ -1,3 +1,8 @@
+import { readAgentPurchase } from '../purchases/agent-purchase-read';
+import { randomUUID } from 'node:crypto';
+import { StatementRegistration } from '../authority/local-statement-pairing';
+import { describePurchaseResource, PurchaseResourceLookup } from '../mcp/purchase-resource-contract';
+import { LocalHostPurchaseOwnerInput, LocalHostPurchasePlan, type HostPurchase } from '../mcp/local-host-purchase';
 import { IS_LOCAL_AUTH_DEVELOPMENT } from '../pay-dev/profile';
 import { LocalControlAction, type LocalControlReceipt } from '../authority/local-control-approval';
 import { basename, dirname, isAbsolute, resolve as resolveRuntimePath } from 'node:path';
@@ -73,6 +78,10 @@ function localTimeZone() {
 /** Supplied only by the trusted runtime entry after package verification. */
 export type AppRuntimeHosting = Readonly<{ kind: 'mainnet-standalone'; payMcpPath: string; runtimeDigest: string;
   /** Supplied only by the verified standalone artifact, never Agent input or environment. */
+  confirmStatementPairing?: import('../authority/local-statement-pairing').ConfirmStatementPairing;
+  purchaseResourceLookup?: boolean;
+  legacyMemberForRegistration?: (registration: string, label: string) => string | null;
+  confirmPurchaseGrant?: import('../authority/native-grant-confirmation').ConfirmLocalGrant;
   mppProtocolEnginePath?: string }>;
 
 export class AppRuntime {
@@ -98,6 +107,7 @@ export class AppRuntime {
     if (resource && this.offlineResources) this.offlineResources.assertResource(resource);
     return resource;
   }
+  private pendingHostPurchase?: { key: string; result: Promise<z.infer<typeof LocalHostPurchasePlan>> };
   private walletProvisioning?: Promise<{ address: string; reused: boolean }>;
   private readonly payMainnet = process.env.YOSH_PAY_MCP_MAINNET === '1';
   private payAuthority?: ReturnType<typeof createPayAuthorityAdapter>;
@@ -802,7 +812,174 @@ export class AppRuntime {
     if (!connection || !this.ledger.cardMember(memberId)) throw new Error('CARD_MEMBER_NOT_FOUND');
     return connection;
   }
-  authenticateAgent(request: Request, capability: 'read' | 'request_purchase' = 'read') {
+  pairStatementHost(input: { hostId: string; label: string }, origin: string, signal?: AbortSignal) {
+    const confirm = this.hosting?.confirmStatementPairing;
+    if (!confirm) throw new Error('LOCAL_STATEMENT_PAIRING_UNAVAILABLE');
+    return this.track(this.ledger.localStatementPairings().pair(input, confirm, {
+      accepting: () => this.accepting,
+      enabled: id => !!this.connectionFor(id).principal('read_statement'),
+      canAddStatement: id => !!this.connectionFor(id).principal('request_purchase'),
+      install: id => {
+        const existing = this.memberConnections.get(id);
+        if (existing) {
+          const principal = existing.principal('request_purchase');
+          if (!principal) throw new Error('LOCAL_STATEMENT_CONNECTION_REVOKED');
+          existing.enableLocalScope(origin, principal, 'read_statement');
+          return;
+        }
+        const connection = new AgentConnection(this.directory, id, member => this.ledger.isCardMemberActive(member), true);
+        connection.setEnabled(true, origin, true);
+        this.memberConnections.set(id, connection);
+      },
+    }, signal));
+  }
+  private hostPurchaseResource(resourceId: string) {
+    const resource = this.registeredResource(resourceId);
+    if (!resource || resource.request.method !== 'GET' || resource.request.access !== 'https')
+      throw new Error('LOCAL_AUTHORIZATION_RESOURCE_UNSUPPORTED');
+    const headers = resource.request.headers;
+    if (resource.paymentProtocol !== 'mpp_solana_charge' && (headers['content-type'] || (headers.accept && headers.accept !== 'application/json')))
+      throw new Error('LOCAL_AUTHORIZATION_RESOURCE_UNSUPPORTED');
+    return resource;
+  }
+
+  describeHostResource(raw: unknown) {
+    const {hostId, label, resourceId} = StatementRegistration.extend(PurchaseResourceLookup.shape).strict().parse(raw);
+    const verifyHost = this.hosting?.legacyMemberForRegistration;
+    if (!this.accepting || !this.hosting?.purchaseResourceLookup || !verifyHost || !this.hosting.confirmPurchaseGrant || !this.payMainnet || this.localGrantEnvironment() !== 'mainnet')
+      throw new Error('LOCAL_RESOURCE_LOOKUP_UNAVAILABLE');
+    verifyHost(hostId, label);
+    return describePurchaseResource(this.hostPurchaseResource(resourceId));
+  }
+
+  async authorizeHostPurchase(raw: unknown, origin: string, signal?: AbortSignal) {
+    const {hostId, label, existingOnly, ...input} = StatementRegistration.extend(LocalHostPurchaseOwnerInput.shape).strict().parse(raw);
+    if (existingOnly) return this.track(this.confirmHostPurchase({hostId, label}, input, origin, signal, true));
+    const key = hash({hostId, label, input});
+    if (this.pendingHostPurchase) {
+      if (this.pendingHostPurchase.key === key) return this.pendingHostPurchase.result;
+      throw new Error('LOCAL_CONFIRMATION_BUSY');
+    }
+    const result = this.track(this.confirmHostPurchase({hostId, label}, input, origin, signal));
+    this.pendingHostPurchase = {key, result};
+    try { return await result; } finally { this.pendingHostPurchase = undefined; }
+  }
+
+  private async confirmHostPurchase(registration: z.infer<typeof StatementRegistration>, input: HostPurchase, origin: string, signal?: AbortSignal, existingOnly = false) {
+    const confirm = this.hosting?.confirmPurchaseGrant;
+    if (!confirm || this.localGrantEnvironment() !== 'mainnet' || !this.payMainnet) throw new Error('LOCAL_PURCHASE_UNAVAILABLE');
+    const pairings = this.ledger.localStatementPairings(), account = pairings.registration(registration);
+    const principalFor = (id: string) => this.connectionFor(id).principal('request_purchase') ?? this.connectionFor(id).principal('read_statement');
+    const legacyBinding = this.hosting?.legacyMemberForRegistration?.(registration.hostId, registration.label);
+    const legacy = legacyBinding === 'default' ? this.ledger.defaultCardMember().id : legacyBinding;
+    if (legacy && account.memberId && account.memberId !== legacy) throw new Error('LOCAL_AUTHORIZATION_AGENT_CHANGED');
+    const memberId = legacy ?? account.memberId;
+    const memberLabel = memberId ? this.ledger.cardMember(memberId)?.label : undefined;
+    const current = memberId ? principalFor(memberId) : undefined;
+    if (memberId && !current) throw new Error('LOCAL_STATEMENT_CONNECTION_REVOKED');
+    const approvals = this.ledger.localGrantApprovals(), sessionHash = hash(['local-host-purchase', account.hash, input.requestId]);
+    const previous = approvals.findPurchase(sessionHash);
+    if (previous && previous.request.purchase?.inputHash !== hash(input)) throw new Error('LOCAL_PURCHASE_BINDING_MISMATCH');
+    if (!existingOnly && previous?.state === 'CANCELLED') throw new Error('LOCAL_CONFIRMATION_DECLINED');
+    const approvedPlan = (frozen: ReturnType<typeof approvals.read>) => LocalHostPurchasePlan.parse({
+      memberId: frozen.request.binding.principal.cardMemberId, resourceId: input.resourceId, requestId: input.requestId,
+      protocol: frozen.request.binding.scope.paymentScheme === 'mpp_charge' ? 'mpp' : 'x402', url: frozen.request.purchase!.url });
+    if (previous?.state === 'CONSUMED') {
+      if (!current || hash(current) !== hash(previous.request.binding.principal)) throw new Error('LOCAL_AUTHORIZATION_AGENT_CHANGED');
+      if (!readAgentPurchase(this.ledger, current.cardMemberId, {operationId: input.requestId})) {
+        if (existingOnly) throw new Error('LOCAL_PURCHASE_NOT_FOUND');
+        const grant = previous.grantId ? this.ledger.spendGrantById(previous.grantId) : undefined;
+        if (grant?.status !== 'ACTIVE') throw new Error('LOCAL_PURCHASE_GRANT_INACTIVE');
+        if (Date.now() >= Math.min(grant.expiresAt, previous.request.purchase!.quoteExpiresAt)) throw new Error('LOCAL_AUTHORIZATION_EXPIRED');
+        await this.initializeWallet();
+        if (this.localGrantResourceHash(this.registeredResource(input.resourceId) ?? null) !== previous.request.resourceHash)
+          throw new Error('LOCAL_AUTHORIZATION_RESOURCE_CHANGED');
+      }
+      return approvedPlan(previous);
+    }
+    // The single-writer backend owns the only live prompt. A frozen pending
+    // row left by a crashed owner has no consent and may be presented afresh.
+    if (!existingOnly && previous) approvals.cancel(previous.request.id, sessionHash);
+    if (current) {
+      const receipt = readAgentPurchase(this.ledger, current.cardMemberId, {operationId: input.requestId});
+      if (receipt) {
+        if (receipt.resourceId !== input.resourceId) throw new Error('LOCAL_PURCHASE_BINDING_MISMATCH');
+        const original = this.ledger.getOwned(receipt.purchaseId, current.cardMemberId)!;
+        return LocalHostPurchasePlan.parse({memberId: current.cardMemberId, resourceId: input.resourceId, requestId: input.requestId,
+          protocol: original.intent.mpp ? 'mpp' : 'x402', url: original.intent.httpRequest?.url});
+      }
+    }
+    if (existingOnly) throw new Error('LOCAL_PURCHASE_NOT_FOUND');
+    if (!this.accepting || signal?.aborted) throw new Error('LOCAL_PURCHASE_CANCELLED');
+    const resource = this.hostPurchaseResource(input.resourceId);
+    const mpp = resource.paymentProtocol === 'mpp_solana_charge';
+    if (mpp && !input.maximumNetworkFeeLamports) throw new Error('MPP_NETWORK_FEE_CONSENT_REQUIRED');
+    if (!mpp && input.maximumNetworkFeeLamports) throw new Error('LOCAL_PURCHASE_FEE_CAP_UNEXPECTED');
+    if (Object.keys(input.request?.query ?? {}).length && !resourceInputNames(resource.requestInputs?.query).length)
+      throw new Error('LOCAL_PURCHASE_QUERY_NOT_ALLOWED');
+    const request = authorizedRequestInstance(resource, input.request ?? {});
+    if (!mpp) request.headers = {...request.headers, accept: 'application/json'};
+    await this.initializeWallet();
+    const wallet = this.walletAddress, resourceHash = this.localGrantResourceHash(resource);
+    if (!wallet || this.authorityWalletStatus !== 'available') throw new Error('LOCAL_AUTHORIZATION_WALLET_UNAVAILABLE');
+    const mppDependencies = mpp ? this.mppDependencies() : undefined;
+    const quotedAt = Date.now();
+    const mppQuote = mppDependencies ? await fetchMppResourceQuote({...resource, request}, this.paymentConfiguration('simulated'),
+      mppDependencies.binary, mppDependencies.fetcher) : undefined;
+    // The Pay controller retains the merchant's offer metadata. Bind consent
+    // to those same bytes so a legitimate SDK round trip retains its identity.
+    const quote = mppQuote ?? (await fetchResourceChallenge({...resource, request}, this.environment,
+      this.dependencies.fetcher, undefined, {hostPurchase: true})).quote;
+    const quoteExpiresAt = 'expiresAt' in quote ? quote.expiresAt : quotedAt + quote.maxTimeoutSeconds * 1000;
+    if (quote.payTo === wallet) throw new Error('LOCAL_AUTHORIZATION_RECIPIENT_INVALID');
+    const principal = current ?? {cardMemberId: randomUUID(), connectionId: randomUUID(), connectionGeneration: 1};
+    const validate = () => {
+      if (signal?.aborted || !this.accepting) throw new Error('LOCAL_PURCHASE_CANCELLED');
+      if (legacyBinding !== this.hosting?.legacyMemberForRegistration?.(registration.hostId, registration.label)
+        || wallet !== this.walletAddress || this.localGrantResourceHash(this.registeredResource(input.resourceId) ?? null) !== resourceHash
+        || pairings.registration(registration).memberId !== account.memberId
+        || (current && (hash(principalFor(current.cardMemberId) ?? null) !== hash(current)
+          || this.ledger.cardMember(current.cardMemberId)?.label !== memberLabel)))
+        throw new Error('LOCAL_AUTHORIZATION_CONTENT_CHANGED');
+      if (Date.now() >= quoteExpiresAt) throw new Error('LOCAL_AUTHORIZATION_EXPIRED');
+    };
+    validate();
+    const now = Date.now();
+    const binding = {input: {totalLimit: quote.amount, singleLimit: quote.amount, expiresAt: now + 10 * 60_000},
+      principal, mode: 'live_mainnet' as const, scope: {resourceId: resource.resourceId, providerId: resource.providerId,
+        operation: PAID_RESOURCE_PURCHASE_OPERATION, network: resource.network, assetId: resource.mint, assetDecimals: resource.decimals,
+        payTo: quote.payTo, paymentScheme: mpp ? 'mpp_charge' : 'exact',
+        ...(mpp ? {maximumNetworkFeeLamports: input.maximumNetworkFeeLamports} : {}) }};
+    const delegatedGrantId = current ? this.ledger.reusableLocalGrant(principal, binding.scope, quote.amount, now) : undefined;
+    const frozen = approvals.freeze({environment: 'mainnet', sessionHash, payerWallet: wallet, agentLabel: registration.label,
+      apiLabel: resource.resourceId, resourceHash, binding, purchase: {requestId: input.requestId, reason: input.reason,
+        url: request.url, requestHash: hash(request), quoteHash: hash(quote), inputHash: hash(input), quoteExpiresAt, mppQuote, delegatedGrantId}}, now);
+    try {
+      if (delegatedGrantId) {
+        validate();
+        approvals.useDelegation(frozen.request.id);
+        return approvedPlan(frozen);
+      }
+      await confirm(frozen.request, signal);
+      validate();
+      const publish = () => pairings.publish(registration, principal.cardMemberId, 'request_purchase', id => {
+        const connection = this.memberConnections.get(id) ?? new AgentConnection(this.directory, id, member => this.ledger.isCardMemberActive(member), true);
+        connection.enableLocalScope(origin, principal, 'request_purchase');
+        this.memberConnections.set(id, connection);
+      }, true);
+      this.ledger.createSpendGrant(binding.input, principal, binding.scope, Date.now(), binding.mode,
+        {requestId: frozen.request.id, digest: frozen.digest}, legacy ? undefined : publish);
+      return approvedPlan(frozen);
+    } catch (error) { approvals.cancel(frozen.request.id, sessionHash); throw error; }
+  }
+
+  readAccountStatement(principal: SpendPrincipal, input: import('../mcp/account-read-contract').StatementQuery) {
+    return this.ledger.readAccountStatement(principal.cardMemberId, this.purchaseExecutionMode(), input);
+  }
+  readAccountResult(principal: SpendPrincipal, input: import('../mcp/account-read-contract').ResultQuery) {
+    return this.ledger.readAccountResult(principal.cardMemberId, this.purchaseExecutionMode(), input);
+  }
+  authenticateAgent(request: Request, capability: 'read' | 'request_purchase' | 'read_statement' = 'read') {
     for (const connection of this.memberConnections.values()) {
       try { return connection.authenticate(request, capability); } catch { /* Try another member capability. */ }
     }
@@ -866,7 +1043,9 @@ export class AppRuntime {
     this.ledger.assertCardMemberActive(memberId);
     this.ledger.revokeActiveSpendGrant(this.dependencies.now?.() ?? Date.now(), 'grant.REVOKED_CONNECTION_CHANGED', memberId);
     const connection = this.connectionFor(memberId);
-    connection.setEnabled(enabled, origin);
+    if (enabled && this.ledger.hasStatementOnlyMember(memberId) && !this.ledger.localStatementPairings().mayRead(memberId)) {
+      connection.enableLocalScope(origin, connection.principal('request_purchase') ?? {cardMemberId: memberId, connectionId: randomUUID(), connectionGeneration: 1}, 'request_purchase');
+    } else connection.setEnabled(enabled, origin, enabled && this.ledger.hasStatementOnlyMember(memberId));
     return connection.status();
   }
   /** Default member is the existing Codex identity; labels never select providers. */

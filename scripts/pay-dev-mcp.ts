@@ -1,3 +1,4 @@
+import { mcpMemberEnvironment } from '../src/modules/mcp/member-environment';
 import { IS_CODEX_PLUGIN_DEVELOPMENT, PAY_DEVELOPMENT_PROFILE } from '../src/modules/pay-dev/profile';
 import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
@@ -13,6 +14,7 @@ import { DiscoveryInput } from '../src/modules/resources/mainnet-resource-discov
 import { AgentResourceRegistrationInput } from '../src/modules/resources/agent-resource-registration';
 import { MAX_SERIALIZED_RESOURCE_DELIVERY_BYTES, ResourceRequestInputSchema } from '../src/modules/resources/http-resource';
 import { AgentRegistrationErrorCodes } from '../src/modules/mcp/server';
+import { accountReadPath, accountTools } from '../src/modules/mcp/account-read-contract';
 import { AgentPurchaseReadInput, AgentPurchaseSummary } from '../src/modules/mcp/purchase-read-contract';
 import { PurchaseRequestInputSchema } from '../src/modules/purchases/purchase-request-input';
 import { PLUGIN_OFFLINE_RESOURCE_PATHS } from '../src/modules/pay-dev/offline-resource-policy';
@@ -56,13 +58,12 @@ async function main() {
   assertDevelopmentOrigin(manifest.origin);
   if (manifest.profile !== (mainnet ? 'pay-mcp-mainnet' : devnet ? 'pay-mcp-devnet' : simulated ? 'pay-mcp-simulated' : 'isolated-pay-dev'))
     throw new Error('PAY_PROFILE_MISMATCH');
-  if (live && process.env.YOSH_CARD_MEMBER_ID && process.env.APP2049_CARD_MEMBER_ID
-    && process.env.YOSH_CARD_MEMBER_ID !== process.env.APP2049_CARD_MEMBER_ID) throw new Error('PAY_CALLER_CONFIGURATION_CONFLICT');
-  const callerId = live ? z.string().uuid().parse(process.env.YOSH_CARD_MEMBER_ID ?? process.env.APP2049_CARD_MEMBER_ID ?? manifest.memberId) : manifest.memberId;
+  const callerId = mcpMemberEnvironment(process.env).YOSH_CARD_MEMBER_ID ?? manifest.memberId;
   let descriptor: unknown;
   try { descriptor = privateJson(connectionFile(directory, callerId)); }
   catch (error) {
-    if (!(error instanceof Error) || !('code' in error) || error.code !== 'ENOENT') throw error;
+    // Only the installation's original member can use its legacy default file.
+    if (callerId !== manifest.memberId || !(error instanceof Error) || !('code' in error) || error.code !== 'ENOENT') throw error;
     descriptor = privateJson(connectionFile(directory));
   }
   const connection = ConnectionSchema.parse(descriptor);
@@ -79,6 +80,10 @@ async function main() {
     env: { PATH: '/usr/bin:/bin', HOME: directory, NODE_ENV: 'production', ...(mainnet ? { YOSH_PAY_MCP_MAINNET: '1' }
       : devnet ? { YOSH_PAY_MCP_DEVNET: '1' } : { YOSH_PAY_DEV: '1' }) },
   });
+  // An internal purchase worker has its own short-lived stdio connection. Only the
+  // installed full host reports Codex session presence, which requires read.
+  // Every payment and purchase lookup still authenticates the member with the backend.
+  const reportHostPresence = connection.capabilities.includes('read') && process.env.YOSH_INTERNAL_PURCHASE !== '1';
   let sessionId = randomUUID();
   let sequence = 0;
   let initialized = false;
@@ -141,7 +146,7 @@ async function main() {
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false } },
   ];
   const purchaseReadErrors = ['AGENT_UNAUTHORIZED', 'PURCHASE_NOT_FOUND', 'PURCHASE_READ_INPUT_INVALID',
-    'PURCHASE_READ_UNAVAILABLE', 'DELIVERY_NOT_AVAILABLE', 'INVALID_DELIVERY_CURSOR'];
+    'ACCOUNT_RESULT_NOT_AVAILABLE', 'ACCOUNT_READ_INPUT_INVALID', 'ACCOUNT_READ_UNAVAILABLE', 'PURCHASE_READ_UNAVAILABLE', 'DELIVERY_NOT_AVAILABLE', 'INVALID_DELIVERY_CURSOR'];
   const readAgentJson = async (path: string): Promise<unknown> => {
     const response = await fetch(`${connection.origin}${path}`, { headers: { authorization: `Bearer ${connection.token}` },
       redirect: 'error', signal: AbortSignal.timeout(10_000) });
@@ -164,8 +169,9 @@ async function main() {
   const readPurchase = async (id: string | number, params: unknown) => {
     let result;
     try {
-      const call = z.object({ name: z.enum(['get_purchase', 'get_purchase_delivery']), arguments: z.unknown(), _meta: z.unknown().optional() }).strict().parse(params);
-      const value = call.name === 'get_purchase' ? await purchaseSummary(AgentPurchaseReadInput.parse(call.arguments)) : await (async () => {
+      const call = z.object({ name: z.enum(['get_purchase', 'get_purchase_delivery','list_account_purchases','read_account_result']), arguments: z.unknown(), _meta: z.unknown().optional() }).strict().parse(params);
+      const value = (call.name === 'list_account_purchases' || call.name === 'read_account_result') ? await readAgentJson(accountReadPath(call.name, call.arguments))
+        : call.name === 'get_purchase' ? await purchaseSummary(AgentPurchaseReadInput.parse(call.arguments)) : await (async () => {
         const input = z.object({ purchaseId: z.string().regex(/^[a-zA-Z0-9_-]{1,80}$/),
           offset: z.number().int().min(0).max(MAX_SERIALIZED_RESOURCE_DELIVERY_BYTES).default(0) }).strict().parse(call.arguments);
         return readAgentJson(`/api/agent/purchases/${encodeURIComponent(input.purchaseId)}/delivery?offset=${input.offset}`);
@@ -340,6 +346,7 @@ async function main() {
       }
       if (request.data.method === 'tools/call') {
         const call = z.object({ name: z.string() }).passthrough().safeParse(request.data.params);
+        if (call.success && accountTools.some(tool => tool.name === call.data.name)) { void readPurchase(request.data.id, request.data.params); return; }
         if (simulated) {
           process.stdout.write(`${JSON.stringify({ jsonrpc: '2.0', id: request.data.id, result: { isError: true,
             content: [{ type: 'text', text: 'SIMULATED_EXECUTION_DISABLED: Simulation cannot sign, submit or recover payments.' }] } })}\n`);
@@ -364,7 +371,7 @@ async function main() {
       }
     }
     if (!closed) child.stdin.write(`${line}\n`);
-    if ('method' in message && message.method === 'notifications/initialized') ping();
+    if (reportHostPresence && 'method' in message && message.method === 'notifications/initialized') ping();
   });
   payLines.on('line', (line: string) => {
     if (closed) return;
@@ -375,6 +382,8 @@ async function main() {
         .filter(tool => z.object({ name: z.literal('curl') }).passthrough().safeParse(tool).success);
       response.data.result.tools.push(statusTool);
       if (!simulated) response.data.result.tools.push(...purchaseTools);
+      for (const { name, description, schema } of accountTools) response.data.result.tools.push({ name, description, inputSchema: z.toJSONSchema(schema),
+        annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false } });
       if (live) response.data.result.tools.push(recoveryTool);
       for (const tool of resourceTools) response.data.result.tools.push({ name: tool.name, description: tool.description,
         inputSchema: z.toJSONSchema(tool.schema), annotations: { readOnlyHint: ['quote_x402_resource', 'quote_mpp_resource'].includes(tool.name),

@@ -6,7 +6,7 @@ import { requireLocalRequest } from '../http/local-request';
 import { SpendPrincipalSchema, type SpendPrincipal } from '../authority/spend-grant';
 import { McpSessions, type McpSessionEvent } from './session';
 
-const CapabilitySchema = z.enum(['read', 'request_purchase']);
+const CapabilitySchema = z.enum(['read', 'request_purchase', 'read_statement']);
 const agentCapabilities: Array<z.infer<typeof CapabilitySchema>> = ['read', 'request_purchase'];
 
 export const ConnectionSchema = z.object({
@@ -59,17 +59,29 @@ export class AgentConnection {
     this.lastSeen = null;
     this.sessions.clear();
   }
-  setEnabled(enabled: boolean, origin: string) {
+  setEnabled(enabled: boolean, origin: string, statementOnly = false) {
     if (!enabled) { this.descriptor = undefined; this.lastSeen = null; this.sessions.clear(); this.removeFile(); return; }
     if (!this.isCardMemberActive(this.cardMemberId)) throw new Error('CARD_MEMBER_REVOKED');
     const token = randomBytes(32).toString('base64url');
-    this.write({ origin, token, cardMemberId: this.cardMemberId, connectionId: randomUUID(), generation: 1, capabilities: [...agentCapabilities] });
+    this.write({ origin, token, cardMemberId: this.cardMemberId, connectionId: randomUUID(), generation: 1, capabilities: statementOnly ? ['read_statement'] : [...agentCapabilities] });
   }
+  enableLocalScope(origin: string, principal: SpendPrincipal, scope: 'read_statement' | 'request_purchase') {
+    if (principal.cardMemberId !== this.cardMemberId || !this.isCardMemberActive(this.cardMemberId))
+      throw new Error('LOCAL_AUTHORIZATION_AGENT_CHANGED');
+    const current = this.descriptor;
+    if (current && (current.connectionId !== principal.connectionId || current.generation !== principal.connectionGeneration
+      || current.origin !== origin || current.capabilities.includes('read'))) throw new Error('LOCAL_AUTHORIZATION_AGENT_CHANGED');
+    if (current?.capabilities.includes(scope)) return;
+    this.write({ origin, token: randomBytes(32).toString('base64url'), cardMemberId: this.cardMemberId,
+      connectionId: principal.connectionId, generation: principal.connectionGeneration,
+      capabilities: [...current?.capabilities ?? [], scope] });
+  }
+
   /** Explicit credential rotation invalidates the old token and live session. */
   rotateCredential(): SpendPrincipal | undefined {
     if (!this.descriptor) return undefined;
     if (!this.isCardMemberActive(this.descriptor.cardMemberId)) throw new Error('CARD_MEMBER_REVOKED');
-    const next: z.infer<typeof ConnectionSchema> = { ...this.descriptor, token: randomBytes(32).toString('base64url'), generation: this.descriptor.generation + 1, capabilities: [...agentCapabilities] };
+    const next: z.infer<typeof ConnectionSchema> = { ...this.descriptor, token: randomBytes(32).toString('base64url'), generation: this.descriptor.generation + 1 };
     this.write(next);
     return SpendPrincipalSchema.parse({ cardMemberId: next.cardMemberId, connectionId: next.connectionId, connectionGeneration: next.generation });
   }
@@ -85,7 +97,7 @@ export class AgentConnection {
     const actual = Buffer.from(request.headers.get('authorization') ?? '');
     const token = this.descriptor?.token;
     const expected = Buffer.from(`Bearer ${token ?? ''}`);
-    if (!token || !this.descriptor?.capabilities.includes(capability) || !this.isCardMemberActive(this.descriptor.cardMemberId)
+    if (!token || !(this.descriptor?.capabilities.includes(capability) || (capability === 'read_statement' && this.descriptor?.capabilities.includes('read'))) || !this.isCardMemberActive(this.descriptor.cardMemberId)
       || actual.length !== expected.length || !timingSafeEqual(actual, expected)) throw new Error('AGENT_UNAUTHORIZED');
     this.lastSeen = Date.now();
     return { cardMemberId: this.descriptor.cardMemberId, connectionId: this.descriptor.connectionId, connectionGeneration: this.descriptor.generation };

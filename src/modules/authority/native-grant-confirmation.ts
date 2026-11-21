@@ -1,3 +1,4 @@
+import { StatementPairingRequest, type FrozenStatementPairing } from './local-statement-pairing';
 import { localControlBytes, localControlDigest, type FrozenLocalControl } from './local-control-approval';
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { spawn } from 'node:child_process';
@@ -5,7 +6,7 @@ import { lstatSync, readFileSync, realpathSync } from 'node:fs';
 import { z } from 'zod';
 import { localGrantBytes, localGrantDigest, type FrozenLocalGrant } from './local-grant-approval';
 
-export type ConfirmLocalGrant = (request: FrozenLocalGrant) => Promise<void>;
+export type ConfirmLocalGrant = (request: FrozenLocalGrant, signal?: AbortSignal) => Promise<void>;
 export function confirmationMessage(digest: string, challenge: string) {
   return ['yosh-local-grant-confirmation-v1', digest, challenge].join('\n');
 }
@@ -15,14 +16,21 @@ export function confirmationMessage(digest: string, challenge: string) {
  * Executing another copy of the helper cannot mint proof for this invocation.
  * This assumes trusted program bytes/OS, not a compromised system account. */
 export function nativeGrantConfirmation(binary: string, expectedHash: string): ConfirmLocalGrant {
-  return request => confirmNative(binary, expectedHash, localGrantBytes(request), localGrantDigest(request), request);
+  return (request, signal) => confirmNative(binary, expectedHash, localGrantBytes(request), localGrantDigest(request), request, signal);
 }
 export type ConfirmLocalControl = (request: FrozenLocalControl) => Promise<void>;
 export function nativeControlConfirmation(binary: string, expectedHash: string): ConfirmLocalControl {
   return request => confirmNative(binary, expectedHash, localControlBytes(request), localControlDigest(request), request);
 }
+export function nativeStatementConfirmation(binary: string, expectedHash: string) {
+  return (request: FrozenStatementPairing, signal?: AbortSignal) => {
+    const bytes = JSON.stringify(StatementPairingRequest.parse(request));
+    return confirmNative(binary, expectedHash, bytes, createHash('sha256').update(bytes).digest('hex'), request, signal);
+  };
+}
 async function confirmNative(binary: string, expectedHash: string, bytes: string, digest: string,
-  request: { challenge: string; expiresAt: number }) {
+  request: { challenge: string; expiresAt: number }, signal?: AbortSignal) {
+    if (signal?.aborted) throw new Error('LOCAL_STATEMENT_REQUEST_CANCELLED');
     const file = lstatSync(binary);
     if (!file.isFile() || file.isSymbolicLink() || realpathSync(binary) !== binary
       || createHash('sha256').update(readFileSync(binary)).digest('hex') !== expectedHash)
@@ -34,6 +42,8 @@ async function confirmNative(binary: string, expectedHash: string, bytes: string
           env: { PATH: '/usr/bin:/bin', LANG: 'en_US.UTF-8', NODE_ENV: 'production' } });
         let result = '', failed = false;
         const fail = (code: string) => { failed = true; child.kill('SIGTERM'); reject(new Error(code)); };
+        const cancelled = () => fail('LOCAL_STATEMENT_REQUEST_CANCELLED');
+        signal?.addEventListener('abort', cancelled, { once: true });
         const timer = setTimeout(() => fail('LOCAL_CONFIRMATION_TIMED_OUT'), 120_000);
         child.stdout.on('data', chunk => {
           result += String(chunk);
@@ -43,6 +53,7 @@ async function confirmNative(binary: string, expectedHash: string, bytes: string
         child.once('error', () => { clearTimeout(timer); fail('LOCAL_CONFIRMATION_UNAVAILABLE'); });
         child.stdin.on('error', () => {});
         child.once('close', code => {
+          signal?.removeEventListener('abort', cancelled);
           clearTimeout(timer);
           if (!failed) {
             if (code === 0) resolve(result);

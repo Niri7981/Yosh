@@ -1,3 +1,8 @@
+import { LocalStatementPairings } from '../authority/local-statement-pairing';
+import { canShareSavedResult } from './account-result-policy';
+import { accountStatement } from './account-statement';
+import type { ResultQuery, StatementQuery } from '../mcp/account-read-contract';
+import { MAX_SERIALIZED_RESOURCE_DELIVERY_BYTES } from '../resources/http-resource';
 import { LocalControlApprovals, type LocalControlReceipt } from '../authority/local-control-approval';
 import { PaymentFailureDetails, readPaymentFailure } from '../payment/pay-controller-diagnostics';
 import { ExecutionSafety, type ExternalExecutionFacts, type ExternalExecutionPermit } from './execution-safety';
@@ -93,6 +98,39 @@ function isLiveMode(mode: StoredPurchaseExecutionMode | undefined) {
 export class PurchaseLedger {
   private db: DatabaseSync;
   private localApprovals?: LocalGrantApprovals;
+  private statementPairings?: LocalStatementPairings;
+  localStatementPairings() { return this.statementPairings ??= new LocalStatementPairings(this.db); }
+  hasStatementOnlyMember(id: string) {
+    if (!this.statementPairings && !this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='local_statement_pairings'").get()) return false;
+    return this.localStatementPairings().owns(id);
+  }
+  localPurchaseConsent(memberId: string, operationId?: string, selectedGrantId?: string) {
+    const paired = this.hasStatementOnlyMember(memberId);
+    const available = this.db.prepare("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='local_grant_requests'").get();
+    if (available && operationId) {
+      const row = this.db.prepare(`SELECT id FROM local_grant_requests WHERE state='CONSUMED'
+        AND json_extract(body,'$.binding.principal.cardMemberId')=? AND json_extract(body,'$.purchase.requestId')=?`).get(memberId, operationId);
+      if (row) return this.localGrantApprovals().read(String(row.id));
+    }
+    if (paired || (available && selectedGrantId && this.db.prepare("SELECT 1 FROM local_grant_requests WHERE grant_id=? AND json_type(body,'$.purchase')='object'").get(selectedGrantId)))
+      throw new Error('LOCAL_PURCHASE_CONSENT_REQUIRED');
+  }
+
+  reusableLocalGrant(principal: SpendPrincipal, scope: SpendGrantScope, amount: string, now: number) {
+    const monetary = this.scope('live_mainnet');
+    const row = this.db.prepare(`SELECT * FROM spend_grants WHERE status='ACTIVE' AND card_member_id=? AND monetary_scope_id=?
+      AND resource_id=? AND id NOT IN (SELECT grant_id FROM local_grant_requests WHERE grant_id IS NOT NULL AND json_type(body,'$.purchase')='object')`)
+      .get(principal.cardMemberId, monetaryScopeId(monetary), scope.resourceId);
+    if (!row) return;
+    const grant = this.parseGrantRow(row);
+    if (grant.expiresAt <= now || grant.connectionId !== principal.connectionId || grant.connectionGeneration !== principal.connectionGeneration
+      || grant.providerId !== scope.providerId || grant.operation !== scope.operation || grant.network !== scope.network
+      || grant.assetId !== scope.assetId || grant.assetDecimals !== scope.assetDecimals || grant.payTo !== scope.payTo || grant.paymentScheme !== scope.paymentScheme
+      || (scope.maximumNetworkFeeLamports !== undefined && BigInt(grant.maximumNetworkFeeLamports ?? '0') > BigInt(scope.maximumNetworkFeeLamports))
+      || BigInt(amount) > BigInt(grant.singleLimit) || BigInt(amount) + this.grantCommitted(grant.id, monetary) > BigInt(grant.totalLimit)) return;
+    return grant.id;
+  }
+
   private localControls?: LocalControlApprovals;
   localControlApprovals() { return this.localControls ??= new LocalControlApprovals(this.db); }
   /** Opt-in migration: existing App ledgers do not acquire plugin-only tables. */
@@ -364,6 +402,35 @@ export class PurchaseLedger {
     if (!changed) throw new Error('CARD_MEMBER_NOT_ACTIVE');
     return this.cardMember(id)!;
   }
+  readAccountStatement(memberId: string, mode: StoredPurchaseExecutionMode, input: StatementQuery) {
+    // SQLite WAL readers see one snapshot even when another process commits a payment between the page and totals queries.
+    this.db.exec('BEGIN');
+    try {
+      this.assertCardMemberActive(memberId);
+      const statement = accountStatement(this.db, this.scope(mode), input);
+      this.db.exec('COMMIT');
+      return statement;
+    } catch (error) { this.db.exec('ROLLBACK'); throw error; }
+  }
+  readAccountResult(memberId: string, mode: StoredPurchaseExecutionMode, input: ResultQuery) {
+    this.assertCardMemberActive(memberId);
+    const row = this.db.prepare(`SELECT p.approval_id,p.owner_card_member_id,p.purchase,p.data,(SELECT max(at) FROM purchase_events WHERE purchase_id=p.id AND type='delivery.COMPLETE') AS recordedAt
+      FROM purchases p JOIN purchase_delivery d ON d.purchase_id=p.id WHERE p.id=? AND p.monetary_scope_id=? AND p.status='PAID' AND d.state='COMPLETE'
+      AND p.data IS NOT NULL AND (json_extract(p.purchase,'$.resultAudience')='account' OR (json_type(p.purchase,'$.resultAudience') IS NULL AND json_extract(p.purchase,'$.resourceScopeId')=?))`).get(input.purchaseId, monetaryScopeId(this.scope(mode)), PAID_RESOURCE_SCOPE_ID);
+    if (!row || typeof row.data !== 'string' || Buffer.byteLength(row.data) > MAX_SERIALIZED_RESOURCE_DELIVERY_BYTES) return null;
+    // Apply the same reflected-payment-credential protection as the owner's delivery reader, including for old persisted rows.
+    try {
+      const intent = parseStoredSpendIntent(JSON.parse(String(row.purchase)), typeof row.owner_card_member_id === 'string' ? row.owner_card_member_id : undefined);
+      const data: unknown = JSON.parse(row.data);
+      if (!canShareSavedResult(intent, data)) return null;
+      this.assertSafeDelivery(String(row.approval_id), data);
+    } catch { return null; }
+    const bytes = Buffer.from(row.data); const offset = input.offset ?? 0;
+    if (offset > bytes.length) return null;
+    const end = Math.min(offset + 16_384, bytes.length);
+    return { purchaseId: input.purchaseId, recordedAt: row.recordedAt, encoding: 'base64', contentType: 'application/json',
+      totalBytes: bytes.length, offset, chunk: bytes.subarray(offset, end).toString('base64'), nextOffset: end < bytes.length ? end : null };
+  }
   isCardMemberActive(id: string) { return this.cardMember(id)?.status === 'ACTIVE'; }
   assertCardMemberActive(id: string) {
     if (!this.isCardMemberActive(id)) throw new Error('CARD_MEMBER_REVOKED');
@@ -392,27 +459,36 @@ export class PurchaseLedger {
       id, ...(scope.environment === 'legacy_test' ? [scope.walletIdentity, scope.network, scope.assetId, scope.assetDecimals] : []));
   }
   createSpendGrant(raw: SpendGrantInput, rawPrincipal: SpendPrincipal, rawScope: SpendGrantScope, now = this.now(), mode?: PurchaseExecutionMode,
-    confirmation?: LocalGrantConfirmation) {
+    confirmation?: LocalGrantConfirmation, publishMember?: () => void) {
     assertExplicitAuthority(mode, rawScope.network, rawScope.assetId);
     if (!this.managed) throw new Error('Spend grants require a managed ledger');
     const monetary = this.scope(mode, rawScope.network, rawScope.assetId, rawScope.assetDecimals);
     const input = SpendGrantInputSchema.parse(raw); const principal = SpendPrincipalSchema.parse(rawPrincipal); const scope = SpendGrantScopeSchema.parse(rawScope);
-    this.assertCardMemberActive(principal.cardMemberId);
     const totalLimit = parseGrantAmount(input.totalLimit, 'totalLimit'); const singleLimit = parseGrantAmount(input.singleLimit, 'singleLimit');
     if (singleLimit > totalLimit) throw new Error('单笔上限不能大于授权总额。');
     if (input.expiresAt <= now + 60_000 || input.expiresAt > now + 7 * 24 * 60 * 60 * 1000) throw new Error('授权有效期必须在 1 分钟到 7 天之间。');
     const approvals = confirmation ? this.localGrantApprovals() : undefined;
+    const purchaseId = confirmation ? approvals!.read(confirmation.requestId).request.purchase?.requestId : undefined;
+    if (purchaseId && !this.db.prepare("SELECT 1 FROM app_schema_migrations WHERE id='local_single_purchase_grants_v1'").get()) {
+      this.atomic(() => this.db.exec(`ALTER TABLE spend_grants ADD COLUMN purchase_request_id TEXT;
+        DROP INDEX one_active_spend_grant_per_member_resource;
+        CREATE UNIQUE INDEX one_active_spend_grant_per_member_resource ON spend_grants(card_member_id,monetary_scope_id,resource_id)
+          WHERE status='ACTIVE' AND purchase_request_id IS NULL;
+        INSERT INTO app_schema_migrations(id,applied_at) VALUES('local_single_purchase_grants_v1',unixepoch('now')*1000);`));
+    }
     return this.atomic(() => {
       if (confirmation) approvals!.assertPending(confirmation, { input, principal, scope, mode }, now);
+      publishMember?.();
+      this.assertCardMemberActive(principal.cardMemberId);
       const scopeId = storeMonetaryScope(this.db, monetary);
       this.expireGrants(now);
-      const previous = this.db.prepare("UPDATE spend_grants SET status='REVOKED',revoked_at=? WHERE status='ACTIVE' AND card_member_id=? AND monetary_scope_id=? AND resource_id=? RETURNING id").all(now, principal.cardMemberId, scopeId, scope.resourceId);
+      const previous = purchaseId ? [] : this.db.prepare("UPDATE spend_grants SET status='REVOKED',revoked_at=? WHERE status='ACTIVE' AND card_member_id=? AND monetary_scope_id=? AND resource_id=? RETURNING id").all(now, principal.cardMemberId, scopeId, scope.resourceId);
       for (const row of previous) this.grantEvent(String(row.id), 'grant.REVOKED_REPLACED', now);
       const version = Number(this.db.prepare('SELECT COALESCE(MAX(version),0)+1 AS version FROM spend_grants').get()!.version);
       const id = randomUUID();
-      this.db.prepare(`INSERT INTO spend_grants (id,version,card_member_id,connection_id,connection_generation,resource_id,provider_id,operation,network,asset_id,asset_decimals,pay_to,payment_scheme,total_limit,single_limit,status,created_at,expires_at,revoked_at,monetary_scope_id,post_policy_hash)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'ACTIVE',?,?,NULL,?,?)`).run(id, version, principal.cardMemberId, principal.connectionId, principal.connectionGeneration, scope.resourceId, scope.providerId,
-        scope.operation, scope.network, scope.assetId, scope.assetDecimals, scope.payTo, scope.paymentScheme, totalLimit, singleLimit, now, input.expiresAt, scopeId, scope.postPolicyHash ?? null);
+      this.db.prepare(`INSERT INTO spend_grants (id,version,card_member_id,connection_id,connection_generation,resource_id,provider_id,operation,network,asset_id,asset_decimals,pay_to,payment_scheme,total_limit,single_limit,status,created_at,expires_at,revoked_at,monetary_scope_id,post_policy_hash${purchaseId ? ',purchase_request_id' : ''})
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'ACTIVE',?,?,NULL,?,?${purchaseId ? ',?' : ''})`).run(id, version, principal.cardMemberId, principal.connectionId, principal.connectionGeneration, scope.resourceId, scope.providerId,
+        scope.operation, scope.network, scope.assetId, scope.assetDecimals, scope.payTo, scope.paymentScheme, totalLimit, singleLimit, now, input.expiresAt, scopeId, scope.postPolicyHash ?? null, ...(purchaseId ? [purchaseId] : []));
       if (scope.paymentScheme === 'mpp_charge') {
         migrateMppGrantConsent(this.db, now);
         this.db.prepare('INSERT INTO mpp_grant_terms(grant_id,maximum_network_fee_lamports) VALUES (?,?)')
@@ -468,15 +544,24 @@ export class PurchaseLedger {
   }
   /** Identifies the latest matching grant so policy can persist an inactive-grant denial.
    * This binding is only an input to reserve(); claim/sign still require an ACTIVE grant. */
-  spendAuthorityForDecision(principal: SpendPrincipal, operation: string, now = this.now(), mode?: PurchaseExecutionMode, resourceId?: string): SpendAuthorityBinding | undefined {
+  spendAuthorityForDecision(principal: SpendPrincipal, operation: string, now = this.now(), mode?: PurchaseExecutionMode, resourceId?: string, operationId?: string): SpendAuthorityBinding | undefined {
     if (!this.managed) throw new Error('Spend grants require a managed ledger');
     const parsed = SpendPrincipalSchema.parse(principal);
     this.assertCardMemberActive(parsed.cardMemberId);
+    const consent = operationId ? this.localPurchaseConsent(parsed.cardMemberId, operationId) : undefined;
+    if (consent?.grantId) {
+      const grant = this.grantById(consent.grantId);
+      if (!grant || grant.cardMemberId !== parsed.cardMemberId || grant.resourceId !== resourceId) throw new Error('LOCAL_PURCHASE_BINDING_MISMATCH');
+      return {grantId: grant.id, grantVersion: grant.version, cardMemberId: parsed.cardMemberId, connectionId: parsed.connectionId,
+        connectionGeneration: parsed.connectionGeneration, operation: grant.operation};
+    }
     return this.atomic(() => {
       this.expireGrants(now);
       // Historical grants for the registered resource scope retain their stored operation.
+      const generalOnly = this.db.prepare("SELECT 1 FROM app_schema_migrations WHERE id='local_single_purchase_grants_v1'").get()
+        ? ' AND purchase_request_id IS NULL' : '';
       const row = operation === PAID_RESOURCE_PURCHASE_OPERATION
-        ? this.db.prepare(`SELECT * FROM spend_grants WHERE card_member_id=? AND monetary_scope_id=? AND (operation=? OR (operation=? AND resource_id=?)) ${resourceId ? 'AND resource_id=?' : ''} ORDER BY version DESC LIMIT 1`)
+        ? this.db.prepare(`SELECT * FROM spend_grants WHERE card_member_id=? AND monetary_scope_id=? AND (operation=? OR (operation=? AND resource_id=?)) ${resourceId ? 'AND resource_id=?' : ''}${generalOnly} ORDER BY version DESC LIMIT 1`)
           .get(parsed.cardMemberId, monetaryScopeId(this.scope(mode)), operation, LEGACY_MARKET_SNAPSHOT_OPERATION, PAID_RESOURCE_SCOPE_ID, ...(resourceId ? [resourceId] : []))
         : this.db.prepare('SELECT * FROM spend_grants WHERE card_member_id=? AND monetary_scope_id=? AND operation=? ORDER BY version DESC LIMIT 1').get(parsed.cardMemberId, monetaryScopeId(this.scope(mode)), operation);
       if (!row) return undefined;
@@ -794,6 +879,12 @@ export class PurchaseLedger {
     if (monetary.environment !== (mode === 'UNKNOWN' ? 'legacy_test' : mode) || monetary.network !== intent.network || monetary.assetId !== intent.assetId || monetary.assetDecimals !== intent.assetDecimals) throw new Error('MONETARY_SCOPE_MISMATCH');
     if (mode === 'live_mainnet' && monetaryScopeId(monetary) !== monetaryScopeId(this.scope('live_mainnet'))) throw new Error('MONETARY_SCOPE_MISMATCH');
     if (ownerCardMemberId && intent.authority && ownerCardMemberId !== intent.authority.cardMemberId) throw new Error('PURCHASE_REQUEST_OWNER_MISMATCH');
+    const member = ownerCardMemberId ?? intent.authority?.cardMemberId;
+    const consent = member ? this.localPurchaseConsent(member, external?.operationId, intent.authority?.grantId) : undefined;
+    if (consent && now >= consent.request.purchase!.quoteExpiresAt && !this.getOwned(intent.idempotencyKey, member!)) throw new Error('LOCAL_AUTHORIZATION_EXPIRED');
+    if (consent && (intent.authority?.grantId !== consent.grantId || member !== external?.callerId
+      || consent.request.binding.scope.resourceId !== intent.resourceId || consent.request.purchase!.requestHash !== hash(intent.httpRequest)
+      || consent.request.purchase!.quoteHash !== hash(quote))) throw new Error('LOCAL_PURCHASE_BINDING_MISMATCH');
     return this.atomic(() => {
       const memberId = ownerCardMemberId ?? intent.authority?.cardMemberId;
       const existing = (memberId ? this.getOwned(intent.idempotencyKey, memberId) : this.getLegacy(intent.idempotencyKey));

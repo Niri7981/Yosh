@@ -41,16 +41,21 @@ export async function requestMppResourcePurchase(raw: unknown, options: {
   const declared = config.registeredResources?.find(resource => resource.resourceId === input.resourceId);
   if (!declared) throw new Error('MPP_REGISTERED_RESOURCE_REQUIRED');
   const resource = requestForPurchase(declared, input);
-  const quote = await fetchMppResourceQuote(resource, config, dependencies.binary, dependencies.fetcher);
+  const consent = ledger.localPurchaseConsent(principal.cardMemberId, input.requestId);
+  if (consent && (!consent.request.purchase?.mppQuote || consent.request.purchase.reason !== input.reason
+    || consent.request.binding.scope.resourceId !== input.resourceId || consent.request.purchase.requestHash !== hash(resource.request)))
+    throw new Error('LOCAL_PURCHASE_BINDING_MISMATCH');
+  const quote = consent?.request.purchase?.mppQuote ?? await fetchMppResourceQuote(resource, config, dependencies.binary, dependencies.fetcher);
+  if (consent && quote.expiresAt <= Date.now()) throw new Error('LOCAL_AUTHORIZATION_EXPIRED');
   options.assertAccepting?.();
   const winner = ledger.getOwned(input.requestId, principal.cardMemberId);
   if (winner) return reuse(winner);
   const now = Date.now();
-  const authority = ledger.spendAuthorityForDecision(principal, PAID_RESOURCE_PURCHASE_OPERATION, now, config.mode, resource.resourceId);
+  const authority = ledger.spendAuthorityForDecision(principal, PAID_RESOURCE_PURCHASE_OPERATION, now, config.mode, resource.resourceId, input.requestId);
   const intent = SpendIntentSchema.parse({ id: randomUUID(), idempotencyKey: input.requestId,
     requestHash: hash({ resourceId: resource.resourceId, providerId: resource.providerId, request: resource.request, reason: input.reason }),
     requestInputFingerprint: inputHash, resourceId: resource.resourceId, providerId: resource.providerId, reason: input.reason,
-    httpRequest: resource.request, mpp: quote, deliveryRecovery: resource.deliveryRecovery ?? { kind: 'none' }, deliveryPolicy: resource.deliveryPolicy,
+    httpRequest: resource.request, mpp: quote, resultAudience: resource.resultAudience, deliveryRecovery: resource.deliveryRecovery ?? { kind: 'none' }, deliveryPolicy: resource.deliveryPolicy,
     amount: quote.amount, currency: 'USDC', assetDecimals: 6, assetId: quote.asset, network: quote.network, payTo: quote.payTo,
     paymentScheme: 'mpp_charge', quoteFingerprint: hash(quote), createdAt: now, expiresAt: quote.expiresAt,
     executionBinding: mppPaymentBinding(config, resource.request, quote, resource.deliveryRecovery, resource.deliveryPolicy), authority });

@@ -187,6 +187,13 @@ export function createPayAuthorityAdapter(options: { directory: string; runtime:
       }
       const id = purchaseId(principal.cardMemberId, spend.operation_id);
       const existing = options.runtime().ledger.getOwned(id, principal.cardMemberId);
+      if (!existing) {
+        const consent = options.runtime().ledger.localPurchaseConsent(principal.cardMemberId, spend.operation_id);
+        if (consent && Date.now() >= consent.request.purchase!.quoteExpiresAt) throw new Error('LOCAL_AUTHORIZATION_EXPIRED');
+        if (consent && (consent.request.purchase!.quoteHash !== hash(spend.accepted)
+          || consent.request.purchase!.requestHash !== hash({method: spend.request.method, url: spend.request.url,
+            headers: Object.fromEntries(spend.request.headers), access: 'https'}))) throw new Error('LOCAL_PURCHASE_BINDING_MISMATCH');
+      }
       if (!existing && options.runtime().ledger.executionSafety.hasExternalAuthorityClaim(principal.cardMemberId, spend.operation_id))
         throw new Error('PAY_ORIGINAL_OUTCOME_UNRESOLVED');
       if (!existing && (liveNetwork || options.offlineResources?.includesUrl(spend.request.url))) {
@@ -245,7 +252,8 @@ export function createPayAuthorityAdapter(options: { directory: string; runtime:
         // The shared purchase service selects the current resource Grant and
         // reserves against its immutable ID/version. An old operator acceptance
         // file is historical test evidence, not product spending authority.
-        const result = await requestPaidResourcePurchase({ requestId: id, resourceId, reason: 'Pay MCP API purchase',
+        const consent = ledger.localPurchaseConsent(principal.cardMemberId, facts.operation_id);
+        const result = await requestPaidResourcePurchase({ requestId: id, resourceId, reason: consent?.request.purchase?.reason ?? 'Pay MCP API purchase',
           ...(registered ? { request: requestInput } : {}) }, {
           config, ledger, origin: options.origin, principal, execute: true, deferExecution: true,
           externalSelectedQuote: facts.accepted,
