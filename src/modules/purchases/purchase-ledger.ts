@@ -137,7 +137,14 @@ export class PurchaseLedger {
   private localControls?: LocalControlApprovals;
   localControlApprovals() { return this.localControls ??= new LocalControlApprovals(this.db); }
   /** Opt-in migration: existing App ledgers do not acquire plugin-only tables. */
-  localGrantApprovals() { return this.localApprovals ??= new LocalGrantApprovals(this.db); }
+  localGrantApprovals() {
+    if (!this.localApprovals) {
+      const store = new LocalGrantApprovals(this.db);
+      this.migrateLocalPurchaseReceiptGuard();
+      this.localApprovals = store;
+    }
+    return this.localApprovals;
+  }
   readonly executionSafety: ExecutionSafety;
   private readonly delivery: PurchaseDeliveryStore;
   readonly resources: RuntimeResourceRegistry;
@@ -208,7 +215,7 @@ export class PurchaseLedger {
       this.db.prepare('INSERT OR IGNORE INTO app_budget_clock (id,spending_day,time_zone,next_boundary,last_seen) VALUES (1,?,?,?,?)')
         .run(spendingDay(now, zone), zone, nextSpendingDayBoundary(now, zone), now);
     }
-    try { migrateMonetaryLedger(this.db, this.managed, this.walletIdentity, this.now()); migrateOriginalPaymentEvidence(this.db, this.now()); migrateMppOriginalTransactionOwnership(this.db, this.now()); migrateHttpPurchaseBindings(this.db, this.now()); migrateDeliveryRecovery(this.db, this.now()); migrateMainnetAuthority(this.db, this.managed, this.now()); this.migrateResourceScopedGrants(); this.migratePostGrantConsent(); this.resources = new RuntimeResourceRegistry(this.db, this.now); this.reconciliation = new PaymentReconciliation(this.db, this.now); this.delivery = new PurchaseDeliveryStore(this.db, this.now); this.walletLibrary = new WalletLibrary(this.db); this.walletAccounts = new WalletAccounts(this.db, this.now, approvalId => this.walletHistoricalPayer(approvalId)); }
+    try { migrateMonetaryLedger(this.db, this.managed, this.walletIdentity, this.now()); migrateOriginalPaymentEvidence(this.db, this.now()); migrateMppOriginalTransactionOwnership(this.db, this.now()); migrateHttpPurchaseBindings(this.db, this.now()); migrateDeliveryRecovery(this.db, this.now()); migrateMainnetAuthority(this.db, this.managed, this.now()); this.migrateResourceScopedGrants(); this.migratePostGrantConsent(); this.migrateLocalPurchaseReceiptGuard(); this.resources = new RuntimeResourceRegistry(this.db, this.now); this.reconciliation = new PaymentReconciliation(this.db, this.now); this.delivery = new PurchaseDeliveryStore(this.db, this.now); this.walletLibrary = new WalletLibrary(this.db); this.walletAccounts = new WalletAccounts(this.db, this.now, approvalId => this.walletHistoricalPayer(approvalId)); }
     catch (error) { this.db.close(); this.executionSafety.close(); throw error; }
   }
   scope(mode: StoredPurchaseExecutionMode = this.defaultMode, network?: string, asset?: string, decimals = 6,
@@ -331,6 +338,25 @@ export class PurchaseLedger {
       this.db.exec(`DROP INDEX IF EXISTS one_active_spend_grant_per_member;
         CREATE UNIQUE INDEX one_active_spend_grant_per_member_resource ON spend_grants(card_member_id,monetary_scope_id,resource_id) WHERE status='ACTIVE';`);
       this.db.prepare("INSERT INTO app_schema_migrations (id,applied_at) VALUES ('013_resource_scoped_grants',?)").run(this.now());
+    });
+  }
+  private migrateLocalPurchaseReceiptGuard() {
+    if (!this.managed || !this.db.prepare("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='local_grant_requests'").get()
+      || this.db.prepare("SELECT 1 FROM app_schema_migrations WHERE id='local_purchase_receipt_guard_v1'").get()) return;
+    this.atomic(() => {
+      if (this.db.prepare("SELECT 1 FROM app_schema_migrations WHERE id='local_purchase_receipt_guard_v1'").get()) return;
+      // Old owners insert reservations without a receipt. Enforce this at the shared DB boundary,
+      // even after downgrade; existing purchases can still settle or recover without another reservation.
+      this.db.exec(`ALTER TABLE purchases ADD COLUMN local_purchase_receipt TEXT;
+        CREATE UNIQUE INDEX purchase_per_local_receipt ON purchases(local_purchase_receipt) WHERE local_purchase_receipt IS NOT NULL;
+        CREATE TRIGGER require_local_purchase_receipt BEFORE INSERT ON purchases
+          WHEN NEW.status='APPROVED' AND EXISTS (
+            SELECT 1 FROM local_grant_requests r WHERE r.grant_id=json_extract(NEW.purchase,'$.authority.grantId')
+            AND json_type(r.body,'$.purchase')='object' AND (
+              NEW.local_purchase_receipt IS NOT r.id OR r.state<>'CONSUMED'
+              OR NEW.owner_card_member_id IS NOT json_extract(r.body,'$.binding.principal.cardMemberId')))
+          BEGIN SELECT RAISE(ABORT,'LOCAL_PURCHASE_RECEIPT_REQUIRED'); END;
+        INSERT INTO app_schema_migrations(id,applied_at) VALUES ('local_purchase_receipt_guard_v1',unixepoch('now')*1000);`);
     });
   }
   private migratePostGrantConsent() {
@@ -586,8 +612,10 @@ export class PurchaseLedger {
     return this.atomic(() => {
       this.expireGrants(now);
       // Historical grants for the registered resource scope retain their stored operation.
-      const generalOnly = this.db.prepare("SELECT 1 FROM app_schema_migrations WHERE id='local_single_purchase_grants_v1'").get()
-        ? ' AND purchase_request_id IS NULL' : '';
+      // The original signed receipt also identifies single-order grants issued before
+      // purchase_request_id existed; don't infer that old NULL values are delegations.
+      const generalOnly = this.db.prepare("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='local_grant_requests'").get()
+        ? " AND NOT EXISTS (SELECT 1 FROM local_grant_requests r WHERE r.grant_id=spend_grants.id AND json_type(r.body,'$.purchase')='object')" : '';
       const row = operation === PAID_RESOURCE_PURCHASE_OPERATION
         ? this.db.prepare(`SELECT * FROM spend_grants WHERE card_member_id=? AND monetary_scope_id=? AND (operation=? OR (operation=? AND resource_id=?)) ${resourceId ? 'AND resource_id=?' : ''}${generalOnly} ORDER BY version DESC LIMIT 1`)
           .get(parsed.cardMemberId, monetaryScopeId(this.scope(mode)), operation, LEGACY_MARKET_SNAPSHOT_OPERATION, PAID_RESOURCE_SCOPE_ID, ...(resourceId ? [resourceId] : []))
@@ -938,9 +966,10 @@ export class PurchaseLedger {
       const controls = this.controls(undefined, monetary);
       let decision = evaluateSpendAuthority(intent, { committed, hasUnknownPayment: Boolean(unresolved) }, now, controls);
       if (this.requireSpendGrant) decision = this.evaluateGrant(intent, decision, committed, controls, now, monetary);
-      this.db.prepare('INSERT INTO purchases (id,task_id,approval_id,purchase,quote,decision,status,amount,owner_card_member_id,execution_mode,monetary_scope_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)')
+      const receipt = consent && decision.decision === 'APPROVED' ? consent.request.id : undefined;
+      this.db.prepare(`INSERT INTO purchases (id,task_id,approval_id,purchase,quote,decision,status,amount,owner_card_member_id,execution_mode,monetary_scope_id${receipt ? ',local_purchase_receipt' : ''}) VALUES (?,?,?,?,?,?,?,?,?,?,?${receipt ? ',?' : ''})`)
         .run(intent.id, intent.idempotencyKey, randomUUID(), JSON.stringify(intent), JSON.stringify(quote), JSON.stringify(decision), decision.decision, intent.amount,
-          ownerCardMemberId ?? intent.authority?.cardMemberId ?? null, mode === 'UNKNOWN' ? null : mode, storeMonetaryScope(this.db, monetary));
+          ownerCardMemberId ?? intent.authority?.cardMemberId ?? null, mode === 'UNKNOWN' ? null : mode, storeMonetaryScope(this.db, monetary), ...(receipt ? [receipt] : []));
       if (intent.mpp && decision.decision === 'APPROVED') {
         migrateMppGrantConsent(this.db, now);
         const scopeId = monetaryScopeId(monetary), merchantOrigin = new URL(intent.httpRequest!.url).origin;
