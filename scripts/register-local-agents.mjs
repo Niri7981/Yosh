@@ -6,6 +6,7 @@ import { accessSync, closeSync, constants, existsSync, lstatSync, mkdirSync, ope
 import { homedir } from 'node:os';
 import { basename, delimiter, dirname, isAbsolute, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 
 const script = fileURLToPath(import.meta.url);
@@ -32,6 +33,61 @@ function binaryFor(host) {
       return binary;
     } catch { /* Try the next installed location. */ }
   }
+}
+
+async function chooseConnections() {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error('INTERACTIVE_TERMINAL_REQUIRED');
+
+  const choices = ['codex', 'claude', 'grok'].filter(binaryFor)
+    .map(host => ({ host, label: host === 'grok' ? 'Grok CLI' : hosts[host] }));
+  const manifest = join(runtime, 'manifest.json');
+  if (existsSync(manifest) && JSON.parse(readFileSync(manifest, 'utf8')).remoteStatements === true)
+    choices.push({ host: 'dot', label: 'Dot in ChatGPT (OpenAI Tunnel, statement only)' });
+  if (!choices.length) return [];
+
+  const selected = new Set();
+  const lines = createInterface({ input: process.stdin, output: process.stdout });
+  lines.once('SIGINT', () => {
+    process.exitCode = 130;
+    lines.close();
+  });
+  lines.setPrompt('Enter numbers to toggle, done to continue, or quit to cancel: ');
+  const show = () => {
+    console.log('Choose where to connect Yosh.');
+    choices.forEach(({ host, label }, index) => {
+      console.log(`  [${selected.has(host) ? 'x' : ' '}] ${index + 1}. ${label}`);
+    });
+    lines.prompt();
+  };
+
+  try {
+    show();
+    for await (const line of lines) {
+      const answer = line.trim().toLowerCase();
+      if (answer === 'quit') return [];
+      if (answer === 'done') return choices.filter(({ host }) => selected.has(host)).map(({ host }) => host);
+      const numbers = [...new Set(answer.split(/[\s,]+/))];
+      if (numbers.some(number => !/^[1-9]\d*$/.test(number) || Number(number) > choices.length)) {
+        console.log('Enter one or more numbers shown in the list.');
+      } else {
+        for (const number of numbers) {
+          const { host } = choices[Number(number) - 1];
+          if (selected.has(host)) selected.delete(host);
+          else selected.add(host);
+        }
+      }
+      show();
+    }
+    return [];
+  } finally { lines.close(); }
+}
+
+function printDotInstructions() {
+  console.log('To connect Dot, create an OpenAI Tunnel for your ChatGPT workspace.');
+  console.log('With an existing Yosh Mainnet account, run this from the extracted package:');
+  console.log('  ./Connect-Dot.command --tunnel-id tunnel_YOUR_ID');
+  console.log('The connector can install the verified OpenAI tunnel client on Apple Silicon.');
+  console.log('Then add a private Yosh MCP plugin in ChatGPT and select that tunnel.');
 }
 
 function cli(binary, args) {
@@ -269,9 +325,11 @@ function handle(host, dry, upgradeLegacy) {
   return old ? 'updated' : 'registered';
 }
 
-function main(args) {
+async function main(args) {
   if (args.length === 1 && args[0] === '--help') {
-    console.log('Register Yosh with installed local agents. Options: --host grok|claude|codex, --dry-run, --upgrade-legacy-clients, --print-config LABEL --executable /absolute/path/to/native-host. Copy printed config once per independent host.');
+    console.log('Register Yosh with installed local agents. Use --interactive to choose connections in a terminal.');
+    console.log('Options: --host grok|claude|codex, --dry-run, --upgrade-legacy-clients, --print-config LABEL --executable /absolute/path/to/native-host.');
+    console.log('Copy printed config once per independent host.');
     return;
   }
   if ((args.length === 2 || (args.length === 4 && args[2] === '--executable')) && args[0] === '--print-config') {
@@ -286,16 +344,32 @@ function main(args) {
     console.log(JSON.stringify({ mcpServers: { yosh: config(label, registration) } }, null, 2));
     return;
   }
-  const selected = [];
+  let selected = [];
   let dry = false;
   let upgradeLegacy = false;
+  let interactive = false;
   for (let index = 0; index < args.length; index++) {
     if (args[index] === '--dry-run') dry = true;
     else if (args[index] === '--upgrade-legacy-clients') upgradeLegacy = true;
+    else if (args[index] === '--interactive') interactive = true;
     else if (args[index] === '--host' && Object.hasOwn(hosts, args[index + 1])) selected.push(args[++index]);
     else throw new Error('UNKNOWN_ARGUMENT');
   }
+  if (interactive && selected.length) throw new Error('INTERACTIVE_HOST_CONFLICT');
   if (!existsSync(join(runtime, 'node')) || !existsSync(join(runtime, 'first-use-mcp.cjs'))) throw new Error('YOSH_RUNTIME_INCOMPLETE');
+  if (interactive) {
+    const connections = await chooseConnections();
+    const dot = connections.includes('dot');
+    if (dot) printDotInstructions();
+    selected = connections.filter(host => host !== 'dot');
+    if (!selected.length) {
+      if (!dot && process.exitCode !== 130) console.log('No connections selected.');
+      return;
+    }
+    // The lock holder receives only the selected hosts, so it does not prompt again
+    // or fall back to registering every installed host.
+    args = [...selected.flatMap(host => ['--host', host]), ...(upgradeLegacy ? ['--upgrade-legacy-clients'] : [])];
+  }
   if (!dry && process.env.YOSH_HOST_REGISTRATION_LOCK !== script) {
     privateState();
     // macOS lockf releases the OS lock on crash; keep the inode for concurrent installers.
@@ -317,8 +391,7 @@ function main(args) {
   }
 }
 process.umask(0o077);
-try { main(process.argv.slice(2)); }
-catch (error) {
+main(process.argv.slice(2)).catch(error => {
   console.error(/^[A-Z_]+$/.test(error.message) ? error.message : 'LOCAL_REGISTRATION_FAILED');
   process.exitCode = 1;
-}
+});

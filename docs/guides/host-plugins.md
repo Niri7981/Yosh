@@ -23,7 +23,7 @@ The local installer detects supported executables and accepts `--host claude` an
 
 ## Dot in ChatGPT
 
-Use an existing Yosh Mainnet account and the standalone runtime with the remote statement capability. Create an [OpenAI Tunnel](https://platform.openai.com/settings/organization/tunnels) and associate it with your ChatGPT workspace. Install the official [OpenAI `tunnel-client` v0.0.21](https://github.com/openai/tunnel-client/releases/tag/v0.0.21) and create a restricted [API key](https://platform.openai.com/settings/organization/api-keys) with **Tunnels → Read + Use** for that tunnel.
+Use an existing Yosh Mainnet account, Python 3 and the standalone runtime with the remote statement capability. Create an [OpenAI Tunnel](https://platform.openai.com/settings/organization/tunnels) and associate it with your ChatGPT workspace. Create a restricted [API key](https://platform.openai.com/settings/organization/api-keys) with **Tunnels → Read + Use** for that tunnel.
 
 Run the package's `Connect-Dot.command` from the extracted directory:
 
@@ -31,7 +31,9 @@ Run the package's `Connect-Dot.command` from the extracted directory:
 ./Connect-Dot.command --tunnel-id tunnel_YOUR_ID
 ```
 
-When prompted, enter the OpenAI key in the terminal and confirm the **statement-only** pairing on the Mac. The script checks that Yosh exposes exactly one tool for this pairing and that a read returns the Mainnet statement. Leave the terminal open for foreground mode, or add `--login-start` to start the tunnel at macOS login. After a Yosh runtime upgrade, rerun the updated package with `--login-start` to refresh the runtime path. If your outbound connection requires an HTTP proxy, pass it with `--proxy`.
+The connector uses an installed `tunnel-client` when it finds one. On Apple Silicon, it can also download the pinned OpenAI client and verify the archive checksum and macOS signatures before using it. Pass `--tunnel-client` to select a specific installed executable, or `--proxy` to configure an outbound HTTP proxy. [OpenAI tunnel-client release](https://github.com/openai/tunnel-client/releases/tag/v0.0.21)
+
+When prompted, enter the OpenAI key in the terminal and confirm the **statement-only** pairing on the Mac. The script checks that Yosh exposes exactly one tool for this pairing and that a read returns the Mainnet statement. Leave the terminal open for foreground mode, or add `--login-start` to start the tunnel at macOS login. After a Yosh runtime upgrade, rerun the updated package with `--login-start` to refresh the runtime path.
 
 In ChatGPT, add a custom MCP server, choose **Tunnel**, select the tunnel you created, and set authentication to **No authentication**. The Mac tunnel client attaches the Yosh credential to the request. Install the plugin privately in the workspace. Access to the same tunnel uses the same Yosh statement identity.
 
