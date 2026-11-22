@@ -4,10 +4,12 @@
 import argparse
 import fcntl
 import getpass
+import hashlib
 import http.client
 import json
 import os
 from pathlib import Path
+import platform
 import plistlib
 import re
 import shutil
@@ -18,6 +20,7 @@ import tempfile
 import time
 from urllib.parse import urlsplit
 import warnings
+import zipfile
 
 
 HOST = "127.0.0.1"
@@ -27,6 +30,14 @@ KEY_PATTERN = rb"sk-[A-Za-z0-9_-]{17,}"
 AUTH_PATTERN = rb"Bearer yrr1_[A-Za-z0-9_-]{43}"
 RESPONSE_LIMIT = 128 * 1024
 POLL_LIMIT = 150
+TUNNEL_VERSION = "0.0.21"
+TUNNEL_ARCHIVE = f"tunnel-client-v{TUNNEL_VERSION}-darwin-arm64.zip"
+TUNNEL_URL = f"https://persistent.oaistatic.com/tunnel-client/v{TUNNEL_VERSION}/{TUNNEL_ARCHIVE}"
+TUNNEL_SHA256 = "353a535d2513f599f9fe7897606e89b3248611453b30203ebddfb6e62fd4f58b"
+TUNNEL_ARCHIVE_LIMIT = 32 * 1024 * 1024
+TUNNEL_PROGRAMS = ("tunnel-client", "cloudflared")
+TUNNEL_FILES = (*TUNNEL_PROGRAMS, "cloudflared-manifest.json", "LICENSE", "NOTICE",
+                f"{TUNNEL_ARCHIVE[:-4]}-licenses.txt", f"{TUNNEL_ARCHIVE[:-4]}.spdx.json")
 
 
 def require_private(path, directory=False):
@@ -52,6 +63,67 @@ def credential(path, pattern):
     if len(value) > 4096 or not re.fullmatch(pattern, value):
         raise ValueError(f"{path.name} has an invalid format.")
     return value
+
+
+def verify_tunnel_client(directory):
+    require_private(directory, directory=True)
+    for program in TUNNEL_PROGRAMS:
+        file = directory / program
+        require_private(file)
+        subprocess.run(["/usr/bin/codesign", "--verify", "--strict", str(file)], check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20)
+    return directory / "tunnel-client"
+
+
+def download_tunnel_client(archive, proxy):
+    arguments = ["/usr/bin/curl", "--disable", "--fail", "--silent", "--show-error", "--location",
+                 "--proto", "=https", "--proto-redir", "=https", "--max-redirs", "3",
+                 "--connect-timeout", "15", "--max-time", "120", "--max-filesize", str(TUNNEL_ARCHIVE_LIMIT),
+                 "--output", str(archive)]
+    if proxy:
+        arguments.extend(["--proxy", proxy])
+    try:
+        subprocess.run([*arguments, TUNNEL_URL], env=client_environment(), capture_output=True,
+                       check=True, timeout=125)
+    except (OSError, subprocess.SubprocessError):
+        raise ValueError("Could not download the OpenAI tunnel client. Check your connection or --proxy.") from None
+    if archive.stat().st_size > TUNNEL_ARCHIVE_LIMIT:
+        raise ValueError("The OpenAI tunnel-client download exceeded the size limit.")
+    digest = hashlib.sha256()
+    with archive.open("rb") as content:
+        for chunk in iter(lambda: content.read(256 * 1024), b""):
+            digest.update(chunk)
+    if digest.hexdigest() != TUNNEL_SHA256:
+        raise ValueError("The OpenAI tunnel-client download did not match the pinned checksum.")
+
+
+def install_tunnel_client(base, proxy):
+    if platform.machine() != "arm64":
+        raise ValueError("The bundled tunnel-client installer requires Apple Silicon. Use --tunnel-client to supply an existing client.")
+    dependencies = private_directory(base / "dependencies")
+    destination = dependencies / f"tunnel-client-{TUNNEL_VERSION}-darwin-arm64"
+    descriptor = os.open(dependencies, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        if not os.path.lexists(destination):
+            print(f"Downloading OpenAI tunnel-client {TUNNEL_VERSION} and verifying it.", flush=True)
+            with tempfile.TemporaryDirectory(dir=dependencies) as temporary:
+                archive = Path(temporary) / TUNNEL_ARCHIVE
+                extracted = private_directory(Path(temporary) / "client")
+                download_tunnel_client(archive, proxy)
+                with zipfile.ZipFile(archive) as package:
+                    if sorted(package.namelist()) != sorted(TUNNEL_FILES):
+                        raise ValueError("The OpenAI tunnel-client archive had unexpected files.")
+                    for name in TUNNEL_FILES:
+                        file = extracted / name
+                        with package.open(name) as incoming, file.open("xb") as output:
+                            shutil.copyfileobj(incoming, output)
+                        file.chmod(0o700 if name in TUNNEL_PROGRAMS else 0o600)
+                verify_tunnel_client(extracted)
+                extracted.rename(destination)
+        return verify_tunnel_client(destination)
+    finally:
+        os.close(descriptor)
 
 
 def write_private(path, content, replace=False):
@@ -255,7 +327,7 @@ def parse_args(argv=None):
     parser.add_argument("--runtime-dir", required=True, type=Path, help="Verified Yosh package runtime directory.")
     parser.add_argument("--tunnel-id", required=True, help="OpenAI Tunnel ID for your private ChatGPT app.")
     parser.add_argument("--proxy", help="HTTP proxy for the OpenAI connection, including its port.")
-    parser.add_argument("--tunnel-client", default="tunnel-client", help="OpenAI tunnel-client executable.")
+    parser.add_argument("--tunnel-client", help="Use an existing OpenAI tunnel-client executable.")
     parser.add_argument("--login-start", action="store_true", help="Keep the connection running and start it at login.")
     parser.add_argument("--serve", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
@@ -278,10 +350,6 @@ def main():
     args = parse_args()
     if sys.platform != "darwin":
         raise ValueError("The Yosh Dot connection requires macOS.")
-    binary = shutil.which(args.tunnel_client)
-    if binary is None:
-        raise ValueError("Install OpenAI tunnel-client (v0.0.21 or later), or pass --tunnel-client.")
-    args.tunnel_client = Path(binary).absolute()
     runtime = args.runtime_dir.resolve(strict=True)
     if not (runtime / "mainnet-manifest.json").is_file():
         raise ValueError("Provide the runtime directory bundled with the Yosh Dev package.")
@@ -294,6 +362,10 @@ def main():
         # Background launches validate both credentials and never prompt for consent.
         if not os.path.lexists(key) or not os.path.lexists(auth):
             return
+        binary = shutil.which(args.tunnel_client or "tunnel-client")
+        if binary is None:
+            raise ValueError("The configured OpenAI tunnel-client executable was not found.")
+        args.tunnel_client = Path(binary).absolute()
         credential(key, KEY_PATTERN)
         header = credential(auth, AUTH_PATTERN)
         start_owner(runtime)
@@ -309,6 +381,10 @@ def main():
         except BlockingIOError:
             raise ValueError("Another setup or foreground tunnel is running for this connection.") from None
         installed = start_owner(runtime)
+        binary = shutil.which(args.tunnel_client or "tunnel-client")
+        if args.tunnel_client and binary is None:
+            raise ValueError("The OpenAI tunnel-client specified by --tunnel-client was not found.")
+        args.tunnel_client = Path(binary).absolute() if binary else install_tunnel_client(base, args.proxy)
         read_openai_key(key)
         if not os.path.lexists(auth):
             print("Confirm Dot's read-only Mainnet statement access in the Yosh approval window.", flush=True)

@@ -1,4 +1,5 @@
 import contextlib
+import hashlib
 import importlib.util
 import io
 import json
@@ -7,6 +8,7 @@ import tempfile
 import unittest
 from unittest import mock
 import warnings
+import zipfile
 
 
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts/connect-dot.py"
@@ -72,6 +74,43 @@ class ConnectDotTests(unittest.TestCase):
         start.assert_not_called()
         prompt.assert_not_called()
         launch.assert_not_called()
+
+    def test_rejects_unverified_tunnel_client_download(self):
+        archive = self.home / "pinned.zip"
+        payload = b"authorized bytes"
+        proxy = "http://127.0.0.1:9999"
+
+        def curl(arguments, **options):
+            Path(arguments[arguments.index("--output") + 1]).write_bytes(payload)
+
+        with mock.patch.object(connector.subprocess, "run", side_effect=curl) as download, \
+                mock.patch.object(connector, "TUNNEL_SHA256", hashlib.sha256(payload).hexdigest()):
+            connector.download_tunnel_client(archive, proxy)
+            arguments = download.call_args.args[0]
+            self.assertEqual(arguments[arguments.index("--proxy") + 1], proxy)
+            self.assertEqual(archive.read_bytes(), payload)
+        with mock.patch.object(connector.subprocess, "run", side_effect=curl):
+            with self.assertRaisesRegex(ValueError, "pinned checksum"):
+                connector.download_tunnel_client(self.home / "tampered.zip", None)
+
+    def test_install_reuses_the_verified_tunnel_client(self):
+        def download(archive, proxy):
+            with zipfile.ZipFile(archive, "w") as package:
+                for name in connector.TUNNEL_FILES:
+                    package.writestr(name, name)
+
+        base = connector.private_directory(self.support / "Yosh Dot Connections")
+        with contextlib.redirect_stdout(io.StringIO()), \
+                mock.patch.object(connector.platform, "machine", return_value="arm64"), \
+                mock.patch.object(connector, "download_tunnel_client", side_effect=download) as fetch, \
+                mock.patch.object(connector.subprocess, "run") as verify:
+            binary = connector.install_tunnel_client(base, None)
+            self.assertEqual(connector.install_tunnel_client(base, None), binary)
+        fetch.assert_called_once()
+        self.assertEqual(binary.read_text(), "tunnel-client")
+        self.assertEqual(binary.stat().st_mode & 0o777, 0o700)
+        self.assertTrue(all(call.args[0][0] == "/usr/bin/codesign" for call in verify.call_args_list))
+        self.assertTrue((binary.parent / "cloudflared").is_file())
 
     def test_refuses_echoed_key_entry_and_unsafe_credential_paths(self):
         key = self.home / "key"
