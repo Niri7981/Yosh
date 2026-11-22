@@ -64,6 +64,44 @@ int main(int argc, char** argv) {
   return { home, env, runtime, file, entries, run };
 }
 
+async function runInteractive(fixture, script, input, ...options) {
+  const harness = `
+import errno
+import os
+import pty
+import subprocess
+import sys
+
+master, slave = pty.openpty()
+child = subprocess.Popen(sys.argv[2:], stdin=slave, stdout=slave, stderr=slave)
+os.close(slave)
+pending = sys.argv[1].encode()
+recent = b""
+try:
+    while True:
+        try:
+            chunk = os.read(master, 4096)
+        except OSError as error:
+            if error.errno != errno.EIO:
+                raise
+            break
+        if not chunk:
+            break
+        sys.stdout.buffer.write(chunk)
+        if pending:
+            recent = (recent + chunk)[-256:]
+            if b"Enter numbers to toggle" in recent:
+                os.write(master, pending)
+                pending = b""
+finally:
+    os.close(master)
+sys.exit(child.wait(timeout=3))
+`;
+  const result = await runAsync('/usr/bin/python3', ['-c', harness, input.join('\n') + '\n', process.execPath,
+    script, '--interactive', ...options], { env: fixture.env, timeout: 10_000 });
+  return result.stdout;
+}
+
 test('registers a separate stable identity for each host, keeps user data and migrates managed paths', t => {
   const f = fixture(t), first = f.runtime('version A'), second = f.runtime('version B');
   assert.match(f.run(first, '--dry-run'), /grok  would-register/);
@@ -136,4 +174,36 @@ test('explicitly migrates only the official paired legacy launcher, preserving m
     assert.match(f.run(script,...upgrade), /preserved-/);
     assert.deepEqual(f.entries('claude').yosh, definition);
   }
+});
+
+test('interactive registration uses only the confirmed local selections', async t => {
+  const f = fixture(t), script = f.runtime('interactive');
+  const output = await runInteractive(f, script, ['9', '1, 2', '1', 'done']);
+  assert.match(output, /Enter one or more numbers shown in the list/);
+  assert.match(output, /\[x\] 2\. Claude Code/);
+  assert.match(output, /claude  registered/);
+  assert.equal(f.entries('claude').yosh.args.at(-1), 'Claude Code');
+  assert.equal(existsSync(f.file('codex')), false);
+  assert.equal(existsSync(f.file('grok')), false);
+  assert.doesNotMatch(output, /Dot in ChatGPT/);
+});
+
+test('interactive Dot selection shows connection instructions without registering local hosts', async t => {
+  const f = fixture(t), script = f.runtime('with Dot');
+  writeFileSync(join(dirname(script), 'manifest.json'), JSON.stringify({ remoteStatements: true }));
+  const output = await runInteractive(f, script, ['4', 'done']);
+  assert.match(output, /\[x\] 4\. Dot in ChatGPT/);
+  assert.match(output, /\.\/Connect-Dot\.command --tunnel-id tunnel_YOUR_ID/);
+  assert.equal(existsSync(join(f.home, 'Library', 'Application Support', 'Yosh Agent Registration')), false);
+  assert.doesNotMatch(output, /registered|paused|purchase/);
+});
+
+test('interactive cancellation and dry runs preserve host settings', async t => {
+  const f = fixture(t), script = f.runtime('preview');
+  assert.match(await runInteractive(f, script, ['1', 'quit']), /No connections selected/);
+  assert.match(await runInteractive(f, script, ['3', 'done'], '--dry-run'), /grok  would-register/);
+  assert.equal(existsSync(f.file('grok')), false);
+  assert.equal(existsSync(join(f.home, 'Library', 'Application Support', 'Yosh Agent Registration')), false);
+  assert.throws(() => f.run(script, '--interactive'), e => e.status === 1 && e.stderr.includes('INTERACTIVE_TERMINAL_REQUIRED'));
+  assert.throws(() => f.run(script, '--interactive', '--host', 'codex'), e => e.status === 1 && e.stderr.includes('INTERACTIVE_HOST_CONFLICT'));
 });
