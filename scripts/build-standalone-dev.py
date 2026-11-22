@@ -99,7 +99,7 @@ def main():
             '--define:__YOSH_PLUGIN_DEV__=' + ('false' if mainnet else 'true'),
             '--define:__YOSH_STANDALONE_DEV__=' + ('false' if mainnet else 'true'),
             '--define:__YOSH_RC5__=' + ('true' if mainnet else 'false'),
-            '--define:__YOSH_PLUGIN_VERSION__=' + json.dumps('0.2.19' if first_use else '0.2.14' if args.mainnet_mpp else '0.2.7' if args.mpp_artifact else '0.2.4'),
+            '--define:__YOSH_PLUGIN_VERSION__=' + json.dumps('0.2.20' if first_use else '0.2.14' if args.mainnet_mpp else '0.2.7' if args.mpp_artifact else '0.2.4'),
             '--outfile=' + str(runtime / name), '--metafile=' + str(metadata)], cwd=ROOT, env=env, check=True)
         for path in json.loads(metadata.read_text())['inputs']:
             inputs[path] = builder.digest(ROOT / path)

@@ -4,6 +4,8 @@
 
 Yosh lets AI agents buy APIs within spending limits you set. It keeps the wallet on your Mac, checks every purchase against the agent's permissions and the account budget, and records payment and delivery in a shared ledger.
 
+<a name="get-started-with-the-plugin"></a>
+
 ## Get started
 
 | Entry point | How to use it |
@@ -12,7 +14,7 @@ Yosh lets AI agents buy APIs within spending limits you set. It keeps the wallet
 | **Host plugins** | Use the Yosh plugin in Codex or connect Dot in ChatGPT over an OpenAI Tunnel. Local hosts can request purchases with user authorization. Dot can read the Mainnet statement. [Host plugin guide](docs/guides/host-plugins.md) |
 | **macOS App** | Use the optional native interface for the App workflow, including wallet setup and spending controls. [macOS App guide](docs/guides/native-app-getting-started.md) |
 
-Standalone and plugin packages are **0.2.19 developer previews**. Mainnet currently uses an existing compatible Yosh wallet, ledger and spending configuration. A fresh Mac has a build-from-source path and can run isolated Devnet. First-time standalone Mainnet wallet setup and public plugin distribution still need release acceptance.
+Standalone and plugin packages are **0.2.20 developer previews**. Mainnet currently uses an existing compatible Yosh wallet, ledger and spending configuration. A fresh Mac can run the independent Devnet setup. First-time standalone Mainnet wallet setup and public plugin distribution still need release acceptance.
 
 After connecting a host, ask it to “Use Yosh to show my three most recent purchases.”
 

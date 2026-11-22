@@ -239,7 +239,7 @@ class StandaloneArtifactTests(unittest.TestCase):
         statement_build = self.root / 'build.noindex/remote-statement-package'
         with mock.patch.object(packager, 'ROOT', self.root): packager.package(self.output, statement_build)
         metadata = statement_build / 'marketplace/plugins/yosh-local-dev/plugin.json'
-        self.assertEqual(json.loads(metadata.read_text())['version'], '0.2.19')
+        self.assertEqual(json.loads(metadata.read_text())['version'], '0.2.20')
         connector = statement_build / 'marketplace/Connect-Dot.command'
         self.assertTrue(connector.stat().st_mode & 0o100)
         self.assertFalse((limit_build / 'marketplace/Connect-Dot.command').exists())

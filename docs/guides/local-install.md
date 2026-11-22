@@ -6,16 +6,35 @@ Mainnet requires an existing RC5-compatible Yosh Mainnet profile, wallet in Keyc
 
 ## Install a verified preview package
 
-Use a verified package supplied by the project or [build one below](#build-from-source). Extract the ZIP, then run these commands from the extracted directory:
+On Apple Silicon macOS, run the versioned installer in Terminal:
 
 ```sh
-./Install.command --dry-run
-./Install.command --host codex --host grok
+curl -fsSL https://github.com/Niri7981/Yosh/releases/download/v0.2.20-preview/install-yosh.sh -o install-yosh.sh && /bin/sh install-yosh.sh
 ```
 
-The first command previews registration. Use `--host codex`, `--host claude` or `--host grok` to select local hosts. Running the installer without a host selection uses its default detection and registration flow. For the full Codex plugin UI and skills, follow [the host plugin guide](host-plugins.md#codex).
+It downloads the preview ZIP, verifies its SHA-256 and keeps the extracted marketplace in the Yosh Preview folder under your macOS Application Support directory. Then it opens the host menu.
+
+If you already have a verified ZIP or [build a package locally](#build-from-source), open the installer from its extracted directory:
+
+```sh
+./Install.command --interactive
+```
+
+Enter the numbers beside the installed hosts you want to connect and type `done`. Choosing Dot shows the [separate ChatGPT tunnel setup](host-plugins.md#dot-in-chatgpt). Pass `--dry-run --interactive` to preview your selection, or use `--host codex`, `--host claude` and `--host grok` for scripted installs. Running the installer without a host selection uses its default detection and registration flow. For the full Codex plugin UI and skills, follow the [Codex guide](host-plugins.md#codex).
 
 Open a fresh host session and ask it to show your Yosh statement. The first read from a newly registered agent can ask for native confirmation on your Mac. Spending permission is granted separately for an agent and API.
+
+### Start in Devnet on a fresh Mac
+
+The registered first-use tools open the existing Mainnet account. On a fresh Mac, start the independent Devnet setup from the extracted package:
+
+```sh
+./plugins/yosh-local-dev/yosh-dev settings
+```
+
+Open the local setup URL returned by Yosh. Choose Devnet and follow the wallet setup flow. The Devnet wallet, permissions and ledger are isolated from Mainnet.
+
+### Upgrade a preview
 
 For an upgrade, follow the [runtime handoff instructions](../architecture/mainnet-standalone-runtime-20261113.md). The service verifies the installed runtime, waits for active operations to finish and checks ownership before switching. The package and any host entries that pin its runtime must stay in sync.
 

@@ -108,7 +108,7 @@ def package(source, output):
     if manifest.get('purchaseResourceLookup'):
         version = '0.2.18' if manifest.get('hostPurchaseAmountLimit') else '0.2.17'
     if manifest.get('remoteStatements') is True:
-        version = '0.2.19'
+        version = '0.2.20'
     plugin_name = 'yosh-local-dev' if local else NAME
     output = output.absolute()
     if not output.resolve().is_relative_to((ROOT / 'build.noindex').resolve()) or output.is_symlink():
