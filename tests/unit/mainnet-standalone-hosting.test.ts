@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import type { ConfirmLocalGrant } from '../../src/modules/authority/native-grant-confirmation';
 import type { ConfirmStatementPairing } from '../../src/modules/authority/local-statement-pairing';
+import { handleRemoteReadMcp } from '../../src/modules/remote/mcp';
+import type { ReadConsent } from '../../src/modules/remote/pairings';
 import { handleAccountRead } from '../../src/modules/mcp/account-read-route';
 import { mkdtempSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -28,7 +30,7 @@ afterEach(async () => {
   for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true });
 });
 
-function fixture() {
+function fixture(confirmRemoteStatement?: (facts: ReadConsent) => Promise<boolean>) {
   for (const key of Object.keys(process.env)) {
     if (/^(YOSH_|APP2049_|SOLANA_|DEMO_)/.test(key) || key === 'USDC_MINT') vi.stubEnv(key, undefined);
   }
@@ -75,7 +77,7 @@ function fixture() {
   });
   const open = (standalone = true, binary = payMcpPath, confirmStatementPairing?: ConfirmStatementPairing, confirmPurchaseGrant?: ConfirmLocalGrant, fetcher?: typeof fetch, legacyMemberForRegistration?: (registration: string, label: string) => string | null) => {
     const app = new AppRuntime(directory, { codex: { run }, fetcher, initializeWallet: async () => ({ address: buyer, reused: true }),
-      ...(standalone ? { hosting: { kind: 'mainnet-standalone' as const, payMcpPath: binary, runtimeDigest, purchaseResourceLookup: true, confirmStatementPairing, confirmPurchaseGrant, legacyMemberForRegistration, mppProtocolEnginePath: join(packaged, 'mpp-protocol-engine') } } : {}) });
+      ...(standalone ? { hosting: { kind: 'mainnet-standalone' as const, payMcpPath: binary, runtimeDigest, purchaseResourceLookup: true, confirmRemoteStatement, confirmStatementPairing, confirmPurchaseGrant, legacyMemberForRegistration, mppProtocolEnginePath: join(packaged, 'mpp-protocol-engine') } } : {}) });
     runtimes.add(app); return app;
   };
   return { directory, memberId, payMcpPath, runtimeDigest, configPath, recordPath: integration.recordPath, run, open, buyer, resource };
@@ -499,4 +501,54 @@ it('describes only the active GET purchase contract to a registered host before 
   expect(() => app.describeHostResource({...host, label: 'unregistered', resourceId: f.resource.resourceId})).toThrow('LOCAL_HOST_REGISTRATION_INVALID');
   expect(verifyHost).toHaveBeenCalledWith(host.hostId, host.label);
   expect(confirm).not.toHaveBeenCalled(); expect(merchant).not.toHaveBeenCalled();
+});
+
+it('binds the Mainnet tunnel reader to the original wallet and a native statement-only pairing across restarts', async () => {
+  const consent = vi.fn<(facts: ReadConsent) => Promise<boolean>>(async () => true);
+  const f = fixture(consent);
+  let app = f.open();
+  const rpc = (token: string, method = 'tools/list', params: object = {}) => {
+    const request = new Request('http://127.0.0.1:3049/api/agent/remote-mcp', { method: 'POST',
+      headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', authorization: 'Bearer ' + token },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }) });
+    return handleRemoteReadMcp(app, request);
+  };
+  await expect(app.issueRemoteReadPairing('Dot', ['statement'])).rejects.toMatchObject({ code: 'REMOTE_READ_WALLET_REQUIRED' });
+  app.ledger.walletAccounts.assertIdentity('mainnet', f.buyer);
+  await expect(app.issueRemoteReadPairing('Dot', ['statement','result'])).rejects.toMatchObject({ code: 'REMOTE_READ_FORBIDDEN' });
+  await expect(app.issueRemotePurchasePairing('Dot')).rejects.toThrow('REMOTE_PURCHASE_SIMULATED_ONLY');
+  expect(consent).not.toHaveBeenCalled();
+  consent.mockResolvedValueOnce(false);
+  await expect(app.issueRemoteReadPairing('Dot', ['statement'])).rejects.toMatchObject({ code: 'REMOTE_READ_CONSENT_DENIED' });
+  expect(app.listRemoteReadPairings()).toEqual([]);
+  const reader = await app.issueRemoteReadPairing('Dot', ['statement']);
+  expect(consent).toHaveBeenLastCalledWith(expect.objectContaining({ label: 'Dot', account: expect.stringContaining(f.buyer), scopes: ['statement'], environment: 'live_mainnet' }));
+  expect(reader.memberId).not.toBe(f.memberId);
+  expect(JSON.stringify(app.listRemoteReadPairings())).not.toContain(reader.token);
+  // Existing rows issued against the generic slot or with broader scopes cannot
+  // gain access when a Mainnet installation upgrades to this connection type.
+  const oldScope = app.ledger.scope('live_mainnet');
+  const old = app.ledger.issueRemoteReadPairing('Old reader', ['statement'], oldScope);
+  expect((await rpc(old.token)).status).toBe(401);
+  const pin = app.ledger.walletAccounts.get('mainnet')!;
+  const broad = app.ledger.issueRemoteReadPairing('Broad reader', ['result','statement'], {
+    ...oldScope, walletIdentity: pin.accountId + ' / ' + pin.publicKey });
+  expect((await rpc(broad.token)).status).toBe(401);
+  expect(() => app.setMemberConnection(true, 'http://127.0.0.1:3049', reader.memberId)).toThrow('REMOTE_MEMBER_READ_ONLY');
+  await app.prepareQuit(); app.close(); runtimes.delete(app);
+  app = f.open();
+  const tools = await (await rpc(reader.token)).json();
+  expect(tools.result.tools.map((tool: {name: string}) => tool.name)).toEqual(['list_account_purchases']);
+  const result = await (await rpc(reader.token, 'tools/call', { name: 'list_account_purchases', arguments: {} })).json();
+  expect(JSON.parse(result.result.content[0].text)).toEqual(app.ledger.readAccountStatement(f.memberId, 'live_mainnet', {}));
+  for (const name of ['read_account_result', 'request_purchase', 'recover_payment', 'sign']) {
+    const reply = await (await rpc(reader.token, 'tools/call', { name, arguments: {} })).json();
+    expect(reply.result?.isError === true || reply.error !== undefined).toBe(true);
+  }
+  app.revokeRemoteReadPairing(reader.id);
+  expect((await rpc(reader.token)).status).toBe(401);
+  await app.prepareQuit(); app.close(); runtimes.delete(app);
+  app = f.open();
+  expect((await rpc(reader.token)).status).toBe(401);
+  expect(loadBuyerSigner).not.toHaveBeenCalled();
 });

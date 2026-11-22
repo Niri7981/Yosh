@@ -1,3 +1,4 @@
+import type { ReadConsent } from './pairings';
 import { createHash, randomBytes } from 'node:crypto';
 import { ManagementApiError } from '../app/management-auth';
 import { confirmNative } from '../authority/native-grant-confirmation';
@@ -9,18 +10,21 @@ let showing = false;
 export function configureRemoteReadConfirmation(path: string, hash: string) {
   helper = { path, hash };
 }
-export async function confirmRemoteReadPairing(input: { label: string; scopes: readonly string[]; account: string; environment: string }): Promise<boolean> {
+export function nativeRemoteStatementConfirmation(path: string, hash: string) {
+  return (facts: ReadConsent) => confirmRemoteAction('remote-read', facts, { path, hash });
+}
+export async function confirmRemoteReadPairing(input: ReadConsent): Promise<boolean> {
   return confirmRemoteAction('remote-read', input);
 }
-export async function confirmRemoteAction(kind: 'remote-read'|'remote-simulated-purchase', facts: object): Promise<boolean> {
-  if (!helper) throw new ManagementApiError('REMOTE_READ_CONFIRMATION_UNAVAILABLE', 503, '当前运行版本没有可核验的本机确认组件。');
+export async function confirmRemoteAction(kind: 'remote-read'|'remote-simulated-purchase', facts: object, component = helper): Promise<boolean> {
+  if (!component) throw new ManagementApiError('REMOTE_READ_CONFIRMATION_UNAVAILABLE', 503, '当前运行版本没有可核验的本机确认组件。');
   if (showing) throw new ManagementApiError('REMOTE_READ_CONFIRMATION_BUSY', 409, '已有待确认的远程授权请求。');
   showing = true;
   try {
     const createdAt = Date.now();
     const request = { ...facts, version: 1, kind, challenge: randomBytes(32).toString('hex'), createdAt, expiresAt: createdAt + 120_000 };
     const bytes = JSON.stringify(request);
-    await confirmNative(helper.path, helper.hash, bytes, createHash('sha256').update(bytes).digest('hex'), request);
+    await confirmNative(component.path, component.hash, bytes, createHash('sha256').update(bytes).digest('hex'), request);
     return true;
   } catch (error) {
     if (error instanceof Error && ['LOCAL_CONFIRMATION_DECLINED', 'LOCAL_CONFIRMATION_TIMED_OUT'].includes(error.message)) return false;

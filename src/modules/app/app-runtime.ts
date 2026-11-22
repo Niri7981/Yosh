@@ -81,6 +81,7 @@ function localTimeZone() {
 /** Supplied only by the trusted runtime entry after package verification. */
 export type AppRuntimeHosting = Readonly<{ kind: 'mainnet-standalone'; payMcpPath: string; runtimeDigest: string;
   /** Supplied only by the verified standalone artifact, never Agent input or environment. */
+  confirmRemoteStatement?: (facts: ReadConsent) => Promise<boolean>;
   confirmStatementPairing?: import('../authority/local-statement-pairing').ConfirmStatementPairing;
   purchaseResourceLookup?: boolean;
   legacyMemberForRegistration?: (registration: string, label: string) => string | null;
@@ -884,11 +885,25 @@ export class AppRuntime {
     const principal = this.ledger.remoteReadPairings().purchasePrincipal(pairing.id, scope);
     return lookupSimulatedPurchase(this.ledger, principal, raw, scope.walletIdentity);
   }
+  private remoteReadScope() {
+    const mode = this.purchaseExecutionMode();
+    if (mode !== 'live_mainnet') return this.ledger.scope(mode);
+    if (!this.hosting?.confirmRemoteStatement)
+      throw new ManagementApiError('REMOTE_READ_CONFIRMATION_UNAVAILABLE', 503, '当前主网后台不支持远程查账配对。');
+    // Use only the immutable wallet pin already adopted by this installation. Reading
+    // a statement must neither open Keychain nor bootstrap a different wallet.
+    const pin = this.ledger.walletAccounts.get('mainnet');
+    if (!pin) throw new ManagementApiError('REMOTE_READ_WALLET_REQUIRED', 409, '当前账本缺少已验证的主网钱包身份。');
+    return { ...this.ledger.scope(mode), walletIdentity: pin.accountId + ' / ' + pin.publicKey };
+  }
   async issueRemoteReadPairing(label: string, scopes: readonly ReadScope[]) {
     if (!this.accepting) throw new ManagementApiError('SERVICE_STOPPING', 503, 'Yosh 正在退出。');
     const request = pairingRequest.parse({ label, scopes });
-    const scope = this.ledger.scope(this.purchaseExecutionMode());
-    const confirm = this.dependencies.confirmRemoteReadPairing ?? (await import('../remote/confirm')).confirmRemoteReadPairing;
+    const scope = this.remoteReadScope();
+    if (scope.environment === 'live_mainnet' && (request.scopes.length !== 1 || request.scopes[0] !== 'statement'))
+      throw new ManagementApiError('REMOTE_READ_FORBIDDEN', 403, '主网远程连接仅支持查看账单。');
+    const confirm = this.hosting?.confirmRemoteStatement ?? this.dependencies.confirmRemoteReadPairing
+      ?? (await import('../remote/confirm')).confirmRemoteReadPairing;
     // Approval names this installation and wallet; asynchronous confirmation cannot authorize a newly selected environment.
     const account = this.ledger.defaultCardMember().id + ' / ' + scope.walletIdentity;
     let approved: boolean;
@@ -898,7 +913,7 @@ export class AppRuntime {
       else throw new ManagementApiError('REMOTE_READ_CONFIRMATION_UNAVAILABLE', 503, '无法完成本机确认，未创建配对。');
     }
     if (approved !== true) throw new ManagementApiError('REMOTE_READ_CONSENT_DENIED', 403, '未批准远端读取。');
-    if (!this.accepting || monetaryScopeId(scope) !== monetaryScopeId(this.ledger.scope(this.purchaseExecutionMode())))
+    if (!this.accepting || monetaryScopeId(scope) !== monetaryScopeId(this.remoteReadScope()))
       throw new ManagementApiError('REMOTE_READ_SCOPE_CHANGED', 409, '钱包环境已变化，请重新确认。');
     const result = this.ledger.issueRemoteReadPairing(request.label, request.scopes, scope);
     this.memberConnections.set(result.memberId, new AgentConnection(this.directory, result.memberId, () => false, true));
@@ -913,7 +928,11 @@ export class AppRuntime {
   }
   authenticateRemoteRead(token: string) {
     if (!this.accepting) throw new Error('REMOTE_READ_UNAUTHORIZED');
-    return this.ledger.remoteReadPairings().authenticate(token, this.ledger.scope(this.purchaseExecutionMode()));
+    const scope = this.remoteReadScope();
+    const principal = this.ledger.remoteReadPairings().authenticate(token, scope);
+    if (scope.environment === 'live_mainnet' && (principal.scopes.length !== 1 || principal.scopes[0] !== 'statement'))
+      throw new Error('REMOTE_READ_UNAUTHORIZED');
+    return principal;
   }
   remoteAccountRead(token: string, scope: ReadScope, input: unknown) {
     const principal = this.authenticateRemoteRead(token);
