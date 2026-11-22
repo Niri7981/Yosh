@@ -8,11 +8,13 @@ Yosh lets AI agents buy APIs within spending limits you set. It keeps the wallet
 
 ## Get started
 
-| Entry point | How to use it |
-| --- | --- |
-| **Local install** | Run the standalone installer on Apple Silicon macOS. It can find Codex, Claude Code and Grok CLI and register the hosts you select. [Local installation guide](docs/guides/local-install.md) |
-| **Host plugins** | Use the Yosh plugin in Codex or connect Dot in ChatGPT over an OpenAI Tunnel. Local hosts can request purchases with user authorization. Dot can read the Mainnet statement. [Host plugin guide](docs/guides/host-plugins.md) |
-| **macOS App** | Use the optional native interface for the App workflow, including wallet setup and spending controls. [macOS App guide](docs/guides/native-app-getting-started.md) |
+| Edition | How to use it | Release branch |
+| --- | --- | --- |
+| **Local install** | Run the standalone installer on Apple Silicon macOS. It detects Codex, Claude Code and Grok CLI and registers the hosts you select. [Local installation guide](docs/guides/local-install.md) | [`release/local-install`](https://github.com/Niri7981/Yosh/tree/release/local-install) |
+| **Host plugin** | Use the Yosh plugin in Codex or connect Dot in ChatGPT over an OpenAI Tunnel. Local hosts can request purchases with user authorization. Dot can read the Mainnet statement. [Host plugin guide](docs/guides/host-plugins.md) | [`release/host-plugin`](https://github.com/Niri7981/Yosh/tree/release/host-plugin) |
+| **macOS App** | Use the optional native interface for the App workflow, including wallet setup and spending controls. [macOS App guide](docs/guides/native-app-getting-started.md) | [`release/app`](https://github.com/Niri7981/Yosh/tree/release/app) |
+
+`main` is the shared development branch. The installer and host plugin branches point to the [0.2.20 preview source](https://github.com/Niri7981/Yosh/releases/tag/v0.2.20-preview). The App branch points to the source for [v0.1.1, build 7](docs/releases/v0.1.1.md). The public DMG is the [v0.1.0 beta](https://github.com/Niri7981/Yosh/releases/tag/v0.1.0-beta).
 
 Standalone and plugin packages are **0.2.20 developer previews**. Mainnet currently uses an existing compatible Yosh wallet, ledger and spending configuration. A fresh Mac can run the independent Devnet setup. First-time standalone Mainnet wallet setup and public plugin distribution still need release acceptance.
 
