@@ -1,5 +1,9 @@
 # Yosh macOS 第一版实施计划
 
+2026-11-22 分发与架构审查：本地安装是主要入口，宿主插件复用本机后台，macOS App 保留独立图形界面。三种入口共用一套业务源码和账本格式。主网由单一运行时持有写入锁，切换通过现有升级入口完成。当前主网终端流程依赖已有 RC5-compatible 钱包与账户。App 的 MPP 读取与首次无 App 主网开户尚未验收。入口分别见 [本地安装](docs/guides/local-install.md)、[宿主插件](docs/guides/host-plugins.md) 与 [macOS App](docs/guides/native-app-getting-started.md)。
+
+2026-11-22 Dot 验收：ChatGPT 私有插件经 OpenAI Tunnel 访问已配置的本机 Yosh，Dot 使用可撤销的 Mainnet 账单配对，实查返回三条记录。同一主网账本也通过 Codex 本机入口查验。分发包提供通用英文脚本，覆盖现有主网钱包上的配对及通道自检。详细边界见 [Dot 账单路径](docs/architecture/dot-mainnet-statement.md)。
+
 2026-11-21 本机共享钱包验收：Grok CLI 在 0.2.17 上读取已登记 API 的参数，使用自己的单笔 Grant 完成主网购买。本机系统确认后，共享账本显示已付款并已交付。Claude Code 已验证连接与主网查账，用户跳过其实付验收。后续构建的 0.2.18 支持在购买请求中传入本次价格上限，即使已有覆盖该商家的 Grant 也按本次限价检查。跨设备读取及模拟购买见 [P1](docs/architecture/remote-read-p1-20261119.md) 和 [P2](docs/architecture/remote-purchase-p2-20261119.md)。Dot 真机由用户另行验收。
 
 2026-11-20 本机开发版 0.2.15 已在现有 Mac 上安装。发行包的 `Install.command` 为已安装的本地 Grok、Claude Code、Codex 登记同一 stdio 入口，原有已配对的 Claude 和 Codex 保留身份。新登记的宿主在第一次查账时由 Yosh 弹出原生确认，签发限定共享主网账单的只读凭据。安装、工具发现和查询权限均不授予消费 Grant。Grok CLI 已用自己的配置完成 MCP 握手，发现 1 个工具。升级后 Codex 和 Claude 已登记入口读取同一主网汇总，30 项经济数据与配置指纹一致。真实 Grok 对话因 CLI 尚未登录停在首次查账前；系统确认、同轮返回以及 Grok 新会话复用尚待用户参与验收。

@@ -1,19 +1,15 @@
 /** Mac owner CLI. The cloud host never installs this or receives a management credential. */
-import { constants, closeSync, fstatSync, fsyncSync, lstatSync, openSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from 'node:fs';
-import { dirname, isAbsolute, join } from 'node:path';
+import { constants, closeSync, fstatSync, openSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { parseArgs } from 'node:util';
 import { z } from 'zod';
+import { requirePrivatePairingDirectory, saveNewPairingCredential } from '../src/modules/remote/private-pairing-file';
 import { signedLocalManagement } from '../src/modules/app/signed-local-management';
 
 const path = '/api/app/remote-read-pairings';
 const usage = 'remote-read-owner <pair|list|revoke|grant|revoke-grant> --data-dir <standalone control directory> [--backend-port 17449]\n  pair --label <agent> --scope <statement|result|statement,result|purchase> --token-out <new private file>\n  revoke --id <pairing UUID>\n  grant --id <purchase pairing UUID> --resource market-snapshot --total <atomic> --single <atomic> --expires-at <epoch ms>\n  revoke-grant --id <purchase pairing UUID> --grant-id <grant UUID>';
-function privateDirectory(directory: string) {
-  const stat = lstatSync(directory);
-  if (!isAbsolute(directory) || realpathSync(directory) !== directory || !stat.isDirectory() ||
-    stat.uid !== process.getuid?.() || (stat.mode & 0o077)) throw new Error('REMOTE_READ_PRIVATE_DIRECTORY_REQUIRED');
-}
 function ownerSecret(directory: string) {
-  privateDirectory(directory);
+  requirePrivatePairingDirectory(directory);
   const fd = openSync(join(directory, 'standalone-control.json'), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const stat = fstatSync(fd);
@@ -56,15 +52,12 @@ async function main() {
   }
   const selected = scopes.parse(values.scope?.split(','));
   const label = z.string().trim().min(1).max(80).regex(/^[^\p{Cc}\p{Cf}\p{Zl}\p{Zp}]+$/u).parse(values.label);
-  const file = z.string().min(1).parse(values['token-out']); privateDirectory(dirname(file));
-  // Reserve a new 0600 file before requesting consent. Never write a bearer to stdout or into shell history.
-  const fd = openSync(file, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
-  let saved = false;
-  try {
+  const file = z.string().min(1).parse(values['token-out']);
+  const metadata = await saveNewPairingCredential(file, async () => {
     const paired = meta.extend({ token: z.string().regex(selected[0] === 'purchase' ? /^yrp1_[A-Za-z0-9_-]{43}$/ : /^yrr1_[A-Za-z0-9_-]{43}$/) }).parse(await call({ action, label, scopes: selected }));
-    writeFileSync(fd, paired.token, 'utf8'); fsyncSync(fd); saved = true;
-    console.log(JSON.stringify(meta.parse(paired)));
-  } finally { closeSync(fd); if (!saved) unlinkSync(file); }
+    return { credential: paired.token, metadata: meta.parse(paired) };
+  });
+  console.log(JSON.stringify(metadata));
 }
 main().catch(error => {
   const code = error instanceof Error && /^(REMOTE_READ_|REMOTE_PURCHASE_|STANDALONE_)[A-Z_]+$/.test(error.message) ? error.message : 'REMOTE_READ_OWNER_COMMAND_FAILED';

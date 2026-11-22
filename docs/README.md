@@ -2,6 +2,12 @@
 
 产品范围、阶段状态和验收证据以根目录的 [`plan.md`](../plan.md) 为准；开发与资金安全约束以 [`AGENTS.md`](../AGENTS.md) 为准。本文提供导航，不覆盖这两份文件。
 
+## 安装和使用
+
+- [Local installation](guides/local-install.md)
+- [Host plugins](guides/host-plugins.md)
+- [macOS App](guides/native-app-getting-started.md)
+
 ## 产品与架构
 
 - [架构文档索引](architecture/README.md)：当前 App、授权与 MCP 资料，以及历史 V0 设计和主网准备记录的分类导航。

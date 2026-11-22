@@ -1,9 +1,12 @@
+import { mainnetRemoteStatementCommand } from '../src/modules/remote/mainnet-statement-owner';
+import { signedLocalManagement } from '../src/modules/app/signed-local-management';
 import { LocalHostPurchaseOwnerInput } from '../src/modules/mcp/local-host-purchase';
 import { PurchaseResourceLookup } from '../src/modules/mcp/purchase-resource-contract';
 import { MAX_LOCAL_REQUEST_BYTES } from '../src/modules/http/request-size-limits';
 import { authorizeLocalHostPurchase, describeLocalHostResource, pairLocalStatementHost, readLocalPurchaseMember } from '../src/modules/authority/mainnet-authorization-client';
 import { parseHostRegistration } from '../src/modules/mcp/local-host-registration';
 import { legacyMemberForRegistration, resolveInstalledHost, verifiedMcpMember } from '../src/modules/mcp/installed-host';
+import { nativeRemoteStatementConfirmation } from '../src/modules/remote/confirm';
 import { nativeGrantConfirmation, nativeStatementConfirmation } from '../src/modules/authority/native-grant-confirmation';
 import { mcpMemberEnvironment } from '../src/modules/mcp/member-environment';
 import { spawn } from 'node:child_process';
@@ -72,6 +75,9 @@ async function serve(digest: string, initial: Configuration) {
     backend = await startMainnetDevelopmentBackend({ directory: configuration.directory, port: configuration.port,
       hosting: { kind: 'mainnet-standalone', runtimeDigest: digest, payMcpPath: join(runtime, 'pay-mcp'),
         ...(verified.files['yosh-confirm'] ? {
+          ...(verified.remoteStatements === true ? {
+            confirmRemoteStatement: nativeRemoteStatementConfirmation(join(runtime, 'yosh-confirm'), verified.files['yosh-confirm']),
+          } : {}),
           confirmStatementPairing: nativeStatementConfirmation(join(runtime, 'yosh-confirm'), verified.files['yosh-confirm']),
           ...(verified.firstUsePurchases === true ? {
             legacyMemberForRegistration, purchaseResourceLookup: verified.purchaseResourceLookup === true,
@@ -151,9 +157,9 @@ async function readHostInput(): Promise<unknown> {
 }
 
 async function main() {
-  const action = z.enum(['start', 'status', 'stop', 'serve', 'install-mcp', 'upgrade', 'pair-statement', 'authorize-host-purchase', 'describe-host-resource']).parse(process.argv[2]);
+  const action = z.enum(['start', 'status', 'stop', 'serve', 'install-mcp', 'upgrade', 'remote-statement', 'pair-statement', 'authorize-host-purchase', 'describe-host-resource']).parse(process.argv[2]);
   const host = action === 'pair-statement' || action === 'authorize-host-purchase' || action === 'describe-host-resource' ? parseHostRegistration(process.argv.slice(3)) : undefined;
-  if (!host && process.argv.length !== 3) throw new Error('MAINNET_ARGUMENTS_INVALID');
+  if (!host && action !== 'remote-statement' && process.argv.length !== 3) throw new Error('MAINNET_ARGUMENTS_INVALID');
   const { digest, manifest } = verifyMainnetRuntime(runtime);
   if (realpathSync(process.execPath) !== realpathSync(join(runtime, 'node'))) throw new Error('MAINNET_PACKAGED_NODE_REQUIRED');
   if (action === 'describe-host-resource' && !manifest.purchaseResourceLookup) throw new Error('LOCAL_RESOURCE_LOOKUP_UNAVAILABLE');
@@ -162,6 +168,15 @@ async function main() {
     if (caller.registration !== host.registration || caller.label !== host.label) throw new Error('LOCAL_HOST_BINDING_MISMATCH');
   }
   const configuration = await loadMainnetStandaloneConfiguration(runtime);
+  if (action === 'remote-statement') {
+    if (manifest.remoteStatements !== true) throw new Error('REMOTE_READ_MAINNET_COMPONENT_UNAVAILABLE');
+    const owner = await inspectMainnetBackend({ configuration, digest });
+    if (owner?.owner !== 'standalone') throw new Error('REMOTE_READ_MAINNET_OWNER_REQUIRED');
+    const result = await mainnetRemoteStatementCommand(process.argv.slice(3), body => signedLocalManagement(
+      configuration.origin, configuration.environment.YOSH_MANAGEMENT_TOKEN, body ? 'POST' : 'GET', '/api/app/remote-read-pairings',
+      body ? JSON.stringify(body) : '', { timeoutMs: 130_000, maximumBytes: 256 * 1024, remoteReadErrors: true }));
+    console.log(JSON.stringify(result)); return;
+  }
   if (action === 'serve') { await serve(digest, configuration); return; }
   if (action === 'upgrade') {
     await upgradeMainnetRuntime(runtime, configuration);

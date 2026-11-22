@@ -9,6 +9,7 @@
 - [钥匙串读取与签名审计](keychain-access.md)：本机访问授权和签名身份。
 - [Authority Core（阶段一）](authority-core.md)：消费意图、授权决策和预算预占。
 - [MCP 接入](mcp-integration.md)：Codex 连接、工具边界和验证限制。
+- [Dot 主网账单](dot-mainnet-statement.md)：OpenAI 通道、本机只读配对和验收。
 - [Yosh 更名兼容边界](yosh-rename-compatibility.md) · [按职责命名与历史数据兼容](naming.md)：产品名称、持久身份和兼容规则。
 
 ## 主网准备与执行入口
