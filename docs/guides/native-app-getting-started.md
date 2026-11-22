@@ -1,6 +1,6 @@
 # Native macOS App guide
 
-Yosh.app remains an optional native entry point for wallet visibility, API review, permissions, budgets and purchase activity. These instructions describe the existing App workflow. The [Plugin Edition](../../README.md#plugin-edition) runs independently and does not require opening Yosh.app.
+Yosh.app remains an optional native entry point for wallet visibility, API review, permissions, budgets and purchase activity. These instructions describe the existing App workflow. The [host plugins](host-plugins.md) can use the independent [local runtime](local-install.md).
 
 The stable native App identity is **0.1.1, build 7**. Its existing wallet, Keychain, Grant, ledger, MCP and payment/recovery paths are preserved. The App currently starts its own backend; it does not attach its UI to an already-running standalone backend. Stop standalone normally before switching to this App workflow. Never force a second backend onto the same data.
 
