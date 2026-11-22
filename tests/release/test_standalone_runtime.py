@@ -1,6 +1,7 @@
 import importlib.util
 import json
 from pathlib import Path
+import shutil
 import tempfile
 import unittest
 from unittest import mock
@@ -26,6 +27,8 @@ class StandaloneArtifactTests(unittest.TestCase):
         self.root = Path(temporary.name)
         self.output = self.root / 'build.noindex/dependencies'
         self.runtime = self.output / 'runtime'; self.runtime.mkdir(parents=True)
+        (self.root / 'scripts').mkdir()
+        shutil.copy2(ROOT / 'scripts/connect-dot.py', self.root / 'scripts/connect-dot.py')
         for name in ['node', 'standalone.cjs', 'mcp.cjs', 'pay-mcp', 'pay-protocol-engine', 'offline.sb']:
             (self.runtime / name).write_text('fixture-' + name)
         (self.runtime / 'licenses').mkdir()
@@ -227,6 +230,23 @@ class StandaloneArtifactTests(unittest.TestCase):
         with mock.patch.object(packager, 'ROOT', self.root): packager.package(self.output, limit_build)
         metadata = limit_build / 'marketplace/plugins/yosh-local-dev/plugin.json'
         self.assertEqual(json.loads(metadata.read_text())['version'], '0.2.18')
+        self.manifest['remoteStatements'] = True
+        self.save_manifest()
+        with self.assertRaisesRegex(ValueError, 'Remote statement'):
+            packager.verify_runtime(self.output)
+        mainnet['remoteStatements'] = True
+        self.save_mainnet(mainnet)
+        statement_build = self.root / 'build.noindex/remote-statement-package'
+        with mock.patch.object(packager, 'ROOT', self.root): packager.package(self.output, statement_build)
+        metadata = statement_build / 'marketplace/plugins/yosh-local-dev/plugin.json'
+        self.assertEqual(json.loads(metadata.read_text())['version'], '0.2.19')
+        connector = statement_build / 'marketplace/Connect-Dot.command'
+        self.assertTrue(connector.stat().st_mode & 0o100)
+        self.assertFalse((limit_build / 'marketplace/Connect-Dot.command').exists())
+        with zipfile.ZipFile(statement_build / 'yosh-local-dev.zip') as archive:
+            self.assertEqual(archive.read('yosh-standalone-marketplace/Connect-Dot.command'), connector.read_bytes())
+            self.assertEqual(archive.read('yosh-standalone-marketplace/plugins/yosh-local-dev/scripts/connect-dot.py'),
+                             (ROOT / 'scripts/connect-dot.py').read_bytes())
         self.manifest['firstUsePurchases'] = False
         self.save_manifest()
         with self.assertRaisesRegex(ValueError, 'resource lookup'):

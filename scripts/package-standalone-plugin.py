@@ -29,6 +29,8 @@ def verify_mainnet(runtime):
             or set(manifest.get('files', {})) != set(MAINNET_FILES + (['yosh-confirm'] if 'yosh-confirm' in manifest.get('files', {}) else []) + (['mpp-protocol-engine', 'mpp-provenance.json'] if manifest.get('mppProtocol') is True else [])) \
             or set(manifest.get('licenses', {})) != set(LICENSE_FILES):
         raise ValueError('Mainnet runtime contract mismatch')
+    if manifest.get('remoteStatements') and 'yosh-confirm' not in manifest['files']:
+        raise ValueError('Remote statement pairing requires the verified native confirmation helper')
     for name, digest in manifest['files'].items():
         file = runtime / name
         if file.is_symlink() or not file.is_file() or sha(file) != digest:
@@ -60,6 +62,8 @@ def verify_runtime(package):
         raise ValueError('Purchase resource lookup requires first-use purchases')
     if manifest.get('hostPurchaseAmountLimit') and not manifest.get('purchaseResourceLookup'):
         raise ValueError('Per-request price limits require purchase resource lookup')
+    if manifest.get('remoteStatements') and not standalone_mainnet:
+        raise ValueError('Remote statement pairing requires standalone Mainnet')
     if manifest.get('firstUsePairing'):
         if not standalone_mainnet: raise ValueError('First-use pairing requires standalone Mainnet')
         required += ['first-use-mcp.cjs', 'register-local-agents.mjs']
@@ -80,7 +84,7 @@ def verify_runtime(package):
     if standalone_mainnet:
         verify_mainnet(runtime)
         mainnet = json.loads((runtime / 'mainnet-manifest.json').read_text())
-        if manifest.get('firstUsePairing') and mainnet['files'].get('yosh-confirm') != manifest['files']['yosh-confirm']:
+        if (manifest.get('firstUsePairing') or manifest.get('remoteStatements')) and mainnet['files'].get('yosh-confirm') != manifest['files']['yosh-confirm']:
             raise ValueError('First-use pairing requires the verified Mainnet confirmation helper')
         if manifest.get('firstUsePurchases') and mainnet.get('firstUsePurchases') is not True:
             raise ValueError('First-use purchase consent is unavailable in the retained backend')
@@ -88,6 +92,8 @@ def verify_runtime(package):
             raise ValueError('Purchase resource lookup is unavailable in the retained backend')
         if manifest.get('hostPurchaseAmountLimit') and mainnet.get('hostPurchaseAmountLimit') is not True:
             raise ValueError('Per-request price limits are unavailable in the retained backend')
+        if manifest.get('remoteStatements') and mainnet.get('remoteStatements') is not True:
+            raise ValueError('Remote statement pairing is unavailable in the retained backend')
         mainnet_mpp = mainnet.get('mppProtocol') is True
         if bool(manifest.get('mainnetMpp')) != mainnet_mpp or (mainnet_mpp and not manifest.get('mppProtocol')):
             raise ValueError('Mainnet MPP capability mismatch')
@@ -101,6 +107,8 @@ def package(source, output):
     version = '0.2.16' if manifest.get('firstUsePurchases') else '0.2.15' if manifest.get('firstUsePairing') else '0.2.14' if manifest.get('mainnetMpp') else '0.2.7' if manifest.get('mppProtocol') else '0.2.4' if standalone_mainnet else '0.2.3' if local else '0.1.0'
     if manifest.get('purchaseResourceLookup'):
         version = '0.2.18' if manifest.get('hostPurchaseAmountLimit') else '0.2.17'
+    if manifest.get('remoteStatements') is True:
+        version = '0.2.19'
     plugin_name = 'yosh-local-dev' if local else NAME
     output = output.absolute()
     if not output.resolve().is_relative_to((ROOT / 'build.noindex').resolve()) or output.is_symlink():
@@ -181,6 +189,13 @@ exec "$root/yosh-dev" install-mcp
         installer.write_text('#!/bin/sh\nset -eu\nroot="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"\n'
                              + default_args + 'exec "$root/plugins/yosh-local-dev/yosh-dev" install-agents "$@"\n')
         installer.chmod(0o755)
+    if manifest.get('remoteStatements'):
+        shutil.copy2(ROOT / 'scripts/connect-dot.py', plugin / 'scripts/connect-dot.py')
+        connector = marketplace / 'Connect-Dot.command'
+        connector.write_text('#!/bin/sh\nset -eu\nroot="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"\n'
+                             'plugin="$root/plugins/yosh-local-dev"\n'
+                             'exec python3 -I "$plugin/scripts/connect-dot.py" --runtime-dir "$plugin/runtime" "$@"\n')
+        connector.chmod(0o755)
     archive = output / (plugin_name + '.zip')
     files = {}
     with zipfile.ZipFile(archive, 'x', compression=zipfile.ZIP_DEFLATED) as bundle:
