@@ -35,6 +35,7 @@
 
 ## 审计与退役资料
 
+- 旧 Yosh Pay 发布分支的最后一次提交分别归档在 [archive/yosh-pay-v0](https://github.com/Niri7981/Yosh/tree/archive/yosh-pay-v0) 和 [archive/yosh-pay-v1](https://github.com/Niri7981/Yosh/tree/archive/yosh-pay-v1)。
 - [历史审计](audits/hackathon-audit-2026-09-21.md)：截至文中注明日期和提交的审计快照；当前状态请查阅 `plan.md`。
 - [旧前端保留边界](legacy/legacy-frontend.md)：说明旧网页前端的保留范围与当前原生 App 的职责。
 
