@@ -1,4 +1,4 @@
-# Yosh
+# <img src="plugins/yosh-dev/assets/icon.png" alt="" width="48" height="48" align="absmiddle"> Yosh
 
 > Give your agent a card, not your wallet.
 
