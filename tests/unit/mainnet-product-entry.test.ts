@@ -55,7 +55,8 @@ async function fixture(enabled = true) {
     amount: '10000', payTo: recipient.address, maxTimeoutSeconds: 300, extra: { feePayer: sponsor.address } }] };
   const quoteFetch = vi.fn<typeof fetch>().mockImplementation(async () => new Response(null, { status: 402, headers: { 'PAYMENT-REQUIRED': encodePaymentRequiredHeader(challenge) } }));
   const dir = mkdtempSync(join(tmpdir(), 'yosh-mainnet-entry-')); dirs.push(dir);
-  const app = new AppRuntime(dir, { initializeWallet: async () => ({ address: signer.address, reused: true }), fetcher: quoteFetch }); context.app = app;
+  const app = new AppRuntime(dir, { initializeWallet: async () => ({ address: signer.address, reused: true }),
+    readWallets: async () => [{ id: 'mainnet', label: 'Fixture mainnet wallet', address: signer.address, status: 'available' }], fetcher: quoteFetch }); context.app = app;
   await app.initializeWallet(); app.setAgentConnection(true, origin);
   const manage = async (path: string, body: object) => (path === 'grant' ? grantPUT : settingsPUT)(signedManagementRequest(`${origin}/api/app/${path}`, secret, { method: 'PUT', headers: { 'content-type': 'application/json', origin }, body: JSON.stringify(body) }));
   const grant = async () => expect((await manage('grant', { action: 'create', resourceId: resource.resourceId, totalLimit: '100000', singleLimit: '10000', expiresAt: Date.now() + 3600000 })).status).toBe(200);
@@ -490,22 +491,32 @@ it('requires management authentication and the original browser session for main
   expect(f.app.memberOverview(memberId).grant?.id).toBe(grantId);
 });
 
+async function mainnetAuthorizationFixture(app: AppRuntime, memberId: string,
+  confirmation: Pick<Parameters<typeof startLocalAuthorization>[0], 'confirm' | 'confirmControl'>) {
+  const web = await startLocalAuthorization({ app, memberId, ...confirmation,
+    mainnet: async (sessionHash, input) => {
+      const response = await mainnetLocalGrants(signedManagementRequest(origin + '/api/app/local-grants', secret, {
+        method: 'POST', headers: { origin, 'content-type': 'application/json' }, body: JSON.stringify({ ...input, memberId, sessionHash }),
+      }), app);
+      const result = await response.json(); if (!response.ok) throw new Error(result.code); return result;
+    } });
+  async function connect() {
+    const session = await browserFetch(web.origin + '/session', { method: 'POST', headers: { origin: web.origin, 'content-type': 'application/json' }, body: JSON.stringify({ token: new URL(web.createLink()).hash.slice(1) }) });
+    const { token } = await session.json();
+    return (path: string, body?: object) => browserFetch(web.origin + path, { method: body ? 'POST' : 'GET', headers: { origin: web.origin, 'content-type': 'application/json', authorization: 'Bearer ' + token, 'x-yosh-environment': 'mainnet' }, body: JSON.stringify(body) });
+  }
+  return { web, connect };
+}
+
 it('routes mainnet web requests through trusted confirmation and never forwards test controls', async () => {
   const f = await fixture();
   const memberId = readConnection(f.dir).cardMemberId!;
   let confirmations = 0, declined = true;
-  const web = await startLocalAuthorization({ app: f.app, memberId,
+  const { web, connect } = await mainnetAuthorizationFixture(f.app, memberId, {
     confirm: async request => { expect(request.environment).toBe('mainnet'); confirmations++; if (declined) throw new Error('LOCAL_CONFIRMATION_DECLINED'); },
-    mainnet: async (sessionHash, input) => {
-      const response = await mainnetLocalGrants(signedManagementRequest(origin + '/api/app/local-grants', secret, {
-        method: 'POST', headers: { origin, 'content-type': 'application/json' }, body: JSON.stringify({ ...input, memberId, sessionHash }),
-      }), f.app);
-      const result = await response.json(); if (!response.ok) throw new Error(result.code); return result;
-    } });
+  });
   try {
-    const session = await browserFetch(web.origin + '/session', { method: 'POST', headers: { origin: web.origin, 'content-type': 'application/json' }, body: JSON.stringify({ token: new URL(web.createLink()).hash.slice(1) }) });
-    const { token } = await session.json();
-    const call = (path: string, body: object) => browserFetch(web.origin + path, { method: 'POST', headers: { origin: web.origin, 'content-type': 'application/json', authorization: 'Bearer ' + token, 'x-yosh-environment': 'mainnet' }, body: JSON.stringify(body) });
+    const call = await connect();
     expect((await call('/controls/requests', { type: 'pause', paused: false })).status).toBe(400);
     const prepared = await call('/requests', { resourceId: f.resource.resourceId, total: '0.1', single: '0.01', hours: 1 });
     expect(prepared.status).toBe(201); const { request } = await prepared.json();
@@ -518,5 +529,67 @@ it('routes mainnet web requests through trusted confirmation and never forwards 
     expect(confirmations).toBe(2);
     expect(f.app.memberOverview(memberId).grant?.id).toBe(grantId);
     expect(f.app.ledger.listForAdministration()).toHaveLength(0);
+  } finally { await web.close(); }
+});
+
+it('saves a mainnet shared limit after owner confirmation, with an idempotent receipt and scoped readback', async () => {
+  const { app, dir } = await fixture();
+  const memberId = readConnection(dir).cardMemberId!;
+  const otherMember = app.createCardMember('Second agent').member;
+  app.setDailyLimit('1000');
+  const before = app.memberOverview(memberId).budget;
+  const devnetBefore = app.ledger.controls('live_devnet');
+  let declined = true;
+  const confirmControl = vi.fn(async (request: { environment: string; action: unknown }) => {
+    expect(request).toMatchObject({ environment: 'mainnet', mode: 'live_mainnet', memberId,
+      action: { type: 'daily_limit', amount: '10000' } });
+    if (declined) throw new Error('LOCAL_CONFIRMATION_DECLINED');
+  });
+  const { web, connect } = await mainnetAuthorizationFixture(app, memberId, {
+    confirm: async () => { throw new Error('Unexpected grant prompt'); }, confirmControl,
+  });
+  try {
+    const call = await connect();
+    const otherSession = await connect();
+    expect(await (await call('/state')).json()).toMatchObject({
+      controlsAvailable: false, dailyLimitAvailable: true, budget: { dailyLimit: '1000' },
+    });
+    const draft = { type: 'daily_limit', amount: '10000' };
+    const create = async () => {
+      const response = await call('/controls/requests', draft);
+      expect(response.status).toBe(201);
+      const { request } = await response.json();
+      return { id: request.id };
+    };
+    const first = await create();
+    expect((await otherSession('/controls/confirm', first)).status).toBe(400);
+    expect(confirmControl).not.toHaveBeenCalled();
+    expect((await call('/controls/confirm', first)).status).toBe(400);
+    expect(app.memberOverview(memberId).budget).toEqual(before);
+    expect((await call('/controls/cancel', first)).status).toBe(200);
+    expect((await call('/controls/confirm', first)).status).toBe(400);
+
+    const stale = await create();
+    app.setDailyLimit('2000');
+    declined = false;
+    expect((await call('/controls/confirm', stale)).status).toBe(400);
+    expect(app.memberOverview(memberId).budget.dailyLimit).toBe('2000');
+
+    const latest = await create();
+    confirmControl.mockClear();
+    expect((await call('/controls/confirm', latest)).status).toBe(200);
+    expect(await (await call('/controls/result', latest)).json()).toMatchObject({ state: 'CONSUMED' });
+    expect(await (await call('/state')).json()).toMatchObject({ budget: {
+      dailyLimit: '10000', remaining: '10000', paid: before.paid, reserved: before.reserved, paused: before.paused,
+    } });
+    expect(app.memberOverview(otherMember.id).budget.dailyLimit).toBe('10000');
+    app.setDailyLimit('3000');
+    expect((await call('/controls/confirm', latest)).status).toBe(200);
+    expect(app.memberOverview(memberId).budget.dailyLimit).toBe('3000');
+    expect(confirmControl).toHaveBeenCalledOnce();
+    expect(app.ledger.controls('live_devnet')).toEqual(devnetBefore);
+    expect(app.memberOverview(memberId).grant).toBeNull();
+    expect(app.ledger.listForAdministration()).toHaveLength(0);
+    expect(prepareSolanaPayment).not.toHaveBeenCalled();
   } finally { await web.close(); }
 });

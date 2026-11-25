@@ -1283,25 +1283,30 @@ export class AppRuntime {
   }
 
   private localControlBasis(memberId: string) {
-    this.localAuthorizationEnvironment();
     this.ledger.assertCardMemberActive(memberId);
     const state = this.memberOverview(memberId);
     return hash({ member: state.member, enabled: state.connection.enabled,
       controls: this.ledger.controls(this.purchaseExecutionMode()), grants: state.grants });
   }
   freezeLocalControl(raw: unknown, memberId: string, sessionHash: string) {
+    const environment = this.localGrantEnvironment();
     const action = LocalControlAction.parse(raw), basis = this.localControlBasis(memberId);
+    if (environment === 'mainnet' && (action.type !== 'daily_limit' || action.amount === null))
+      throw new Error('LOCAL_AUTHORIZATION_SCOPE_MISMATCH');
     if (this.ledger.localControlApprovals().claimedRequests(memberId).length) throw new Error('LOCAL_WALLET_RECONCILIATION_REQUIRED');
     if (action.type === 'revoke_grant' && !this.memberOverview(memberId).grants.some(grant =>
       grant.id === action.grantId && grant.resourceId === action.resourceId && grant.status === 'ACTIVE'))
       throw new Error('LOCAL_AUTHORIZATION_CONTENT_CHANGED');
     if (action.type === 'create_wallet' && this.localAuthorizationEnvironment() !== 'devnet') throw new Error('LOCAL_WALLET_DEVNET_REQUIRED');
-    return this.ledger.localControlApprovals().freeze({ environment: this.localAuthorizationEnvironment(), mode: 'live_devnet',
+    return this.ledger.localControlApprovals().freeze({ environment, mode: environment === 'mainnet' ? 'live_mainnet' : 'live_devnet',
+      ...(environment === 'mainnet' ? { monetaryScope: this.ledger.scope('live_mainnet'),
+        previousDailyLimit: this.ledger.controls('live_mainnet').dailyBudget } : {}),
       memberId, agentLabel: this.ledger.cardMember(memberId)!.label, sessionHash, basis, action }, this.dependencies.now?.() ?? Date.now());
   }
   async commitLocalControl(receipt: LocalControlReceipt, sessionHash: string) {
     const frozen = this.ledger.localControlApprovals().read(receipt.requestId), request = frozen.request;
     if (request.sessionHash !== sessionHash) throw new Error('LOCAL_AUTHORIZATION_SESSION_MISMATCH');
+    if (request.environment !== this.localGrantEnvironment()) throw new Error('LOCAL_AUTHORIZATION_SCOPE_MISMATCH');
     if (request.basis !== this.localControlBasis(request.memberId)) throw new Error('LOCAL_AUTHORIZATION_CONTENT_CHANGED');
     const action = request.action;
     if (action.type === 'create_wallet') {

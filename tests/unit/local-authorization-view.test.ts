@@ -344,3 +344,55 @@ it('rejects a stale cross-protocol API before freezing and blocks switching duri
   await elements.get('protocol-mpp_solana_charge')!.handlers.get('click')!();
   expect(runInNewContext('selectedProtocol', context)).toBe('x402');
 });
+
+it('lets the owner review and confirm only the available mainnet daily limit and reads back the shared budget', async () => {
+  const { elements, context } = activityHarness();
+  const frozen = { request: { id: 'mainnet-limit', agentLabel: 'Codex', environment: 'mainnet',
+    action: { type: 'daily_limit', amount: '10000' } }, digest: 'frozen-digest' };
+  const state = { environment: 'mainnet', member: { label: 'Codex' }, controlsAvailable: false, dailyLimitAvailable: true,
+    budget: { dailyLimit: '1000', remaining: '0', paused: false }, connection: { enabled: true },
+    grants: [], wallets: [], purchases: [], resources: [] };
+  const calls: { path: string; body?: unknown }[] = [];
+  context.fetch = async (path: string, options?: { body?: string }) => {
+    calls.push({ path, body: options?.body && JSON.parse(options.body) });
+    if (path === '/controls/requests') return { ok: true, json: async () => frozen };
+    if (path === '/controls/confirm') {
+      state.budget = { dailyLimit: '10000', remaining: '9000', paused: false };
+      return { ok: true, json: async () => ({ ...frozen, state: 'CONSUMED' }) };
+    }
+    return { ok: true, json: async () => state };
+  };
+  await runInNewContext('refresh(true)', context);
+  expect(elements.get('shared-controls')!.hidden).toBe(true);
+  expect(elements.get('daily-form')!.hidden).toBe(false);
+  expect(authorizationPage.split('每日共享额度</span></summary>')[1].split('</details>')[0]).toContain('<form id="daily-form"');
+  expect(elements.get('budget')!.textContent).toContain('0.001 USDC');
+  elements.get('daily')!.value = '0.01';
+  await runInNewContext('element("daily-form").handlers.get("submit")({preventDefault(){},submitter:element("review-daily")})', context);
+  expect(calls.map(call => call.path)).toEqual(['/state', '/controls/requests']);
+  expect(calls[1].body).toEqual({ type: 'daily_limit', amount: '10000' });
+  expect(elements.get('facts')!.children.map(child => child.textContent)).toEqual(expect.arrayContaining(['所有 Agent', '0.01 USDC', 'Mainnet · 真实 USDC']));
+  await elements.get('confirm')!.handlers.get('click')!();
+  expect(calls.slice(2)).toEqual([{ path: '/controls/confirm', body: { id: 'mainnet-limit' } }, { path: '/state', body: undefined }]);
+  expect(elements.get('success-facts')!.children.map(child => child.textContent)).toEqual(expect.arrayContaining(['0.01 USDC', '0.009 USDC']));
+  expect(elements.get('budget')!.textContent).toContain('0.009 USDC');
+  expect(elements.get('daily')!.value).toBe('');
+  await elements.get('new-grant')!.handlers.get('click')!();
+  await elements.get('grant-dialog')!.handlers.get('close')!();
+  expect(elements.get('grant-dialog')!.open).toBe(false);
+  expect(elements.get('success')!.hidden).toBe(true);
+});
+
+it.each([
+  ['mainnet', false, undefined, false],
+  ['mainnet', false, false, false],
+  ['offline', undefined, undefined, true],
+  ['devnet', undefined, undefined, true],
+])('scopes the daily limit editor in %s with controls %s and explicit availability %s', async (environment, controlsAvailable, dailyLimitAvailable, visible) => {
+  const { elements, context } = activityHarness();
+  context.fetch = async () => ({ ok: true, json: async () => ({ environment, member: { label: 'Codex' },
+    controlsAvailable, dailyLimitAvailable, budget: { paused: false, remaining: '1000', dailyLimit: '5000' },
+    connection: { enabled: true }, grants: [], wallets: [], purchases: [], resources: [] }) });
+  await runInNewContext('refresh(true)', context);
+  expect(elements.get('daily-form')!.hidden).toBe(!visible);
+});

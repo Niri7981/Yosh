@@ -36,10 +36,14 @@ private struct GrantRequest: Decodable {
     let agentLabel: String; let apiLabel: String; let payerWallet: String?; let resourceHash: String; let binding: Binding
 }
 private struct ControlAction: Decodable { let type: String; let paused: Bool?; let enabled: Bool?; let amount: String?; let grantId: String?; let resourceId: String?; let slot: String?; let network: String?; let assetId: String? }
+private struct ControlMonetaryScope: Decodable {
+    let environment: String; let network: String; let assetId: String; let assetDecimals: Int; let walletIdentity: String
+}
 private struct ControlRequest: Decodable {
     let version: Int; let kind: String; let id: String; let challenge: String; let sessionHash: String
     let createdAt: Int64; let expiresAt: Int64; let environment: String; let mode: String
     let memberId: String; let agentLabel: String; let basis: String; let action: ControlAction
+    let monetaryScope: ControlMonetaryScope?; let previousDailyLimit: String?
 }
 struct Presentation { let authenticationReason: String; let title: String; let details: String; let challenge: String; let expiresAt: Int64; let agentLabel: String }
 private enum Failure: Error { case rejected }
@@ -168,10 +172,27 @@ struct LocalGrantConfirmation {
         }
         if object?["kind"] as? String == "control" {
             let r = try JSONDecoder().decode(ControlRequest.self, from: bytes)
-            guard r.version == 1, ["offline", "devnet"].contains(r.environment), r.mode == "live_devnet", r.createdAt <= now,
+            guard r.version == 1, r.createdAt > 0, r.createdAt <= now,
                   now < r.expiresAt, r.expiresAt - r.createdAt <= 300_000, UUID(uuidString: r.id) != nil,
                   UUID(uuidString: r.memberId) != nil, r.agentLabel.count <= 120 else { throw Failure.rejected }
             _ = try hexData(r.challenge); _ = try hexData(r.sessionHash); _ = try hexData(r.basis)
+            if r.environment == "mainnet" {
+                guard r.mode == "live_mainnet", r.action.type == "daily_limit", let raw = r.action.amount,
+                      let scope = r.monetaryScope, scope.environment == r.mode,
+                      scope.network == "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+                      scope.assetId == "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+                      scope.assetDecimals == 6, !scope.walletIdentity.isEmpty else { throw Failure.rejected }
+                let render: (String) throws -> String = { value in
+                    value == "0" ? "0 USDC" : try amount(value, mainnet: true)
+                }
+                let limit = try render(raw)
+                let previous = try r.previousDailyLimit.map(render) ?? "未设置"
+                return Presentation(authenticationReason: "将 Yosh 主网共享每日额度设为 \(limit)",
+                    title: "修改主网每日共享额度？",
+                    details: "生效范围：此 Solana 主网钱包的所有 Agent\n当前额度：\(previous)\n新额度：\(limit)\n资产：主网 USDC\n\n保存后按新额度限制每日累计消费。\n申请：\(r.id)\n摘要：\(digest)",
+                    challenge: r.challenge, expiresAt: r.expiresAt, agentLabel: r.agentLabel)
+            }
+            guard ["offline", "devnet"].contains(r.environment), r.mode == "live_devnet", r.monetaryScope == nil else { throw Failure.rejected }
             let change: String
             switch r.action.type {
             case "create_wallet":

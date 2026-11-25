@@ -688,8 +688,14 @@ export class PurchaseLedger {
     const approvals = confirmation ? this.localControlApprovals() : undefined;
     this.atomic(() => {
       if (confirmation) {
-        if (mode !== 'live_devnet') throw new Error('LOCAL_AUTHORIZATION_OFFLINE_ONLY');
-        approvals!.assertPending(confirmation, { type: 'daily_limit', amount: parsed }, this.now());
+        const request = approvals!.assertPending(confirmation, { type: 'daily_limit', amount: parsed }, this.now());
+        if (mode !== request.mode || scope.environment !== mode) throw new Error('LOCAL_AUTHORIZATION_SCOPE_MISMATCH');
+        if (mode === 'live_mainnet') {
+          if (!request.monetaryScope || monetaryScopeId(request.monetaryScope) !== monetaryScopeId(scope))
+            throw new Error('LOCAL_AUTHORIZATION_SCOPE_MISMATCH');
+          if (request.previousDailyLimit !== this.controls(mode, scope).dailyBudget)
+            throw new Error('LOCAL_AUTHORIZATION_CONTENT_CHANGED');
+        }
       }
       const id = storeMonetaryScope(this.db, scope);
       this.db.prepare('INSERT INTO monetary_controls VALUES (?,?,?) ON CONFLICT(scope_id) DO UPDATE SET daily_limit=excluded.daily_limit').run(id, parsed, scope.environment === 'live_mainnet' ? 1 : 0);

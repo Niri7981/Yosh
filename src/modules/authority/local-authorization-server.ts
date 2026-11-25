@@ -1,7 +1,7 @@
 import type { MainnetAuthorizationCall } from './mainnet-authorization-client';
 import { LocalGrantRequest } from './local-grant-approval';
 import { readAgentPurchase } from '../purchases/agent-purchase-read';
-import { LocalControlAction } from './local-control-approval';
+import { LocalControlAction, LocalControlRequest, MainnetDailyLimitAction } from './local-control-approval';
 import { createHash, randomBytes } from 'node:crypto';
 import { createServer } from 'node:http';
 import { z } from 'zod';
@@ -30,7 +30,7 @@ export async function startLocalAuthorization(options: {
   assets?: ReadonlyMap<string, { bytes: Buffer; contentType: string }>;
 }) {
   const { app, memberId, confirm } = options;
-  const sessions = new Map<string, { expires: number; revision: number; pending?: string; pendingControl?: string; pendingMainnet?: string }>();
+  const sessions = new Map<string, { expires: number; revision: number; pending?: string; pendingControl?: string; pendingMainnet?: { id: string; cancel: 'cancel' | 'cancel_control' } }>();
   const links = new Map<string, number>();
   let confirming = false, origin = '';
   let closing: Promise<void> | undefined;
@@ -85,36 +85,47 @@ export async function startLocalAuthorization(options: {
           const state = z.object({ environment: z.literal('mainnet'), realFunds: z.literal(true) }).passthrough().parse(await call({ action: 'state' }));
           return send(200, JSON.stringify(state));
         }
-        if (method !== 'POST' || !['/requests', '/confirm', '/cancel', '/result'].includes(url.pathname))
+        const control = url.pathname.startsWith('/controls/');
+        const path = control ? url.pathname.slice('/controls'.length) : url.pathname;
+        if (method !== 'POST' || !['/requests', '/confirm', '/cancel', '/result'].includes(path))
           throw new Error('LOCAL_WEB_METHOD_REJECTED');
-        if (url.pathname === '/requests') {
+        if (control && !options.confirmControl) throw new Error('LOCAL_CONFIRMATION_UNAVAILABLE');
+        const cancel = control ? 'cancel_control' : 'cancel';
+        if (path === '/requests') {
           if (confirming) throw new Error('LOCAL_CONFIRMATION_BUSY');
           if (session.expires < now + 300_000) throw new Error('LOCAL_WEB_SESSION_EXPIRED');
-          const draft = Draft.parse(input), revision = ++session.revision;
-          if (session.pendingMainnet) await call({ action: 'cancel', id: session.pendingMainnet });
-          const frozen = z.object({ request: LocalGrantRequest, digest: hex, state: z.literal('PENDING') }).passthrough().parse(await call({ action: 'freeze',
-            draft: { resourceId: draft.resourceId, totalLimit: atomic(draft.total), singleLimit: atomic(draft.single), expiresAt: now + draft.hours * 3_600_000,
-              ...(draft.maximumNetworkFeeLamports === undefined ? {} : { maximumNetworkFeeLamports: draft.maximumNetworkFeeLamports }) } }));
+          const prepare = () => {
+            if (control) return { action: 'freeze_control', control: MainnetDailyLimitAction.parse(input) };
+            const draft = Draft.parse(input);
+            return { action: 'freeze', draft: { resourceId: draft.resourceId, totalLimit: atomic(draft.total),
+              singleLimit: atomic(draft.single), expiresAt: now + draft.hours * 3_600_000,
+              ...(draft.maximumNetworkFeeLamports === undefined ? {} : { maximumNetworkFeeLamports: draft.maximumNetworkFeeLamports }) } };
+          };
+          const payload = prepare(), revision = ++session.revision;
+          if (session.pendingMainnet) await call({ action: session.pendingMainnet.cancel, id: session.pendingMainnet.id });
+          const frozen = z.object({ request: control ? LocalControlRequest : LocalGrantRequest, digest: hex,
+            state: z.literal('PENDING') }).passthrough().parse(await call(payload));
           if (session.revision !== revision) {
-            await call({ action: 'cancel', id: frozen.request.id });
+            await call({ action: cancel, id: frozen.request.id });
             throw new Error('LOCAL_AUTHORIZATION_CONTENT_CHANGED');
           }
-          session.pendingMainnet = frozen.request.id;
+          session.pendingMainnet = { id: frozen.request.id, cancel };
           return send(201, JSON.stringify(frozen));
         }
         const { id } = RequestId.parse(input);
-        const frozen = z.object({ request: LocalGrantRequest, digest: hex, state: z.enum(['PENDING', 'CANCELLED', 'CONSUMED']) }).passthrough()
-          .parse(await call({ action: 'read', id }));
+        const frozen = z.object({ request: control ? LocalControlRequest : LocalGrantRequest, digest: hex,
+          state: z.enum(['PENDING', 'CANCELLED', 'CONSUMED']) }).passthrough().parse(await call({ action: control ? 'read_control' : 'read', id }));
         if (frozen.request.sessionHash !== sessionHash || frozen.request.environment !== 'mainnet') throw new Error('LOCAL_AUTHORIZATION_SESSION_MISMATCH');
-        if (url.pathname === '/cancel') return send(200, JSON.stringify(await call({ action: 'cancel', id })));
-        if (url.pathname === '/result' || frozen.state === 'CONSUMED') return send(200, JSON.stringify(frozen));
+        if (path === '/cancel') return send(200, JSON.stringify(await call({ action: cancel, id })));
+        if (path === '/result' || frozen.state === 'CONSUMED') return send(200, JSON.stringify(frozen));
         if (confirming) throw new Error('LOCAL_CONFIRMATION_BUSY');
         if (frozen.state !== 'PENDING' || frozen.request.expiresAt <= now) throw new Error('LOCAL_AUTHORIZATION_EXPIRED');
         confirming = true;
         try {
-          await confirm(frozen.request);
+          if ('action' in frozen.request) await options.confirmControl!(frozen.request);
+          else await confirm(frozen.request);
           if (session.expires <= Date.now()) throw new Error('LOCAL_WEB_SESSION_EXPIRED');
-          return send(200, JSON.stringify(await call({ action: 'commit', id, digest: frozen.digest })));
+          return send(200, JSON.stringify(await call({ action: control ? 'commit_control' : 'commit', id, digest: frozen.digest })));
         } finally { confirming = false; }
       }
       if (requestedEnvironment !== undefined && requestedEnvironment !== app.localAuthorizationEnvironment())

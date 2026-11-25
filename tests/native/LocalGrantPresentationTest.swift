@@ -110,6 +110,22 @@ struct LocalGrantPresentationTest {
             "agentLabel": "Fixture", "action": ["type": "pause", "paused": true]]
         let controlPresentation = try render(control)
         precondition(controlPresentation.authenticationReason.contains("测试设置"))
+        var limit = control
+        limit["environment"] = "mainnet"; limit["mode"] = "live_mainnet"
+        limit["monetaryScope"] = ["environment": "live_mainnet", "walletIdentity": "fixture-wallet",
+            "network": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp", "assetId": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", "assetDecimals": 6]
+        do { _ = try render(limit); fatalError("Mainnet pause consent accepted") } catch {}
+        limit["action"] = ["type": "daily_limit", "amount": "10000"]; limit["previousDailyLimit"] = "1000"
+        let shared = try render(limit)
+        precondition(shared.authenticationReason.contains("0.010000 USDC"))
+        for fact in ["主网","所有 Agent","当前额度：0.001000 USDC","新额度：0.010000 USDC"] {
+            precondition(shared.details.contains(fact))
+        }
+        limit["previousDailyLimit"] = NSNull(); limit["action"] = ["type": "daily_limit", "amount": "0"]
+        let zero = try render(limit)
+        precondition(zero.details.contains("当前额度：未设置") && zero.details.contains("新额度：0 USDC"))
+        limit["mode"] = "live_devnet"
+        do { _ = try render(limit); fatalError("Test mode accepted as a real budget change") } catch {}
         var pairing: [String: Any] = [
             "version": 1, "kind": "statement_pairing", "environment": "mainnet", "scope": "read_statement",
             "registrationHash": String(repeating: "c", count: 64), "challenge": String(repeating: "a", count: 64),

@@ -1,23 +1,31 @@
+import { MonetaryScopeSchema } from '../purchases/monetary-scope';
 import { DEVNET_NETWORK, DEVNET_USDC_MINT } from '../payment/payment-environment';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import { z } from 'zod';
 
 const hex = z.string().regex(/^[a-f0-9]{64}$/);
+const DailyLimitAmount = z.string().regex(/^(0|[1-9]\d{0,15})$/);
+export const MainnetDailyLimitAction = z.object({ type: z.literal('daily_limit'), amount: DailyLimitAmount }).strict();
 export const LocalControlAction = z.discriminatedUnion('type', [
   z.object({ type: z.literal('create_wallet'), slot: z.literal('devnet'), network: z.literal(DEVNET_NETWORK), assetId: z.literal(DEVNET_USDC_MINT) }).strict(),
   z.object({ type: z.literal('connection'), enabled: z.boolean() }).strict(),
   z.object({ type: z.literal('pause'), paused: z.boolean() }).strict(),
-  z.object({ type: z.literal('daily_limit'), amount: z.string().regex(/^(0|[1-9]\d{0,15})$/).nullable() }).strict(),
+  MainnetDailyLimitAction.extend({ amount: DailyLimitAmount.nullable() }).strict(),
   z.object({ type: z.literal('revoke_grant'), grantId: z.uuid(), resourceId: z.string().min(1).max(200) }).strict(),
 ]);
 export const LocalControlRequest = z.object({
   version: z.literal(1), kind: z.literal('control'), id: z.uuid(), challenge: hex, sessionHash: hex,
   createdAt: z.number().int().nonnegative().safe(), expiresAt: z.number().int().positive().safe(),
-  environment: z.enum(['offline','devnet']), mode: z.literal('live_devnet'), memberId: z.uuid(),
+  environment: z.enum(['offline','devnet','mainnet']), mode: z.enum(['live_devnet','live_mainnet']), memberId: z.uuid(),
   agentLabel: z.string().min(1).max(120).regex(/^[^\p{Cc}\p{Cf}]+$/u),
-  basis: hex, action: LocalControlAction,
-}).strict();
+  basis: hex, action: LocalControlAction, monetaryScope: MonetaryScopeSchema.optional(),
+  previousDailyLimit: z.string().regex(/^(0|[1-9]\d{0,18})$/).nullable().optional(),
+}).strict().refine(request => request.environment === 'mainnet'
+  ? request.mode === 'live_mainnet' && request.monetaryScope?.environment === 'live_mainnet'
+    && request.previousDailyLimit !== undefined && MainnetDailyLimitAction.safeParse(request.action).success
+  : request.mode === 'live_devnet' && request.monetaryScope === undefined && request.previousDailyLimit === undefined,
+{ message: 'LOCAL_AUTHORIZATION_SCOPE_MISMATCH' });
 export type FrozenLocalControl = z.infer<typeof LocalControlRequest>;
 export type LocalControlReceipt = { requestId: string; digest: string };
 export const localControlBytes = (value: unknown) => JSON.stringify(LocalControlRequest.parse(value));
@@ -60,6 +68,7 @@ export class LocalControlApprovals {
       throw new Error('LOCAL_AUTHORIZATION_CONTENT_CHANGED');
     if (frozen.state !== 'PENDING') throw new Error('LOCAL_AUTHORIZATION_ALREADY_USED');
     if (now < frozen.request.createdAt || now >= frozen.request.expiresAt) throw new Error('LOCAL_AUTHORIZATION_EXPIRED');
+    return frozen.request;
   }
   claimedRequests(memberId: string) {
     return this.db.prepare("SELECT id FROM local_control_requests WHERE state='CLAIMED'").all()

@@ -76,3 +76,27 @@ it('claims external setup once and preserves the unresolved request instead of r
   store.consume(first.receipt, now);
   expect(store.read(first.receipt.requestId).state).toBe('CONSUMED');
 });
+
+it('scopes a mainnet limit receipt to the original wallet and prior limit across a restart', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'yosh-mainnet-limit-'));
+  cleanups.push(() => rmSync(directory, { recursive: true }));
+  const path = join(directory, 'ledger.sqlite'), first = open(path);
+  const scope = first.ledger.scope('live_mainnet');
+  expect(first.ledger.controls('live_mainnet').dailyBudget).toBeNull();
+  const draft = (amount: string) => {
+    const frozen = first.store.freeze({ environment: 'mainnet', mode: 'live_mainnet', monetaryScope: scope,
+      previousDailyLimit: null, memberId: first.ledger.defaultCardMember().id, agentLabel: 'Codex',
+      sessionHash: 'a'.repeat(64), basis: 'b'.repeat(64), action: { type: 'daily_limit', amount } }, now);
+    return { requestId: frozen.request.id, digest: frozen.digest };
+  };
+  const approved = draft('10000'), concurrent = draft('0');
+  expect(() => first.ledger.setDailyLimit('10000', 'live_devnet', undefined, approved)).toThrow('SCOPE_MISMATCH');
+  expect(() => first.ledger.setDailyLimit('10000', 'live_mainnet', { ...scope, walletIdentity: 'other' }, approved)).toThrow('SCOPE_MISMATCH');
+  first.ledger.setDailyLimit('10000', 'live_mainnet', scope, approved);
+  first.ledger.close(); cleanups.pop();
+  const reopened = open(path);
+  expect(reopened.ledger.controls('live_mainnet').dailyBudget).toBe('10000');
+  expect(reopened.store.read(approved.requestId).state).toBe('CONSUMED');
+  expect(() => reopened.ledger.setDailyLimit('0', 'live_mainnet', scope, concurrent)).toThrow('CONTENT_CHANGED');
+  expect(reopened.store.read(concurrent.requestId).state).toBe('PENDING');
+});
