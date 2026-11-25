@@ -64,6 +64,12 @@ def verify_runtime(package):
         raise ValueError('Per-request price limits require purchase resource lookup')
     if manifest.get('remoteStatements') and not standalone_mainnet:
         raise ValueError('Remote statement pairing requires standalone Mainnet')
+    if manifest.get('originalMerchantDelivery') and not standalone_mainnet:
+        raise ValueError('Original merchant delivery requires standalone Mainnet')
+    if manifest.get('mainnetDailyLimit') and not standalone_mainnet:
+        raise ValueError('Shared daily limit editing requires standalone Mainnet')
+    if manifest.get('mppDeliveryRecovery') and not standalone_mainnet:
+        raise ValueError('MPP delivery recovery requires standalone Mainnet')
     if manifest.get('firstUsePairing'):
         if not standalone_mainnet: raise ValueError('First-use pairing requires standalone Mainnet')
         required += ['first-use-mcp.cjs', 'register-local-agents.mjs']
@@ -94,9 +100,16 @@ def verify_runtime(package):
             raise ValueError('Per-request price limits are unavailable in the retained backend')
         if manifest.get('remoteStatements') and mainnet.get('remoteStatements') is not True:
             raise ValueError('Remote statement pairing is unavailable in the retained backend')
+        if manifest.get('originalMerchantDelivery') and mainnet.get('originalMerchantDelivery') is not True:
+            raise ValueError('Original merchant delivery is unavailable in the retained Mainnet backend')
+        if manifest.get('mainnetDailyLimit') and (mainnet.get('mainnetDailyLimit') is not True or
+                mainnet['files'].get('yosh-confirm') != manifest['files']['yosh-confirm']):
+            raise ValueError('Shared daily limit editing requires a matching Mainnet backend and confirmation helper')
         mainnet_mpp = mainnet.get('mppProtocol') is True
         if bool(manifest.get('mainnetMpp')) != mainnet_mpp or (mainnet_mpp and not manifest.get('mppProtocol')):
             raise ValueError('Mainnet MPP capability mismatch')
+        if manifest.get('mppDeliveryRecovery') and not (mainnet_mpp and mainnet.get('mppDeliveryRecovery') is True):
+            raise ValueError('MPP delivery recovery is unavailable in the retained backend')
     return manifest
 
 
@@ -109,6 +122,12 @@ def package(source, output):
         version = '0.2.18' if manifest.get('hostPurchaseAmountLimit') else '0.2.17'
     if manifest.get('remoteStatements') is True:
         version = '0.2.20'
+    if manifest.get('mppDeliveryRecovery') is True:
+        version = '0.2.21'
+    if manifest.get('mainnetDailyLimit') is True:
+        version = '0.2.22'
+    if manifest.get('originalMerchantDelivery') is True:
+        version = '0.2.23'
     plugin_name = 'yosh-local-dev' if local else NAME
     output = output.absolute()
     if not output.resolve().is_relative_to((ROOT / 'build.noindex').resolve()) or output.is_symlink():
@@ -163,7 +182,14 @@ exec "$root/yosh-dev" install-mcp
                 'for parameters explicitly declared by the resource. Keep the requestId on retry. Yosh handles first-use consent in the '
                 'Mac confirmation window and checks the calling agent’s spending authority. '
                 'Read the returned payment and delivery states before describing the result.\n')
+        if manifest.get('mainnetDailyLimit'):
+            skill_content += ('\nOwners can edit the Mainnet shared daily limit in the authorization page and '
+                              'confirm the amount in the native window. This limit applies across agents.\n')
         if manifest.get('purchaseResourceLookup'):
+            if manifest.get('mppDeliveryRecovery'):
+                skill_content += ('\nFor an MPP purchase already marked PAID with missing delivery, call '
+                                 'recover_purchase_delivery with its original purchaseId. Keep the returned payment and '
+                                 'delivery states separate. A merchant refusal ends recovery for that credential.\n')
             skill_content += ('\nBefore buying an unfamiliar resource, call describe_purchase_resource with its resourceId. '
                 'For fixed queries, omit the entire request argument. For dynamic queries, use the declared fields '
                 'and constraints. Check the network fee cap requirement in the same result.\n')

@@ -99,7 +99,7 @@ def main():
             '--define:__YOSH_PLUGIN_DEV__=' + ('false' if mainnet else 'true'),
             '--define:__YOSH_STANDALONE_DEV__=' + ('false' if mainnet else 'true'),
             '--define:__YOSH_RC5__=' + ('true' if mainnet else 'false'),
-            '--define:__YOSH_PLUGIN_VERSION__=' + json.dumps('0.2.20' if first_use else '0.2.14' if args.mainnet_mpp else '0.2.7' if args.mpp_artifact else '0.2.4'),
+            '--define:__YOSH_PLUGIN_VERSION__=' + json.dumps('0.2.23' if first_use else '0.2.14' if args.mainnet_mpp else '0.2.7' if args.mpp_artifact else '0.2.4'),
             '--outfile=' + str(runtime / name), '--metafile=' + str(metadata)], cwd=ROOT, env=env, check=True)
         for path in json.loads(metadata.read_text())['inputs']:
             inputs[path] = builder.digest(ROOT / path)
@@ -129,6 +129,8 @@ def main():
         builder.write_json(runtime / 'mainnet-manifest.json', {
             'kind': 'yosh-mainnet-standalone', 'apiVersion': 1, 'dataContract': 'existing-mainnet-v1',
             'mppProtocol': bool(args.mainnet_mpp), 'firstUsePurchases': bool(first_use),
+            'mppDeliveryRecovery': bool(args.mainnet_mpp),
+            'mainnetDailyLimit': True, 'originalMerchantDelivery': True,
             'purchaseResourceLookup': bool(first_use), 'hostPurchaseAmountLimit': bool(first_use),
             'remoteStatements': bool(first_use),
             'profile': 'com.yosh.pay-development.v011rc5', 'version': '0.1.0-dev', 'productionEnabled': False,
@@ -159,8 +161,10 @@ def main():
     manifest = {'kind': 'yosh-local-devnet' if args.local_authorization else 'yosh-standalone-offline-dev', 'apiVersion': 2 if args.local_authorization else 1, 'dataContract': 'local-devnet-v1' if args.local_authorization else 'standalone-offline-v1',
         'productionEnabled': False, 'mainnetBridge': False, 'mainnetStandalone': bool(args.local_authorization),
         'firstUsePairing': bool(first_use), 'firstUsePurchases': bool(first_use), 'purchaseResourceLookup': bool(first_use), 'hostPurchaseAmountLimit': bool(first_use),
-        'remoteStatements': bool(first_use),
+        'remoteStatements': bool(first_use), 'mainnetDailyLimit': bool(first_use),
+        'originalMerchantDelivery': bool(first_use),
         'mppProtocol': bool(args.mpp_artifact), 'mainnetMpp': bool(args.mainnet_mpp),
+        'mppDeliveryRecovery': bool(args.mainnet_mpp),
         'retainedMainnetManifestSha256': builder.digest(runtime / 'mainnet-manifest.json') if args.retain_mainnet_runtime else None,
         'signing': 'dependency-ad-hoc-only', 'version': '0.1.0-dev',
         'profile': 'com.yosh.local-authorization-dev' if args.local_authorization else 'com.yosh.standalone-plugin-dev', 'ports': [17449, 17452] if args.local_authorization else [15449, 15450, 15451],

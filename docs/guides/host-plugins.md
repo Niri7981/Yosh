@@ -45,6 +45,10 @@ The Mac, local Yosh runtime and tunnel client must be online for a Dot request. 
 
 Use `describe_purchase_resource` to inspect the request fields and prepare a quote. The local authorization page can create a Spend Grant after you review the agent, API, network, asset, recipient constraints, limits and expiry. For MPP, review the separate SOL network fee limit.
 
+In the local authorization page, select **主网 → 每日共享额度** to view the wallet’s daily USDC limit and remaining allowance across all agents. Enter the new limit, choose **核对额度变更**, and confirm the amount on your Mac. The page reads back the saved limit and today’s remaining allowance. Each purchase still requires its own applicable Spend Grant.
+
 Give the local agent one explicit purchase instruction with the resource, inputs, purpose and maximum amount. Yosh rechecks the quote and reserves budget before signing. Confirm both the payment and delivery results. If the outcome is uncertain, keep the original purchase ID. A read of the original status is safe to repeat. `recover_payment` is an execution operation that requires its own instruction.
+
+For x402 and MPP, a merchant can deliver a result while Yosh is still checking the original transaction on chain. When `deliveryStatus` is `COMPLETE`, use `get_purchase_delivery` with the original purchase ID to read the saved result. Yosh keeps the amount reserved until it resolves the payment.
 
 [Back to Yosh](../../README.md)

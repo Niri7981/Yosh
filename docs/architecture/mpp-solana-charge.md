@@ -57,7 +57,11 @@ Payment Domain Routing 只从保留工作树借用薄 descriptor/router/alias �
 
 签名载荷先持久化，唯一 submission marker 在首次发送之前写入。提交后超时保留 UNKNOWN 和预占，查询原签名与原 message；不得重新签名、换 blockhash、换 request ID 或改用 x402 再付款。恢复继续复用原购买及原 Grant/version。
 
-付款与交付分离。HTTP 200、merchant receipt `reference` 或 transaction signature 存在都不能单独证明支付成功；原交易链上核对后才形成 PAID。MPP receipt 仅作附加观察。第一阶段不重放单次 credential：只支持 Resource 明确声明的只读 `payment_identifier` 恢复端点；没有该能力时标为不支持交付恢复，保留已付款事实。
+商户响应带有匹配原付款的成功回执时，Yosh 立即校验并保存资源正文。购买者可凭原购买编号读取已保存的结果，交付状态为 `COMPLETE`。独立的链上核对仍在进行时，原付款保留预占额度。核对确认后，账本记为 `PAID`。仅有回执时仍需取得有效正文才能完成交付。
+
+插件的 `recover_purchase_delivery` 接收原购买编号，由本地后端核对 Agent、钱包环境和已确认交易。资源声明了 `payment_identifier` 时，后端优先向绑定的查询端点取回结果。其他受支持的 MPP Charge GET 使用已保存的原始请求和完整付款凭证，向同一 URL 重试。重新请求保留原 challenge、签名、交易和购买编号。商户决定能否补交。商户要求重新付款或明确拒绝原凭证时，订单保留已付款状态并记录交付拒绝。
+
+待交付订单通过同一套数据库领取和退避逻辑执行自动或手动恢复，累计最多四次。升级前因为没有查询端点而标记 `DELIVERY_RECOVERY_UNSUPPORTED` 的 MPP 订单可以由原 Agent 主动恢复。后端不会在升级时批量打开这些历史订单。
 
 ## 隔离实现阶段的支持范围与未完成事项（2026-11-16）
 

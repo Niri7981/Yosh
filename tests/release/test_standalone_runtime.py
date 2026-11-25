@@ -134,11 +134,56 @@ class StandaloneArtifactTests(unittest.TestCase):
         with mock.patch.object(packager, 'ROOT', self.root): packager.package(self.output, destination)
         plugin = destination / 'marketplace/plugins/yosh-local-dev'
         self.assertEqual(json.loads((plugin / 'plugin.json').read_text())['version'], '0.2.14')
+        self.manifest['mppDeliveryRecovery'] = True; self.save_manifest()
+        with self.assertRaisesRegex(ValueError, 'delivery recovery'): packager.verify_runtime(self.output)
+        mainnet['mppDeliveryRecovery'] = True; self.save_mainnet(mainnet)
+        recovery_package = self.root / 'build.noindex/mainnet-mpp-recovery'
+        with mock.patch.object(packager, 'ROOT', self.root): packager.package(self.output, recovery_package)
+        metadata = recovery_package / 'marketplace/plugins/yosh-local-dev/plugin.json'
+        self.assertEqual(json.loads(metadata.read_text())['version'], '0.2.21')
         self.manifest['mainnetMpp'] = False; self.save_manifest()
         with self.assertRaisesRegex(ValueError, 'capability mismatch'): packager.verify_runtime(self.output)
         self.manifest['mainnetMpp'] = True
         del mainnet['files']['mpp-provenance.json']; self.save_mainnet(mainnet)
         with self.assertRaisesRegex(ValueError, 'contract mismatch'): packager.verify_runtime(self.output)
+
+    def test_shared_daily_limit_editing_requires_matching_mainnet_capability_and_helper(self):
+        mainnet = self.local_mainnet_runtime()
+        self.manifest['mainnetDailyLimit'] = True
+        self.save_manifest()
+        with self.assertRaisesRegex(ValueError, 'daily limit'):
+            packager.verify_runtime(self.output)
+        mainnet['mainnetDailyLimit'] = True
+        self.save_mainnet(mainnet)
+        with self.assertRaisesRegex(ValueError, 'confirmation helper'):
+            packager.verify_runtime(self.output)
+        mainnet['files']['yosh-confirm'] = self.manifest['files']['yosh-confirm']
+        self.save_mainnet(mainnet)
+        icon = self.root / 'plugins/yosh-dev/assets/icon.png'
+        icon.parent.mkdir(parents=True)
+        icon.write_bytes(b'fixture')
+        destination = self.root / 'build.noindex/shared-daily-limit-package'
+        with mock.patch.object(packager, 'ROOT', self.root):
+            packager.package(self.output, destination)
+        plugin = destination / 'marketplace/plugins/yosh-local-dev'
+        self.assertEqual(json.loads((plugin / 'plugin.json').read_text())['version'], '0.2.22')
+
+    def test_original_merchant_delivery_requires_matching_mainnet_and_advances_version(self):
+        mainnet = self.local_mainnet_runtime()
+        self.manifest['originalMerchantDelivery'] = True
+        self.save_manifest()
+        with self.assertRaisesRegex(ValueError, 'Original merchant delivery'):
+            packager.verify_runtime(self.output)
+        mainnet['originalMerchantDelivery'] = True
+        self.save_mainnet(mainnet)
+        icon = self.root / 'plugins/yosh-dev/assets/icon.png'
+        icon.parent.mkdir(parents=True)
+        icon.write_bytes(b'fixture')
+        destination = self.root / 'build.noindex/original-delivery-package'
+        with mock.patch.object(packager, 'ROOT', self.root):
+            packager.package(self.output, destination)
+        plugin = destination / 'marketplace/plugins/yosh-local-dev'
+        self.assertEqual(json.loads((plugin / 'plugin.json').read_text())['version'], '0.2.23')
 
     def test_mpp_builder_rejects_unrecorded_executable_without_shipping_private_inventory(self):
         artifact = self.root / 'protocol'; artifact.mkdir()
