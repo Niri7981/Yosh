@@ -43,7 +43,7 @@ function result(record: SpendReservation, offerId: PurchaseRequestInput['offerId
   const offer = marketOffer(offerId);
   const authority = record.intent.authority;
   if (!authority && (record.decision.decision !== 'DENIED' || record.decision.reason !== 'SPEND_GRANT_REQUIRED')) throw new Error('SPEND_GRANT_REQUIRED');
-  const resource = record.status === 'PAID' && record.deliveryStatus === 'COMPLETE'
+  const resource = record.deliveryStatus === 'COMPLETE' && record.data !== undefined
     ? MarketSnapshotOutputSchema.parse(record.data)
     : undefined;
   return { purchaseId: record.intent.idempotencyKey, offerId, amount: String(record.intent.amount), display: offer.display,

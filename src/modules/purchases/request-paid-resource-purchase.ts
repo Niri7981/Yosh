@@ -34,7 +34,7 @@ function result(record: SpendReservation, reused: boolean, executionMode: Purcha
   const id = registered ? record.intent.resourceId : PaidResourceIdSchema.parse(record.intent.resourceId);
   const authority = record.intent.authority;
   if (!authority && (record.decision.decision !== 'DENIED' || record.decision.reason !== 'SPEND_GRANT_REQUIRED')) throw new Error('SPEND_GRANT_REQUIRED');
-  const resource = record.status === 'PAID' && record.deliveryStatus === 'COMPLETE'
+  const resource = record.deliveryStatus === 'COMPLETE' && record.data !== undefined
     ? registered ? record.data : parsePaidResourceDelivery(PaidResourceIdSchema.parse(id), record.data) : undefined;
   const encoded = resource === undefined ? undefined : Buffer.from(JSON.stringify(resource));
   return { purchaseId: record.intent.idempotencyKey, resourceId: id, amount: String(record.intent.amount),

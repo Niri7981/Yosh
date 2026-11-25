@@ -6,12 +6,13 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { z } from 'zod';
 import { PurchaseResourceContract, PurchaseResourceLookup } from './purchase-resource-contract';
-import { executeHostPurchase, LocalHostPurchaseOwnerInput, LocalHostPurchasePlan, type HostPurchase } from './local-host-purchase';
+import { executeHostDeliveryRecovery, executeHostPurchase, LocalHostPurchaseOwnerInput, LocalHostPurchasePlan, type HostPurchase, type PayCall } from './local-host-purchase';
 
 const execute = promisify(execFile);
 const ownerActions = {
   'pair-statement': { timeout: 210_000, maxBuffer: 16_384, unavailable: 'LOCAL_STATEMENT_OWNER_UNAVAILABLE' },
   'authorize-host-purchase': { timeout: 360_000, maxBuffer: 16_384, unavailable: 'LOCAL_PURCHASE_OWNER_UNAVAILABLE' },
+  'lookup-host-purchase-member': { timeout: 70_000, maxBuffer: 16_384, unavailable: 'LOCAL_HOST_BINDING_MISMATCH' },
   // Up to 16 query fields with 32 enum values of 300 characters, including JSON escapes.
   'describe-host-resource': { timeout: 70_000, maxBuffer: 1_048_576, unavailable: 'LOCAL_RESOURCE_LOOKUP_UNAVAILABLE' },
 };
@@ -43,16 +44,22 @@ export function createLocalHostClient(runtime: string, host: { registration: str
     if (!contract.success || contract.data.resourceId !== input.resourceId) throw new Error('LOCAL_RESOURCE_LOOKUP_UNAVAILABLE');
     return contract.data;
   }
-  async function purchase(input: HostPurchase, signal: AbortSignal, deliveryOffset?: number) {
-    const plan = LocalHostPurchasePlan.parse(await owner('authorize-host-purchase', signal, deliveryOffset === undefined ? input : { ...input, existingOnly: true }));
+  async function withMember(memberId: string, signal: AbortSignal, run: (call: PayCall) => Promise<unknown>) {
     signal.throwIfAborted();
     const pay = new Client({ name: 'yosh-member-purchase', version: '1' });
     try {
       await pay.connect(new StdioClientTransport({ command: node, args: [launcher, 'install-mcp'],
-        cwd: runtime, stderr: 'ignore', env: { ...env, YOSH_CARD_MEMBER_ID: plan.memberId, YOSH_INTERNAL_PURCHASE: '1' } }), { signal, timeout: 65_000 });
-      return await executeHostPurchase(plan, input, (name, args, signal) =>
-        pay.callTool({ name, arguments: args }, undefined, { signal, timeout: 150_000 }), signal, deliveryOffset);
+        cwd: runtime, stderr: 'ignore', env: { ...env, YOSH_CARD_MEMBER_ID: memberId, YOSH_INTERNAL_PURCHASE: '1' } }), { signal, timeout: 65_000 });
+      return await run((name, args, callSignal) => pay.callTool({ name, arguments: args }, undefined, { signal: callSignal, timeout: 150_000 }));
     } finally { await pay.close(); }
   }
-  return { statementMember, purchase, describeResource };
+  async function purchase(input: HostPurchase, signal: AbortSignal, deliveryOffset?: number) {
+    const plan = LocalHostPurchasePlan.parse(await owner('authorize-host-purchase', signal, deliveryOffset === undefined ? input : { ...input, existingOnly: true }));
+    return withMember(plan.memberId, signal, call => executeHostPurchase(plan, input, call, signal, deliveryOffset));
+  }
+  async function recoverDelivery(purchaseId: string, signal: AbortSignal) {
+    const { memberId } = z.object({ memberId: z.uuid() }).strict().parse(await owner('lookup-host-purchase-member', signal));
+    return withMember(memberId, signal, call => executeHostDeliveryRecovery(purchaseId, call, signal));
+  }
+  return { statementMember, purchase, describeResource, recoverDelivery };
 }

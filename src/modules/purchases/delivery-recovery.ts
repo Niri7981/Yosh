@@ -25,27 +25,35 @@ export function observeDeliveryReceipt(ledger: PurchaseLedger, record: PurchaseR
   } catch { ledger.recordReceipt(record.approvalId, 'INVALID'); return 'INVALID'; }
 }
 
+export function isX402DeliveryResponse(response: Response, endpoint: string) {
+  return [200, 201].includes(response.status) && (!response.url || response.url === endpoint) && !response.headers.has('PAYMENT-REQUIRED');
+}
+
+export async function readX402DeliveryBody(record: PurchaseRecord, response: Response) {
+  if (record.intent.resourcePath) return parsePaidResourceDelivery(PaidResourceIdSchema.parse(record.intent.resourceId), await readBoundedResourceJson(response));
+  if (record.intent.httpRequest) return readBoundedResourceDelivery(response, record.intent.deliveryPolicy);
+  return readMarketSnapshot(response);
+}
+
 async function consumeDelivery(ledger: PurchaseLedger, record: PurchaseRecord, response: Response, config: PaymentConfig,
-  expectedUrl: string, token: string, trace: Trace) {
+  expectedUrl: string, token: string, trace: Trace, originalBody?: Promise<unknown>) {
   try {
     const receipt = observeDeliveryReceipt(ledger, record, response, config);
-    if (![200, 201].includes(response.status) || (response.url && response.url !== expectedUrl)) throw new Error('DELIVERY_RESPONSE_UNAVAILABLE');
+    if (!isX402DeliveryResponse(response, expectedUrl)) throw new Error('DELIVERY_RESPONSE_UNAVAILABLE');
     // Chain proof already established PAID. Missing receipts do not prevent a
     // valid resource delivery; a contradictory/malformed receipt is rejected.
     if (receipt === 'INVALID' || receipt === 'FAILED') throw new Error('DELIVERY_RECEIPT_INVALID');
-    const data = record.intent.resourcePath
-      ? parsePaidResourceDelivery(PaidResourceIdSchema.parse(record.intent.resourceId), await readBoundedResourceJson(response))
-      : record.intent.httpRequest ? await readBoundedResourceDelivery(response, record.intent.deliveryPolicy) : await readMarketSnapshot(response);
+    const data = await (originalBody ?? readX402DeliveryBody(record, response));
     ledger.finish(record.approvalId, { transaction: record.transaction!, data }, undefined, token);
     trace('DATA_VALIDATED');
     return { transaction: record.transaction!, data };
   } finally { await response.body?.cancel().catch(() => {}); }
 }
 
-export async function receiveOriginalDelivery(ledger: PurchaseLedger, record: PurchaseRecord, response: Response, config: PaymentConfig, endpoint: string, trace: Trace) {
+export async function receiveOriginalDelivery(ledger: PurchaseLedger, record: PurchaseRecord, response: Response, config: PaymentConfig, endpoint: string, trace: Trace, originalBody?: Promise<unknown>) {
   const token = ledger.claimDelivery(record.approvalId, 'initial');
   if (!token) { await response.body?.cancel().catch(() => {}); return; }
-  try { return await consumeDelivery(ledger, record, response, config, endpoint, token, trace); }
+  try { return await consumeDelivery(ledger, record, response, config, endpoint, token, trace, originalBody); }
   catch { ledger.failDeliveryAttempt(record.approvalId, token, 'DELIVERY_RESPONSE_INVALID'); throw new Error('DELIVERY_PENDING_OR_TERMINAL'); }
 }
 

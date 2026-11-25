@@ -5,7 +5,8 @@ import { AgentPurchaseReadInput, AgentPurchaseSummary } from '../mcp/purchase-re
 
 /** Read original owner-bound facts only. Never claims execution, reconciles a
  * transaction, releases a reservation or returns signed payment credentials. */
-export function readAgentPurchase(ledger: PurchaseLedger, owner: string, raw: unknown) {
+export function readAgentPurchase(ledger: PurchaseLedger, owner: string, raw: unknown,
+  options: { includeDeliveryRecovery?: boolean } = {}) {
   const input = AgentPurchaseReadInput.parse(raw);
   const id = input.purchaseId ?? payOperationPurchaseId(owner, input.operationId!);
   let record = ledger.getOwned(id, owner);
@@ -22,6 +23,7 @@ export function readAgentPurchase(ledger: PurchaseLedger, owner: string, raw: un
     ? String(provenance.operation_id) : input.operationId ?? null;
   return AgentPurchaseSummary.parse({ purchaseId: record.intent.idempotencyKey, operationId, status: record.status,
     paymentStatus: paymentStatusFor(record.status),
+    ...(options.includeDeliveryRecovery ? { deliveryRecovery: record.deliveryRecovery } : {}),
     deliveryStatus: record.deliveryStatus, failure: ledger.executionFailure(record.intent.id), policyCode: /^[A-Z][A-Z0-9_]{1,100}$/.test(record.decision.reason)
       ? record.decision.reason : 'POLICY_REASON_UNAVAILABLE',
     resourceId: record.intent.resourceId, amount: record.intent.amount.toString(), network: record.intent.network,

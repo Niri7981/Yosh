@@ -28,7 +28,7 @@ export async function requestMppResourcePurchase(raw: unknown, options: {
     if (!record.intent.mpp || record.intent.resourceId !== input.resourceId || record.intent.reason !== input.reason
       || record.intent.requestInputFingerprint !== inputHash) throw new Error('REQUEST_ID_CONFLICT');
     ledger.assertReplayAllowed(record, config.mode, ledger.paymentScope(config, config.mode));
-    if (['PAYING', 'PAYMENT_UNKNOWN', 'PAID'].includes(record.status))
+    if (record.deliveryStatus !== 'COMPLETE' && ['PAYING', 'PAYMENT_UNKNOWN', 'PAID'].includes(record.status))
       await recoverMppCharge(ledger, record, config, record.intent.httpRequest!.url, dependencies);
     // An existing APPROVED record needs its original execution owner/permit.
     // A repeated client request never prepares a new transaction.

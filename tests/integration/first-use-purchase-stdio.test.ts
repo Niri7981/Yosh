@@ -18,6 +18,7 @@ it.each(['first use', 'existing member'])('%s uses the native owner and executes
   const receipt = { purchaseId: 'original', operationId: intent.requestId, resourceId: intent.resourceId,
     status: 'PAID', paymentStatus: 'PAID', deliveryStatus: 'COMPLETE', policyCode: 'APPROVED', amount: '1000',
     network: 'solana', assetId: 'fixture', assetDecimals: 6, transaction: 'fixture' };
+  const mppReceipt = { ...receipt, purchaseId: 'original-mpp', operationId: 'original-mpp', resourceId: 'fixture-sol-mpp' };
   const entry = join(root, 'host.cjs');
   const first = mode === 'first use';
   const client = new Client({ name: 'independent-host-fixture', version: '1' });
@@ -53,6 +54,9 @@ it.each(['first use', 'existing member'])('%s uses the native owner and executes
         if (!fs.existsSync('approve')) { console.error('LOCAL_CONFIRMATION_DECLINED'); process.exit(1); }
         console.log(JSON.stringify({memberId:${JSON.stringify(memberId)},requestId:intent.requestId,resourceId:intent.resourceId,
           protocol:'x402',url:${JSON.stringify(fixedUrl)}}));
+      } else if (action === 'lookup-host-purchase-member') {
+        fs.appendFileSync('member-calls', JSON.stringify(process.argv.slice(3)) + '\\n');
+        console.log(JSON.stringify({memberId:${JSON.stringify(memberId)}}));
       } else if (action === 'install-mcp') {
         require('node:readline').createInterface({input:process.stdin}).on('line', line => {
           const {method,params,id} = JSON.parse(line);
@@ -64,8 +68,10 @@ it.each(['first use', 'existing member'])('%s uses the native owner and executes
             const text = value => ({content:[{type:'text',text:JSON.stringify(value)}]});
             fs.appendFileSync('pay-calls',JSON.stringify({tool:params.name,member:process.env.YOSH_CARD_MEMBER_ID,args:params.arguments})+'\\n');
             if (params.name === 'get_purchase_delivery') result = text({
-              purchaseId:'original', encoding:'base64', contentType:'application/json', totalBytes:2, offset:0, nextOffset:null, chunk:'e30='
+              purchaseId:params.arguments.purchaseId, encoding:'base64', contentType:'application/json', totalBytes:2, offset:0, nextOffset:null, chunk:'e30='
             });
+            else if (params.name === 'recover_purchase_delivery') result = params.arguments.purchaseId === ${JSON.stringify(mppReceipt.purchaseId)}
+              ? text(${JSON.stringify(mppReceipt)}) : {isError:true,content:[{type:'text',text:'PURCHASE_NOT_FOUND: unknown owner-bound order.'}]};
             else if (params.name === 'get_purchase') result = fs.existsSync('paid') ? text(${JSON.stringify(receipt)})
               : {isError:true,content:[{type:'text',text:'PURCHASE_NOT_FOUND: read only.'}]};
             else if (params.name === 'curl') { fs.writeFileSync('paid','1'); result = text({}); }
@@ -112,5 +118,16 @@ it.each(['first use', 'existing member'])('%s uses the native owner and executes
     const delivery = { tool: 'get_purchase_delivery', member: memberId, args: { purchaseId: receipt.purchaseId, offset: 0 } };
     expect(log('pay-calls')).toEqual([lookup, { tool: 'curl', member: memberId, args: { operation_id: intent.requestId, url: fixedUrl } },
       lookup, delivery, lookup, delivery]);
+    if (first) {
+      const recover = (purchaseId: string) => client.callTool({ name: 'recover_purchase_delivery', arguments: { purchaseId, environment: 'mainnet' } });
+      expect(await recover('unknown')).toMatchObject({ isError: true, content: [{ text: expect.stringContaining('PURCHASE_NOT_FOUND') }] });
+      expect(await recover(mppReceipt.purchaseId)).toMatchObject({ content: [{ text: expect.stringContaining('"encoding":"json"') }] });
+      expect(log('member-calls')).toEqual([hostArgs, hostArgs]);
+      expect(log('pay-calls').slice(6)).toEqual([
+        { tool: 'recover_purchase_delivery', member: memberId, args: { purchaseId: 'unknown' } },
+        { tool: 'recover_purchase_delivery', member: memberId, args: { purchaseId: mppReceipt.purchaseId } },
+        { ...delivery, args: { purchaseId: mppReceipt.purchaseId, offset: 0 } }]);
+      expect(log('owner-calls')).toHaveLength(3);
+    }
   } finally { await client.close(); rmSync(root, { recursive: true, force: true }); }
 }, 15_000);

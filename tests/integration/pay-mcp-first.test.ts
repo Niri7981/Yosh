@@ -446,25 +446,46 @@ it('real Pay MCP survives an actual Yosh SIGKILL between durable marker and HTTP
   }finally{await f.close();}
 },30_000);
 
-it('shutdown waits for the already started controlled HTTP and its original accounting',async()=>{
-  const release=deferred();const f=await productionPayFixture({payMcp:true});f.pauseMerchantResponse(release);
-  try{
-    const pending=f.callPay(await f.connectPay(),'pay-shutdown-http');await reachBoundary(f.merchantArrived,pending);
-    let quitDone=false;const quitting=f.app.prepareQuit().then(()=>{quitDone=true;});
-    await new Promise<void>(done=>setImmediate(done));
+it('finishes an in-flight original delivery during shutdown and reads it after restart', async () => {
+  const release = deferred();
+  const f = await productionPayFixture({ payMcp: true });
+  const operation = 'pay-shutdown-http';
+  f.pauseMerchantResponse(release);
+  try {
+    const pending = f.callPay(await f.connectPay(), operation);
+    await reachBoundary(f.merchantArrived, pending);
+    expect(f.payRecord(operation)?.status).toBe('PAYING');
+    expect(f.app.ledger.managedSummary(Date.now(), 'live_devnet')).toMatchObject({ paid: '0', reserved: '200000' });
+
+    let quitDone = false;
+    const quitting = f.app.prepareQuit().then(() => { quitDone = true; });
+    await new Promise<void>(done => setImmediate(done));
     expect(quitDone).toBe(false);
-    release.resolve();expect((await pending).isError).toBe(true);await quitting;
-    // The existing quit policy stops new delivery claims, while still proving
-    // the submitted original. Restart recovers its delivery with the same proof.
-    expect(f.payRecord('pay-shutdown-http')).toMatchObject({status:'PAID',deliveryStatus:'PENDING'});
-    expect(f.signatureCalls).toBe(1);expect(f.paidRequests).toBe(1);
-    await f.reopenWithoutPayExecutor();await f.app.start(f.origin);
-    const recovered=await f.callPay(await f.connectPay(),'pay-shutdown-http');
-    expect(recovered.isError).not.toBe(true);expect(JSON.stringify(recovered.content)).toContain(TEST_DELIVERY.source_label);
-    expect(f.payRecord('pay-shutdown-http')).toMatchObject({status:'PAID',deliveryStatus:'COMPLETE'});
-    expect(f.signatureCalls).toBe(1);expect(new Set(f.paidHeaders).size).toBe(1);
-  }finally{release.resolve();await f.close();}
-},30_000);
+    release.resolve();
+    const initial = await pending;
+    await quitting;
+    expect(initial.isError).not.toBe(true);
+    expect(JSON.stringify(initial.content)).toContain(TEST_DELIVERY.source_label);
+    const record = f.payRecord(operation)!;
+    expect(record).toMatchObject({ status: 'PAID', deliveryStatus: 'COMPLETE', data: TEST_DELIVERY });
+    expect([...f.transactions.keys()]).toEqual([record.transaction]);
+
+    await f.reopenWithoutPayExecutor();
+    await f.app.start(f.origin);
+    expect(f.payRecord(operation)).toMatchObject({ status: 'PAID', deliveryStatus: 'COMPLETE',
+      data: TEST_DELIVERY, transaction: record.transaction });
+    const reread = await f.callPay(await f.connectPay(), operation);
+    expect(reread.isError).not.toBe(true);
+    expect(reread.content).toEqual(initial.content);
+    expect(f.app.ledger.managedSummary(Date.now(), 'live_devnet')).toMatchObject({ paid: '200000', reserved: '0' });
+    expect(f.signatureCalls).toBe(1);
+    expect(f.paidRequests).toBe(1);
+    expect([...f.transactions.keys()]).toEqual([record.transaction]);
+  } finally {
+    release.resolve();
+    await f.close();
+  }
+}, 30_000);
 
 
 it('operation replay rejects changed request or accepted terms before recovery, including after reopen', async () => {

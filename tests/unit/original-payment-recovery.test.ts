@@ -19,6 +19,7 @@ import { PurchaseLedger } from '../../src/modules/purchases/purchase-ledger';
 import { OriginalPaymentRecordSchema } from '../../src/modules/purchases/original-payment-record';
 import { monetaryScopeId } from '../../src/modules/purchases/monetary-scope';
 import { hash } from '../../src/modules/purchases/spending-policy';
+import { AppRuntime } from '../../src/modules/app/app-runtime';
 
 vi.mock('../../src/modules/payment/wallet', () => ({ loadBuyerSigner: vi.fn() }));
 vi.mock('../../src/modules/payment/solana-payment', async () => {
@@ -178,6 +179,34 @@ it('legacy unknown without payload remains reserved across startup rather than b
   reopened.recoverUnsubmittedOnStartup();
   expect(reopened.getLegacy('original-request')?.status).toBe('PAYMENT_UNKNOWN');
   expect(reopened.managedSummary()).toMatchObject({ paid: '0', reserved: '10000', unresolved: 1 });
+});
+
+it('queues a crash-left submitted payment before wallet startup and confirms it on the next available worker tick', async () => {
+  const path = persistentPath(), f = await fixture(path), id = f.record.approvalId;
+  saveOriginal(f, false);
+  f.ledger.markSubmissionAttempt(id);
+  const data = { price: 90, asset: 'SOL' };
+  f.ledger.saveOriginalMerchantDelivery(id, data);
+  close(f);
+  const ledger = new PurchaseLedger(path, { mode: 'live_devnet', walletIdentity: f.config.buyer });
+  ledgers.push(ledger);
+  const calls = network(f, request => originalRpc(f, request));
+  const initializeWallet = vi.fn().mockRejectedValueOnce(new Error('Wallet temporarily unavailable'))
+    .mockResolvedValue({ address: f.config.buyer });
+  const runtime = { ledger, accepting: true, hosting: {}, purchaseExecutionMode: () => f.config.mode,
+    paymentConfiguration: () => f.config, initializeWallet, reconciliationAbort: new AbortController(), scheduleDeliveryRecovery: vi.fn() };
+  Object.setPrototypeOf(runtime, AppRuntime.prototype);
+  await Reflect.apply(Reflect.get(AppRuntime.prototype, 'recoverOnStartup'), runtime, ['http://127.0.0.1:3000']);
+  expect(runtime.scheduleDeliveryRecovery).toHaveBeenCalledOnce();
+  expect(calls.fetcher).not.toHaveBeenCalled();
+  expect(ledger.getLegacy('original-request')).toMatchObject({ status: 'PAYMENT_UNKNOWN', deliveryStatus: 'COMPLETE', data });
+  expect(ledger.managedSummary()).toMatchObject({ paid: '0', reserved: '10000' });
+  await Reflect.apply(Reflect.get(AppRuntime.prototype, 'reconcileDuePayments'), runtime, []);
+  expect(initializeWallet).toHaveBeenCalledTimes(2);
+  expect(ledger.getLegacy('original-request')).toMatchObject({ status: 'PAID', deliveryStatus: 'COMPLETE', data, transaction: f.signature });
+  expect(ledger.managedSummary()).toMatchObject({ paid: '10000', reserved: '0' });
+  expect(calls.merchantRequests).toHaveLength(0);
+  expect(prepareSolanaPayment).not.toHaveBeenCalled();
 });
 
 it('persists receipt signature before RPC polling when the merchant response body is unusable', async () => {

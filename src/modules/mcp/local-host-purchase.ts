@@ -3,7 +3,7 @@ import { AtomicAmountSchema } from '../authority/atomic-money';
 import { PurchaseRequestInputSchema } from '../purchases/purchase-request-input';
 import { MAX_SERIALIZED_RESOURCE_DELIVERY_BYTES, ResourceRequestInputSchema } from '../resources/http-resource';
 import { PurchaseResourceLookup } from './purchase-resource-contract';
-import { AgentPurchaseSummary } from './purchase-read-contract';
+import { AgentPurchaseSummary, DeliveryRecoveryErrors } from './purchase-read-contract';
 
 export const LocalHostPurchaseInput = PurchaseRequestInputSchema.pick({ requestId: true, resourceId: true, reason: true }).extend({
   maximumAmountAtomic: z.string().max(19).regex(/^(0|[1-9]\d*)$/).refine(value => AtomicAmountSchema.safeParse(value).success)
@@ -88,7 +88,7 @@ export async function requestLocalPurchase(purchase: (args: HostPurchase, signal
   }
 }
 
-type PayCall = (name: string, args: Record<string, unknown>, signal: AbortSignal) => Promise<unknown>;
+export type PayCall = (name: string, args: Record<string, unknown>, signal: AbortSignal) => Promise<unknown>;
 const payReply = z.object({ isError: z.boolean().optional(), content: z.array(z.object({ type: z.literal('text'), text: z.string() })).length(1) });
 
 const deliveryPage = z.object({
@@ -98,7 +98,7 @@ const deliveryPage = z.object({
 }).strict();
 
 async function withSavedDelivery(receipt: z.infer<typeof AgentPurchaseSummary>, call: PayCall, signal: AbortSignal, offset: number) {
-  if (receipt.paymentStatus !== 'PAID' || receipt.deliveryStatus !== 'COMPLETE') return receipt;
+  if (receipt.deliveryStatus !== 'COMPLETE') return receipt;
   try {
     const reply = payReply.parse(await call('get_purchase_delivery', { purchaseId: receipt.purchaseId, offset }, signal));
     if (reply.isError) throw new Error('LOCAL_DELIVERY_UNAVAILABLE');
@@ -114,6 +114,19 @@ async function withSavedDelivery(receipt: z.infer<typeof AgentPurchaseSummary>, 
     // Delivery read failures never discard or downgrade durable payment evidence.
     return { ...receipt, delivery: { code: 'LOCAL_SAVED_DELIVERY_UNAVAILABLE' } };
   }
+}
+
+/** Recovery stays on the owning member's existing connection, including on a miss. */
+export async function executeHostDeliveryRecovery(purchaseId: string, call: PayCall, signal: AbortSignal) {
+  signal.throwIfAborted();
+  const reply = payReply.parse(await call('recover_purchase_delivery', { purchaseId }, signal));
+  if (reply.isError) {
+    const code = reply.content[0].text.split(':', 1)[0];
+    throw new Error(Object.hasOwn(DeliveryRecoveryErrors, code) || code === 'AGENT_UNAUTHORIZED' ? code : 'MPP_DELIVERY_RECOVERY_UNAVAILABLE');
+  }
+  const summary = AgentPurchaseSummary.parse(JSON.parse(reply.content[0].text));
+  if (summary.purchaseId !== purchaseId || summary.paymentStatus !== 'PAID') throw new Error('LOCAL_PURCHASE_BINDING_MISMATCH');
+  return withSavedDelivery(summary, call, signal, 0);
 }
 
 /** Look up the original order before any execution, including retries after a lost

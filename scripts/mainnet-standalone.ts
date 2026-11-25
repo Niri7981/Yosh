@@ -157,12 +157,14 @@ async function readHostInput(): Promise<unknown> {
 }
 
 async function main() {
-  const action = z.enum(['start', 'status', 'stop', 'serve', 'install-mcp', 'upgrade', 'remote-statement', 'pair-statement', 'authorize-host-purchase', 'describe-host-resource']).parse(process.argv[2]);
-  const host = action === 'pair-statement' || action === 'authorize-host-purchase' || action === 'describe-host-resource' ? parseHostRegistration(process.argv.slice(3)) : undefined;
+  const action = z.enum(['start', 'status', 'stop', 'serve', 'install-mcp', 'upgrade', 'remote-statement', 'pair-statement', 'authorize-host-purchase', 'describe-host-resource', 'lookup-host-purchase-member']).parse(process.argv[2]);
+  const host = ['pair-statement', 'authorize-host-purchase', 'describe-host-resource', 'lookup-host-purchase-member'].includes(action)
+    ? parseHostRegistration(process.argv.slice(3)) : undefined;
   if (!host && action !== 'remote-statement' && process.argv.length !== 3) throw new Error('MAINNET_ARGUMENTS_INVALID');
   const { digest, manifest } = verifyMainnetRuntime(runtime);
   if (realpathSync(process.execPath) !== realpathSync(join(runtime, 'node'))) throw new Error('MAINNET_PACKAGED_NODE_REQUIRED');
   if (action === 'describe-host-resource' && !manifest.purchaseResourceLookup) throw new Error('LOCAL_RESOURCE_LOOKUP_UNAVAILABLE');
+  if (action === 'lookup-host-purchase-member' && !manifest.firstUsePurchases) throw new Error('LOCAL_HOST_BINDING_MISMATCH');
   if (host && manifest.firstUsePurchases) {
     const caller = resolveInstalledHost(runtime);
     if (caller.registration !== host.registration || caller.label !== host.label) throw new Error('LOCAL_HOST_BINDING_MISMATCH');
@@ -210,6 +212,9 @@ async function main() {
       return undefined;
     });
     if (!owner) await readyRuntime();
+    if (action === 'lookup-host-purchase-member') {
+      console.log(JSON.stringify(await readLocalPurchaseMember(host.registration, host.label))); return;
+    }
     if (action === 'authorize-host-purchase') {
       const input = LocalHostPurchaseOwnerInput.parse(await readHostInput());
       console.log(JSON.stringify(await authorizeLocalHostPurchase(host.registration, host.label, input))); return;

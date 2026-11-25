@@ -5,7 +5,7 @@ import type { PaymentPayload, PaymentRequirements } from '@x402/core/types';
 import { assertPaymentConfigExecutionEnabled, type PaymentConfig } from '../payment/payment-config';
 import { prepareSolanaPayment, MARKET_RESOURCE } from '../payment/solana-payment';
 import { reconcileStoredOriginalPayment, type ChainOutcome } from '../payment/reconcile-transaction';
-import { createSignedPaymentIdentity, type OriginalPaymentLifetime } from '../payment/original-payment-evidence';
+import { createSignedPaymentIdentity, isOriginalSettlementSignature, type OriginalPaymentLifetime } from '../payment/original-payment-evidence';
 import { OriginalPaymentRecordSchema } from './original-payment-record';
 import { monetaryScopeId } from './monetary-scope';
 import { loadBuyerSigner } from '../payment/wallet';
@@ -22,7 +22,8 @@ import { HttpResourceRequestSchema } from '../resources/http-resource';
 import { prepareSafeResourceFetch } from '../resources/safe-resource-fetch';
 import { assertProductionPaymentGate } from './production-execution-gate';
 import { purchaseSigningAuthorization } from './purchase-signing-authorization';
-import { observeDeliveryReceipt, receiveOriginalDelivery, recoverPaidDelivery } from './delivery-recovery';
+import { saveBoundOriginalBody } from './original-merchant-delivery';
+import { isX402DeliveryResponse, observeDeliveryReceipt, readX402DeliveryBody, receiveOriginalDelivery, recoverPaidDelivery } from './delivery-recovery';
 import type { ReconciliationCode } from './payment-reconciliation';
 import { assertX402Purchase } from './purchase-contract';
 
@@ -166,7 +167,7 @@ function paymentResponseObservation(response: Response, config: PaymentConfig, r
 
 /** Internal approval ID is the only caller-supplied payment parameter.
  * Executors are internal dependencies; Agent/UI input never selects one. */
-export async function executeApprovedPayment(ledger: PurchaseLedger, approvalId: string, config: PaymentConfig, endpoint: string, trace: Trace = () => {}, executor?: PaymentExecutor, permit?: ExternalExecutionPermit) {
+export async function executeApprovedPayment(ledger: PurchaseLedger, approvalId: string, config: PaymentConfig, endpoint: string, trace: Trace = () => {}, executor?: PaymentExecutor, permit?: ExternalExecutionPermit, deferReconciliation = false) {
   assertPaymentConfigExecutionEnabled(config);
   executor?.assertEligibility(config, ledger);
   const validate = (record: PurchaseRecord) => {
@@ -209,27 +210,48 @@ export async function executeApprovedPayment(ledger: PurchaseLedger, approvalId:
     const pendingResponse = submit();
     trace('SUBMITTED');
     const response = await pendingResponse;
-    try {
-      const signature = readSettlementTransactionHint(response);
-      if (signature) ledger.observeTransactionSignature(approvalId, signature);
-    } catch { /* A missing/unusable merchant receipt cannot erase buyer evidence. */ }
+    const signature = (() => {
+      try { return readSettlementTransactionHint(response); } catch { return undefined; }
+    })();
+    if (signature) ledger.observeTransactionSignature(approvalId, signature);
     const submitted = record.ownerCardMemberId ? ledger.getOwned(record.intent.idempotencyKey, record.ownerCardMemberId) : ledger.getLegacy(record.intent.idempotencyKey);
-    observeDeliveryReceipt(ledger, submitted!, response, config);
+    const receipt = observeDeliveryReceipt(ledger, submitted!, response, config);
+    let originalBody: Promise<unknown> | undefined;
     try {
+      if ((receipt === 'UNVERIFIED' || receipt === 'CONFIRMED') && signature && typeof payload.payload.transaction === 'string'
+        && isX402DeliveryResponse(response, endpoint)
+        && isOriginalSettlementSignature(payload.payload.transaction, signature)) {
+        stage = 'delivery';
+        originalBody = readX402DeliveryBody(record, response);
+        const saved = await saveBoundOriginalBody(ledger, approvalId, originalBody);
+        if (saved) {
+          trace('DATA_VALIDATED');
+          ledger.unknown(approvalId);
+          if (!deferReconciliation) {
+            reconciliationStarted = true;
+            await reconcileApprovedPayment(ledger, record.intent.idempotencyKey, config, trace, record.ownerCardMemberId);
+          }
+          return { transaction: signature, data: saved.data };
+        }
+      }
       stage = 'settlement_reconciliation';
       reconciliationStarted = true;
       await reconcileApprovedPayment(ledger, record.intent.idempotencyKey, config, trace, record.ownerCardMemberId);
       const paid = (record.ownerCardMemberId ? ledger.getOwned(record.intent.idempotencyKey, record.ownerCardMemberId) : ledger.getLegacy(record.intent.idempotencyKey))!;
       if (paid.status !== 'PAID') { await response.body?.cancel().catch(() => {}); throw new Error('Original transaction unresolved or failed'); }
       stage = 'delivery';
-      return await receiveOriginalDelivery(ledger, paid, response, config, endpoint, trace);
+      return await receiveOriginalDelivery(ledger, paid, response, config, endpoint, trace, originalBody);
     } finally {
-      // Persist the original delivery before this advisory subprocess can fail
-      // or delay it. Only independent original-transaction proof permits delivery.
+      await response.body?.cancel().catch(() => {});
+      // Interpretation is advisory and cannot change a saved result or account for money.
       if (executor?.interpretResponse) {
-        try { await executor.interpretResponse(paymentResponseObservation(response, config, record)); }
-        catch { process.emitWarning('Protocol response interpretation unavailable; original payment reconciliation continues',
-          { code: 'PAY_PROTOCOL_OBSERVATION_FAILED' }); }
+        const interpret = async () => {
+          try { await executor.interpretResponse!(paymentResponseObservation(response, config, record)); }
+          catch { process.emitWarning('Protocol response interpretation unavailable; original payment reconciliation continues',
+            { code: 'PAY_PROTOCOL_OBSERVATION_FAILED' }); }
+        };
+        if (deferReconciliation) void interpret();
+        else await interpret();
       }
     }
   } catch (error) {

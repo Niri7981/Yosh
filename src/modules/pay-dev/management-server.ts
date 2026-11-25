@@ -34,6 +34,7 @@ import * as accountStatement from '../../app/api/agent/account/statement/route';
 import * as accountResult from '../../app/api/agent/account/result/route';
 import * as agentPurchase from '../../app/api/agent/purchase/route';
 import * as agentMppPurchase from '../../app/api/agent/mpp/purchases/route';
+import * as agentMppDeliveryRecovery from '../../app/api/agent/mpp/recover-delivery/route';
 import * as agentDelivery from '../../app/api/agent/purchases/[purchaseId]/delivery/route';
 import * as agent from '../../app/api/agent/route';
 import { ManagementApiError, managementRoute } from '../app/management-auth';
@@ -116,6 +117,7 @@ export async function serveDevelopmentRuntime<T extends { memberId: string }>(op
     ['GET /api/agent/account/statement', accountStatement.GET], ['GET /api/agent/account/result', accountResult.GET],
     ['GET /api/agent/purchase', agentPurchase.GET],
     ['POST /api/agent/mpp/purchases', agentMppPurchase.POST],
+    ['POST /api/agent/mpp/recover-delivery', agentMppDeliveryRecovery.POST],
     ['GET /api/app/notifications', notifications.GET], ['GET /api/app/overview', overview.GET], ['GET /api/app/health', health.GET],
     ['PUT /api/app/settings', settings.PUT], ['PUT /api/app/grant', grant.PUT],
     ['POST /api/app/local-host-resource', request => handleLocalHostResource(request, app)],

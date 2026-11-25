@@ -13,6 +13,7 @@ import { monetaryScopeId } from './monetary-scope';
 import { hash } from './spending-policy';
 import type { PurchaseLedger, PurchaseRecord } from './purchase-ledger';
 import type { ExternalExecutionPermit } from './execution-safety';
+import { saveBoundOriginalBody } from './original-merchant-delivery';
 import { reconcileApprovedPayment } from './approved-payment';
 import { paymentFailure, type PaymentFailureStage } from '../payment/pay-controller-diagnostics';
 
@@ -27,6 +28,7 @@ export function isMppExecutionActive(ledger: PurchaseLedger, approvalId: string)
 export type MppChargeDependencies = {
   binary: string;
   fetcher?: typeof fetch;
+  deferReconciliation?: boolean;
   /** Internal test boundary only; never populated from HTTP/MCP input. */
   prepare?: (config: PaymentConfig, record: PurchaseRecord, beforeSign: () => void, maximumNetworkFeeLamports: string) => Promise<{
     payment: MppStoredPayment; lifetime: OriginalPaymentLifetime;
@@ -54,21 +56,36 @@ export function checkMppPaymentBinding(record: PurchaseRecord, config: PaymentCo
   validateMppQuote(quote, resource, config);
 }
 
+function isMppDeliveryResponse(response: Response, endpoint: string) {
+  return [200, 201].includes(response.status) && (!response.url || response.url === endpoint)
+    && !/(?:^|,)\s*Payment(?:\s|,|$)/i.test(response.headers.get('www-authenticate') ?? '');
+}
+
+async function mppReceiptStatus(response: Response, binary: string, transaction: string | undefined) {
+  const header = response.headers.get('payment-receipt');
+  if (header === null) return 'UNAVAILABLE';
+  try {
+    const receipt = await parseMppReceipt(binary, header);
+    return receipt.reference === transaction ? 'MATCHED' : 'INVALID';
+  } catch { return 'INVALID'; }
+}
+
 export async function receiveMppDelivery(ledger: PurchaseLedger, record: PurchaseRecord, response: Response, endpoint: string, binary: string,
-  kind: 'initial' | 'retry' = 'initial', token?: string) {
+  kind: 'initial' | 'retry' = 'initial', token?: string,
+  original?: { receipt: Awaited<ReturnType<typeof mppReceiptStatus>>; body?: Promise<unknown> }) {
   const claim = token ?? ledger.claimDelivery(record.approvalId, kind);
   if (!claim) { await response.body?.cancel().catch(() => {}); return; }
   try {
-    if (![200, 201].includes(response.status) || (response.url && response.url !== endpoint)) throw new Error('MPP_DELIVERY_RESPONSE_INVALID');
-    const header = response.headers.get('payment-receipt');
-    if (header) {
-      const receipt = await parseMppReceipt(binary, header);
-      if (receipt.method !== 'solana' || receipt.status !== 'success' || receipt.reference !== record.transaction)
-        throw new Error('MPP_RECEIPT_MISMATCH');
+    if (!isMppDeliveryResponse(response, endpoint)) throw new Error('MPP_DELIVERY_RESPONSE_INVALID');
+    const receipt = original?.receipt ?? await mppReceiptStatus(response, binary, record.transaction);
+    if (receipt === 'MATCHED') {
       ledger.recordReceipt(record.approvalId, 'CONFIRMED', { transaction: record.transaction!, network: record.intent.network,
         ...(record.paymentEvidence?.version !== 1 ? { payer: record.paymentEvidence?.payer } : {}), amount: record.intent.amount });
-    } else ledger.recordReceipt(record.approvalId, 'UNAVAILABLE');
-    const data = await readBoundedResourceDelivery(response, record.intent.deliveryPolicy);
+    } else {
+      ledger.recordReceipt(record.approvalId, receipt);
+      if (receipt === 'INVALID') throw new Error('MPP_RECEIPT_MISMATCH');
+    }
+    const data = await (original?.body ?? readBoundedResourceDelivery(response, record.intent.deliveryPolicy));
     ledger.finish(record.approvalId, { transaction: record.transaction!, data }, undefined, claim);
     return { transaction: record.transaction!, data };
   } catch {
@@ -90,6 +107,7 @@ export async function executeApprovedMppCharge(ledger: PurchaseLedger, approvalI
   activeExecutions.set(ledger, active);
   const beforeSign = () => ledger.assertCanSign(approvalId, undefined, validate, permit);
   let stage: PaymentFailureStage = 'preparation';
+  let reconciliationStarted = false;
   try {
     const grant = record.intent.authority ? ledger.spendGrantById(record.intent.authority.grantId) : undefined;
     const maximumNetworkFeeLamports = grant?.maximumNetworkFeeLamports;
@@ -116,12 +134,30 @@ export async function executeApprovedMppCharge(ledger: PurchaseLedger, approvalI
     stage = 'submission';
     const response = await submit();
     try {
+      const transaction = identity.knownSignature!;
+      const receipt = await mppReceiptStatus(response, dependencies.binary, transaction);
+      let body: Promise<unknown> | undefined;
+      if (receipt === 'MATCHED' && isMppDeliveryResponse(response, endpoint)) {
+        ledger.recordReceipt(approvalId, 'UNVERIFIED', { transaction, network: identity.network, payer: identity.payer, amount: identity.amount });
+        stage = 'delivery';
+        body = readBoundedResourceDelivery(response, record.intent.deliveryPolicy);
+        const saved = await saveBoundOriginalBody(ledger, approvalId, body);
+        if (saved) {
+          ledger.unknown(approvalId);
+          if (!dependencies.deferReconciliation) {
+            reconciliationStarted = true;
+            await reconcileApprovedPayment(ledger, record.intent.idempotencyKey, config, undefined, record.ownerCardMemberId);
+          }
+          return { transaction, data: saved.data };
+        }
+      } else if (receipt !== 'MATCHED') ledger.recordReceipt(approvalId, receipt);
       stage = 'settlement_reconciliation';
+      reconciliationStarted = true;
       await reconcileApprovedPayment(ledger, record.intent.idempotencyKey, config, undefined, record.ownerCardMemberId);
       const current = ledger.getOwned(record.intent.idempotencyKey, record.ownerCardMemberId!)!;
       if (current.status !== 'PAID') throw new Error('MPP_ORIGINAL_OUTCOME_UNRESOLVED');
       stage = 'delivery';
-      return await receiveMppDelivery(ledger, current, response, endpoint, dependencies.binary);
+      return await receiveMppDelivery(ledger, current, response, endpoint, dependencies.binary, 'initial', undefined, { receipt, body });
     } finally { await response.body?.cancel().catch(() => {}); }
   } catch (error) {
     const failure = paymentFailure(error, stage, record.intent.idempotencyKey);
@@ -130,7 +166,7 @@ export async function executeApprovedMppCharge(ledger: PurchaseLedger, approvalI
     if (original?.state === 'SIGNED_NOT_SUBMITTED' || (!original && !ledger.savedMppPayment(approvalId))) ledger.failUnsubmitted(approvalId);
     else {
       ledger.unknown(approvalId);
-      await reconcileApprovedPayment(ledger, record.intent.idempotencyKey, config, undefined, record.ownerCardMemberId);
+      if (!reconciliationStarted) await reconcileApprovedPayment(ledger, record.intent.idempotencyKey, config, undefined, record.ownerCardMemberId);
     }
     throw failure;
   } finally {

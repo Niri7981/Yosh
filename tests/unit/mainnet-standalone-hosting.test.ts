@@ -382,6 +382,8 @@ it('uses the exact confirmed MPP challenge and independent fee ceiling, with no 
   const order = {requestId: input.requestId, resourceId: input.resourceId, reason: input.reason};
   expect(await app.requestMppPurchase(order, origin, principal)).toMatchObject({status: 'DENIED'});
   expect(app.ledger.getOwned(order.requestId, plan.memberId)?.intent.mpp).toEqual(quote);
+  await expect(app.recoverPurchaseDelivery(order.requestId, principal)).rejects.toThrow('MPP_PAID_DELIVERY_REQUIRED');
+  await expect(app.recoverPurchaseDelivery('unrecorded-purchase', principal)).rejects.toThrow('PURCHASE_NOT_FOUND');
   expect(merchant).toHaveBeenCalledTimes(1);
   expect(loadBuyerSigner).not.toHaveBeenCalled();
 });

@@ -31,6 +31,20 @@ it.each(['x402', 'mpp'] as const)('executes one %s purchase and returns its ledg
     protocol === 'x402' ? { operation_id: input.requestId, url: plan.url } : purchase, signal);
 });
 
+it.each(['x402', 'mpp'] as const)('returns an original %s delivery even if payment reconciliation is pending', async protocol => {
+  const pending = { ...receipt, status: 'PAYMENT_UNKNOWN', paymentStatus: 'PAYMENT_UNKNOWN', transaction: null };
+  const value = { BTC: 60000, ETH: 3000, SOL: 100 };
+  const body = Buffer.from(JSON.stringify(value));
+  const call = vi.fn().mockResolvedValueOnce(missing).mockRejectedValueOnce(new Error('Original settlement unresolved'))
+    .mockResolvedValueOnce(text(pending)).mockResolvedValueOnce(text({ purchaseId: receipt.purchaseId, encoding: 'base64',
+      contentType: 'application/json', offset: 0, nextOffset: null, totalBytes: body.length, chunk: body.toString('base64') }));
+  await expect(executeHostPurchase({ ...plan, protocol }, input, call, signal)).resolves.toMatchObject({
+    ...pending, delivery: { encoding: 'json', value },
+  });
+  expect(call.mock.calls.map(([tool]) => tool)).toEqual(['get_purchase', protocol === 'x402' ? 'curl' : 'request_mpp_purchase',
+    'get_purchase', 'get_purchase_delivery']);
+});
+
 it('only treats explicit not-found as permission to dispatch and checks member receipt bindings', async () => {
   const call = vi.fn().mockResolvedValueOnce({ isError: true, content: [{ type: 'text', text: 'AGENT_UNAUTHORIZED: read only.' }] })
     .mockResolvedValueOnce(text({ ...receipt, resourceId: 'another' }));

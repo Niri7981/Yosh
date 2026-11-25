@@ -184,23 +184,28 @@ it('keeps newly added fee consent inside the active writer fence and MPP claims 
   } finally { value.close(); }
 });
 
+function reserveSignedMppFixture(value: PurchaseLedger, f: ReturnType<typeof mppFixture>) {
+  value.setDailyLimit('1000000');
+  value.createSpendGrant({ totalLimit: '1000000', singleLimit: '500000', expiresAt: now + 3_600_000 }, principal,
+    { resourceId: 'mpp-resource', providerId: 'fixture-provider', operation: PAID_RESOURCE_PURCHASE_OPERATION,
+      network: f.config.network, assetId: f.config.mint, assetDecimals: 6, payTo: f.config.merchant,
+      paymentScheme: 'mpp_charge', maximumNetworkFeeLamports: '10001' }, now, 'live_devnet');
+  const binding = value.spendAuthority(principal, PAID_RESOURCE_PURCHASE_OPERATION, now, 'live_devnet');
+  const request = SpendIntentSchema.parse({ ...intent('original-mpp', 'mpp-resource', binding), amount: f.quote.amount,
+    payTo: f.quote.payTo, mpp: f.quote, quoteFingerprint: hash(f.quote), expiresAt: f.quote.expiresAt });
+  const record = value.reserve(request, f.quote, now);
+  value.claim(record.approvalId, now);
+  const original = OriginalPaymentRecordSchema.parse({ version: 1, purchaseId: record.intent.id,
+    requestId: record.intent.idempotencyKey, monetaryScope: record.monetaryScope, scopeId: monetaryScopeId(record.monetaryScope),
+    executionBinding: request.executionBinding, quoteFingerprint: request.quoteFingerprint, payloadHash: hash(f.payment),
+    recordedAt: now, identity: f.identity });
+  return { record, original };
+}
+
 it.each(['transaction ID', 'explorer URL'])('retains submitted MPP evidence across restart, rejects credentials and delivers a public %s', publicReference => {
   const f = mppFixture(), path = temporaryLedger(); let value = ledger(path);
   try {
-    value.setDailyLimit('1000000');
-    value.createSpendGrant({ totalLimit: '1000000', singleLimit: '500000', expiresAt: now + 3_600_000 }, principal,
-      { resourceId: 'mpp-resource', providerId: 'fixture-provider', operation: PAID_RESOURCE_PURCHASE_OPERATION,
-        network: f.config.network, assetId: f.config.mint, assetDecimals: 6, payTo: f.config.merchant,
-        paymentScheme: 'mpp_charge', maximumNetworkFeeLamports: '10001' }, now, 'live_devnet');
-    const binding = value.spendAuthority(principal, PAID_RESOURCE_PURCHASE_OPERATION, now, 'live_devnet');
-    const request = SpendIntentSchema.parse({ ...intent('original-mpp', 'mpp-resource', binding), amount: f.quote.amount,
-      payTo: f.quote.payTo, mpp: f.quote, quoteFingerprint: hash(f.quote), expiresAt: f.quote.expiresAt });
-    const record = value.reserve(request, f.quote, now);
-    value.claim(record.approvalId, now);
-    const original = OriginalPaymentRecordSchema.parse({ version: 1, purchaseId: record.intent.id,
-      requestId: record.intent.idempotencyKey, monetaryScope: record.monetaryScope, scopeId: monetaryScopeId(record.monetaryScope),
-      executionBinding: request.executionBinding, quoteFingerprint: request.quoteFingerprint, payloadHash: hash(f.payment),
-      recordedAt: now, identity: f.identity });
+    const { record, original } = reserveSignedMppFixture(value, f);
     expect(() => value.savePayload(record.approvalId, f.payment)).toThrow('MPP_ORIGINAL_PAYMENT_REQUIRED');
     expect(value.savedMppPayment(record.approvalId)).toBeUndefined();
     value.savePayload(record.approvalId, f.payment, undefined, original);
@@ -229,9 +234,136 @@ it.each(['transaction ID', 'explorer URL'])('retains submitted MPP evidence acro
     expect(f.identity.buyerSignature).toBe(f.signature); // MPP's sole signer signature is the public transaction ID.
     value.finish(record.approvalId, { transaction: f.signature, data }, now, delivery);
     expect(value.getOwned('original-mpp', principal.cardMemberId)).toMatchObject({ status: 'PAID', deliveryStatus: 'COMPLETE', data });
+    expect(readAgentPurchase(value, principal.cardMemberId, { purchaseId: 'original-mpp' })).not.toHaveProperty('deliveryRecovery');
+    expect(readAgentPurchase(value, principal.cardMemberId, { purchaseId: 'original-mpp' }, { includeDeliveryRecovery: true })?.deliveryRecovery)
+      .toMatchObject({ status: 'COMPLETE', retryCount: 0, retryLimit: 4, lastError: null });
     value.close(); value = ledger(path);
     expect(value.getOwned('original-mpp', principal.cardMemberId)).toMatchObject({ status: 'PAID', deliveryStatus: 'COMPLETE', data });
     expect(value.managedSummary(now)).toMatchObject({ reserved: '0', paid: f.quote.amount });
+  } finally { value.close(); }
+});
+
+it.each(['confirmed', 'failed'])('retains original merchant data across restart and a later %s settlement', outcome => {
+  const f = mppFixture(), path = temporaryLedger(); let value = ledger(path);
+  try {
+    const { record, original } = reserveSignedMppFixture(value, f);
+    const id = record.approvalId, data = { price: 90, asset: 'SOL' };
+    const read = () => value.getOwned('original-mpp', principal.cardMemberId);
+    value.savePayload(id, f.payment, undefined, original);
+    expect(() => value.saveOriginalMerchantDelivery(id, data)).toThrow('ORIGINAL_SUBMISSION_REQUIRED');
+    value.markSubmissionAttempt(id, undefined, now);
+    expect(() => value.saveOriginalMerchantDelivery(id, { echo: f.payment.credential })).toThrow('PAY_CREDENTIAL_REFLECTION_REJECTED');
+    expect(read()).toMatchObject({ status: 'PAYING', deliveryStatus: 'NOT_PAID' });
+    value.recordReceipt(id, 'UNVERIFIED', { transaction: f.signature, network: f.identity.network, payer: f.identity.payer, amount: f.identity.amount });
+    value.saveOriginalMerchantDelivery(id, data);
+    expect(read()).toMatchObject({ status: 'PAYING', deliveryStatus: 'COMPLETE', data });
+    expect(value.managedSummary(now)).toMatchObject({ paid: '0', reserved: f.quote.amount });
+    value.close(); value = ledger(path);
+    value.recoverUnsubmittedOnStartup();
+    value.recoverSubmittedOnStartup();
+    expect(read()).toMatchObject({ status: 'PAYMENT_UNKNOWN', deliveryStatus: 'COMPLETE', data });
+    const scope = monetaryScopeId(record.monetaryScope);
+    expect(value.reconciliation.due(scope)).toEqual([{ purchaseId: record.intent.id, requestId: 'original-mpp', ownerCardMemberId: principal.cardMemberId }]);
+    expect(value.dueDeliveryRecovery()).toEqual([]);
+    expect(value.getOwned('original-mpp', randomUUID())).toBeUndefined();
+    expect(value.saveOriginalMerchantDelivery(id, { price: 105 })).toEqual(data);
+    if (outcome === 'confirmed') value.confirmOriginalPayment(id, f.signature, 'confirmed', now);
+    else value.failOriginalPayment(id, f.signature);
+    expect(read()).toMatchObject({ status: outcome === 'confirmed' ? 'PAID' : 'FAILED', deliveryStatus: 'COMPLETE',
+      receiptStatus: outcome === 'confirmed' ? 'CONFIRMED' : 'UNVERIFIED', data });
+    expect(value.managedSummary(now)).toMatchObject({ paid: outcome === 'confirmed' ? f.quote.amount : '0', reserved: '0' });
+    expect(value.eventsForOwner('original-mpp', principal.cardMemberId).filter(event => event.type === 'delivery.COMPLETE')).toHaveLength(1);
+    expect(value.reconciliation.due(scope)).toEqual([]);
+    expect(value.pendingRecovery()).toEqual([]);
+    expect(value.claimDelivery(id, 'retry', undefined, now)).toBeUndefined();
+  } finally { value.close(); }
+});
+
+it.each(['transaction', 'network', 'payer', 'amount'] as const)('leaves a receipt with a different %s unverified after chain confirmation', field => {
+  const value = ledger(), f = mppFixture();
+  try {
+    const { record, original } = reserveSignedMppFixture(value, f), id = record.approvalId;
+    value.savePayload(id, f.payment, undefined, original);
+    value.markSubmissionAttempt(id, undefined, now);
+    const receipt = { transaction: f.signature, network: f.identity.network, payer: f.identity.payer, amount: f.identity.amount };
+    value.recordReceipt(id, 'UNVERIFIED', { ...receipt, [field]: 'different' });
+    value.confirmOriginalPayment(id, f.signature, 'confirmed', now);
+    const read = () => value.getOwned('original-mpp', principal.cardMemberId);
+    expect(read()).toMatchObject({ status: 'PAID', receiptStatus: 'UNVERIFIED' });
+    // A matching observation may arrive after the proof, and x402 permits omitting amount.
+    value.recordReceipt(id, 'UNVERIFIED', { transaction: receipt.transaction, network: receipt.network, payer: receipt.payer });
+    expect(read()?.receiptStatus).toBe('CONFIRMED');
+  } finally { value.close(); }
+});
+
+it.each(['historical refusal', 'new transient failures'])('bounds confirmed MPP credential delivery across connections and restart: %s', async scenario => {
+  const path = temporaryLedger(), f = mppFixture();
+  let value = ledger(path);
+  try {
+    const { record, original } = reserveSignedMppFixture(value, f);
+    const id = record.approvalId;
+    value.savePayload(id, f.payment, undefined, original);
+    value.markSubmissionAttempt(id, undefined, now);
+    value.unknown(id);
+    const validate = () => {};
+    expect(value.claimMppCredentialDelivery(id, validate, true, now)).toBeUndefined();
+    value.confirmOriginalPayment(id, f.signature, 'confirmed', now);
+    if (scenario === 'historical refusal') {
+      value.blockDeliveryRecovery(id, 'DELIVERY_RECOVERY_UNSUPPORTED');
+      expect(value.dueDeliveryRecovery(now)).toHaveLength(0);
+      expect(value.claimMppCredentialDelivery(id, validate, false, now)).toBeUndefined();
+    } else {
+      const firstResponse = value.claimDelivery(id, 'initial', undefined, now)!;
+      value.failDeliveryAttempt(id, firstResponse, 'DELIVERY_RESPONSE_INVALID', now);
+      expect(value.getOwned('original-mpp', principal.cardMemberId)?.deliveryStatus).toBe('PENDING');
+    }
+    const worker = fork(resolve('tests/helpers/mpp-challenge-worker.ts'), [], { execArgv: ['--import', 'tsx'], silent: true,
+      env: { PATH: process.env.PATH, NODE_ENV: 'test' } });
+    let claim: string;
+    const exited = once(worker, 'exit');
+    try {
+      const ready = once(worker, 'message');
+      worker.send({ path, now, intent: record.intent, quote: f.quote });
+      expect((await ready)[0]).toEqual({ ready: true });
+      const result = once(worker, 'message');
+      worker.send({ claimDelivery: id });
+      const localClaim = value.claimMppCredentialDelivery(id, validate, true, now);
+      const remoteClaim = z.object({ token: z.string().uuid().nullable() }).parse((await result)[0]).token;
+      expect([localClaim, remoteClaim].filter(Boolean)).toHaveLength(1);
+      claim = localClaim ?? remoteClaim!;
+      await exited;
+    } finally { worker.kill(); }
+    value.close(); value = ledger(path); value.recoverDeliveryClaimsOnStartup();
+    expect(value.getOwned('original-mpp', principal.cardMemberId)?.deliveryRecovery).toMatchObject({
+      status: 'PENDING', retryCount: 1, nextAttemptAt: now + 1000, lastError: 'DELIVERY_ATTEMPT_INTERRUPTED',
+    });
+    expect(value.claimMppCredentialDelivery(id, validate, true, now)).toBeUndefined();
+    let attemptAt = now + 1000;
+    if (scenario === 'historical refusal') {
+      const next = value.claimMppCredentialDelivery(id, validate, false, attemptAt)!;
+      value.rejectMppCredentialDelivery(id, claim);
+      expect(value.getOwned('original-mpp', principal.cardMemberId)?.deliveryStatus).toBe('DELIVERING');
+      value.rejectMppCredentialDelivery(id, next);
+      expect(value.getOwned('original-mpp', principal.cardMemberId)?.deliveryRecovery).toMatchObject({
+        status: 'UNSUPPORTED', retryCount: 2, lastError: 'MPP_DELIVERY_REPLAY_REJECTED',
+      });
+    } else {
+      for (let attempt = 2; attempt <= 4; attempt++) {
+        const next = value.claimMppCredentialDelivery(id, validate, false, attemptAt)!;
+        expect(next).toBeTypeOf('string');
+        value.failDeliveryAttempt(id, next, 'DELIVERY_RESPONSE_UNAVAILABLE', attemptAt);
+        attemptAt += 1000 * 2 ** (attempt - 1);
+      }
+      expect(value.getOwned('original-mpp', principal.cardMemberId)?.deliveryRecovery).toMatchObject({
+        status: 'EXHAUSTED', retryCount: 4,
+      });
+    }
+    value.close(); value = ledger(path);
+    expect(value.claimMppCredentialDelivery(id, validate, true, attemptAt + 60000)).toBeUndefined();
+    expect(value.getOwned('original-mpp', principal.cardMemberId)).toMatchObject({ status: 'PAID', transaction: f.signature });
+    expect(value.savedMppPayment(id)).toEqual(f.payment);
+    expect(value.savedOriginalPayment(id)?.evidence).toEqual(original);
+    expect(value.managedSummary(now)).toMatchObject({ paid: f.quote.amount, reserved: '0' });
   } finally { value.close(); }
 });
 

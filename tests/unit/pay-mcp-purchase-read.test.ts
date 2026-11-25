@@ -41,6 +41,8 @@ function fixture(policyCode: string, missing = false, mppError?: string, capabil
       return Response.json({ purchaseId: 'pay_original', offset: 0, nextOffset: null, chunk: 'e30=', totalBytes: 2 });
     if (input.endsWith('/api/agent/mpp/purchases')) return mppError
       ? Response.json({ code: mppError }, { status: 409 }) : Response.json(summary);
+    if (input.endsWith('/api/agent/mpp/recover-delivery'))
+      return Response.json({ code: 'MPP_PAID_DELIVERY_REQUIRED' }, { status: 409 });
     if (input.endsWith('/api/agent/discovery')) return Response.json({ code: 'OFFLINE_RESOURCE_LIFECYCLE_UNAVAILABLE' }, { status: 409 });
     throw new Error('UNEXPECTED_AGENT_READ');
   });
@@ -87,7 +89,7 @@ it('the plugin lists only upstream curl and blocks guessed upstream tools before
   const f = fixture('PAYMENTS_PAUSED');
   try {
     expect(f.listTools()).toEqual(['curl', 'get_spending_status', 'get_purchase', 'get_purchase_delivery', 'list_account_purchases', 'read_account_result',
-      'request_mpp_purchase', 'quote_mpp_resource', 'discover_x402_resource', 'register_x402_resource', 'quote_x402_resource']);
+      'request_mpp_purchase', 'recover_purchase_delivery', 'quote_mpp_resource', 'discover_x402_resource', 'register_x402_resource', 'quote_x402_resource']);
     const before = f.forwarded.length;
     const forbidden = ['create_skill', 'get_balance', 'get_catalog_entry', 'list_catalog', 'search_catalog',
       'sell_inference', 'topup', 'recover_payment', 'future_upstream_tool'];
@@ -113,6 +115,22 @@ it.each(['PAYMENTS_PAUSED', 'SPEND_GRANT_REQUIRED', 'DAILY_BUDGET_EXCEEDED'])('r
     expect(JSON.parse(f.result(1).content[1].text)).toEqual({ yoshPurchase: f.summary });
     expect(f.fetcher).toHaveBeenCalledOnce();
     expect(f.fetcher.mock.calls[0][0]).toContain('/api/agent/purchase?operationId=original-op');
+  } finally { f.close(); }
+});
+
+it('points to the saved result when Pay still reports unresolved settlement', async () => {
+  const f = fixture('SPEND_GRANT_ALLOWED');
+  try {
+    Object.assign(f.summary, { status: 'PAYMENT_UNKNOWN', paymentStatus: 'PAYMENT_UNKNOWN', deliveryStatus: 'COMPLETE' });
+    f.send(1, 'curl', { operation_id: 'original-op', url: 'http://127.0.0.1:14449/api/paid/fixture' });
+    f.child.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: 1, result: { isError: true,
+      content: [{ type: 'text', text: 'PAY_ORIGINAL_OUTCOME_UNRESOLVED' }] } }) + '\n');
+    await vi.waitFor(() => expect(f.responses).toHaveLength(1));
+    expect(f.result(1).isError).toBe(true);
+    expect(JSON.parse(f.result(1).content[1].text)).toEqual({
+      yoshPurchase: f.summary, next: { tool: 'get_purchase_delivery', purchaseId: f.summary.purchaseId },
+    });
+    expect(f.fetcher).toHaveBeenCalledOnce();
   } finally { f.close(); }
 });
 
@@ -169,6 +187,23 @@ it('dispatches MPP purchases only to the authenticated local backend and preserv
     expect(f.fetcher.mock.calls[0][1]).toMatchObject({ method: 'POST', redirect: 'error',
       headers: { 'content-type': 'application/json' } });
     expect(JSON.parse(String(f.fetcher.mock.calls[0][1].body))).toEqual(input);
+    expect(f.forwarded).toHaveLength(0);
+  } finally { f.close(); }
+});
+
+it('routes delivery recovery to the dedicated backend with only the original purchase ID', async () => {
+  const f = fixture('APPROVED');
+  try {
+    f.send(1, 'recover_purchase_delivery', { purchaseId: 'pay_original', credential: 'injected' });
+    await vi.waitFor(() => expect(f.result(1).isError).toBe(true));
+    expect(f.fetcher).not.toHaveBeenCalled();
+    f.send(2, 'recover_purchase_delivery', { purchaseId: 'pay_original' });
+    await vi.waitFor(() => expect(f.result(2).content[0].text).toContain('MPP_PAID_DELIVERY_REQUIRED'));
+    expect(f.fetcher).toHaveBeenCalledOnce();
+    const [[url, options]] = f.fetcher.mock.calls;
+    expect(url).toBe('http://127.0.0.1:14449/api/agent/mpp/recover-delivery');
+    expect(options).toMatchObject({ method: 'POST', redirect: 'error' });
+    expect(JSON.parse(String(options.body))).toEqual({ purchaseId: 'pay_original' });
     expect(f.forwarded).toHaveLength(0);
   } finally { f.close(); }
 });

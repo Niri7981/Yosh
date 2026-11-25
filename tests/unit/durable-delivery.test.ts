@@ -2,7 +2,8 @@ import { DatabaseSync } from 'node:sqlite';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { generateKeyPairSigner } from '@solana/kit';
+import { generateKeyPairSigner, getBase58Decoder } from '@solana/kit';
+import { VersionedTransaction } from '@solana/web3.js';
 import { encodePaymentResponseHeader } from '@x402/core/http';
 import { afterEach, expect, it, vi } from 'vitest';
 import { resolvePaymentEnvironment } from '../../src/modules/payment/payment-environment';
@@ -69,13 +70,21 @@ async function fixture(capability: DeliveryRecoveryCapability | null = TEST_CACH
   });
   vi.mocked(reconcileStoredOriginalPayment).mockResolvedValue({ status: 'CONFIRMED', transaction: FIXTURE_TRANSACTION_SIGNATURE, confirmationStatus: 'finalized' });
   const initial = vi.fn<typeof fetch>().mockRejectedValue(new Error('Response lost')); vi.stubGlobal('fetch', initial);
-  const paid = () => executeApprovedPayment(ledger, record.approvalId, config, resource.request.url);
+  const paid = (deferReconciliation = false) => executeApprovedPayment(ledger, record.approvalId, config, resource.request.url,
+    undefined, undefined, undefined, deferReconciliation);
+  const settleOriginal = async () => {
+    const payload = ledger.savedPayload(record.approvalId)!;
+    const transaction = VersionedTransaction.deserialize(Buffer.from(String(payload.payload.transaction), 'base64'));
+    expect(transaction.signatures[0].every(byte => byte === 0)).toBe(true);
+    const signature = await crypto.subtle.sign('Ed25519', fee.keyPair.privateKey, new Uint8Array(transaction.message.serialize()));
+    return getBase58Decoder().decode(new Uint8Array(signature));
+  };
   const retry = (fetcher: typeof fetch, activeLedger = ledger) => recoverApprovedPayment(activeLedger, intent.idempotencyKey, config,
     resource.request.url, undefined, principal.cardMemberId, { fetcher });
-  const response = (receipt = true, body = '{"result":"original-data"}') => new Response(body, { headers: {
+  const response = (receipt = true, body = '{"result":"original-data"}', transaction = FIXTURE_TRANSACTION_SIGNATURE) => new Response(body, { headers: {
     'content-type': 'application/json', ...(receipt ? { 'PAYMENT-RESPONSE': encodePaymentResponseHeader({ success: true,
-      network: config.network, payer: config.buyer, transaction: FIXTURE_TRANSACTION_SIGNATURE, amount: '10000' }) } : {}) } });
-  return { ledger, record, get config() { return config; }, resource, intent, path, options, principal, paid, retry, initial, response,
+      network: config.network, payer: config.buyer, transaction, amount: '10000' }) } : {}) } });
+  return { ledger, record, get config() { return config; }, resource, intent, path, options, principal, paid, retry, initial, response, settleOriginal,
     deactivate: (state: 'DISABLED' | 'REMOVED' = 'DISABLED') => {
       ledger.resources.setState(resource.resourceId, state);
       config = { ...config, registeredResources: ledger.resources.active() };
@@ -250,6 +259,45 @@ it('inactive resource recovery cannot read another owner or send the original cr
   });
   expect(f.ledger.savedOriginalPayment(f.record.approvalId)).toEqual(original);
   expect(prepareSolanaPayment).toHaveBeenCalledOnce(); expect(loadBuyerSigner).toHaveBeenCalledOnce();
+});
+
+it('returns a sponsored original response immediately and reconciles the same transfer after reopening', async () => {
+  const f = await fixture({ kind: 'none' }, 'live_mainnet');
+  let signature = '';
+  f.initial.mockImplementation(async () => {
+    signature = await f.settleOriginal();
+    return f.response(true, '{"price":125}', signature);
+  });
+  expect(await f.paid(true)).toEqual({ transaction: signature, data: { price: 125 } });
+  expect(reconcileStoredOriginalPayment).not.toHaveBeenCalled();
+  expect(f.ledger.getOwned(f.intent.idempotencyKey, f.principal.cardMemberId)).toMatchObject({
+    status: 'PAYMENT_UNKNOWN', deliveryStatus: 'COMPLETE', receiptStatus: 'UNVERIFIED', data: { price: 125 },
+  });
+  expect(f.ledger.managedSummary(f.now(), 'live_mainnet')).toMatchObject({ paid: '0', reserved: '10000' });
+  f.ledger.close();
+  const reopened = f.reopen();
+  vi.mocked(reconcileStoredOriginalPayment).mockResolvedValue({ status: 'CONFIRMED', transaction: signature });
+  const noMerchantReplay = vi.fn<typeof fetch>();
+  await f.retry(noMerchantReplay, reopened);
+  expect(reopened.getOwned(f.intent.idempotencyKey, f.principal.cardMemberId)).toMatchObject({
+    status: 'PAID', deliveryStatus: 'COMPLETE', receiptStatus: 'CONFIRMED', transaction: signature, data: { price: 125 },
+  });
+  expect(reopened.managedSummary(f.now(), 'live_mainnet')).toMatchObject({ paid: '10000', reserved: '0' });
+  expect(noMerchantReplay).not.toHaveBeenCalled();
+  expect(f.initial).toHaveBeenCalledOnce(); expect(prepareSolanaPayment).toHaveBeenCalledOnce();
+});
+
+it.each(['missing receipt', 'other signature', 'invalid body'] as const)('does not publish an unverified x402 response with %s', async reason => {
+  const f = await fixture();
+  vi.mocked(reconcileStoredOriginalPayment).mockResolvedValue({ status: 'UNKNOWN' });
+  f.initial.mockImplementation(async () => f.response(reason !== 'missing receipt', reason === 'invalid body' ? '{' : '{"price":125}',
+    reason === 'other signature' ? FIXTURE_TRANSACTION_SIGNATURE : await f.settleOriginal()));
+  await expect(f.paid(true)).rejects.toThrow();
+  expect(f.ledger.getOwned(f.intent.idempotencyKey, f.principal.cardMemberId)).toMatchObject({
+    status: 'PAYMENT_UNKNOWN', deliveryStatus: 'NOT_PAID',
+  });
+  expect(f.ledger.getOwned(f.intent.idempotencyKey, f.principal.cardMemberId)?.data).toBeUndefined();
+  expect(f.initial).toHaveBeenCalledOnce();
 });
 
 it('persists independent PAID, receipt CONFIRMED and delivered success without a delivery retry', async () => {

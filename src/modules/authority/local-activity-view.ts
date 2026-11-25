@@ -71,6 +71,8 @@ function activityIcon(agent,environment,network){
 }
 function activityOutcome(p,environment){
   const status=p.status||p.paymentStatus;
+  if(p.deliveryStatus==='COMPLETE'&&['PAYING','PAYMENT_UNKNOWN'].includes(p.paymentStatus))return {label:'已交付 · 付款核对中',tone:'pending',note:'API 结果已保存，可以用原购买编号读取。Yosh 正在核对链上付款。'};
+  if(p.deliveryStatus==='COMPLETE'&&p.paymentStatus==='FAILED')return {label:'已交付 · 付款失败',tone:'negative',note:'API 结果已保存。链上核对显示原付款失败。'};
   if(p.paymentStatus==='PAYMENT_UNKNOWN')return {label:'核对原付款',tone:'pending',note:'付款结果尚未确定。保留原购买记录与预占额度，勿新建替代付款。'};
   if(p.paymentStatus==='PAID'){
     if(environment==='offline')return {label:p.deliveryStatus==='COMPLETE'?'模拟完成':'模拟付款',tone:'neutral',note:'离线测试记录，不代表真实资金付款。'};

@@ -20,7 +20,7 @@ export async function GET(request: Request, context: Context) {
   if (!id.success || !offset.success || [...query.keys()].some(key => key !== 'offset'))
     return Response.json({ code: 'INVALID_DELIVERY_CURSOR' }, { status: 400 });
   const record = app.ledger.getOwned(id.data, principal.cardMemberId);
-  if (!record || record.status !== 'PAID' || record.deliveryStatus !== 'COMPLETE' || record.data === undefined)
+  if (!record || record.deliveryStatus !== 'COMPLETE' || record.data === undefined)
     return Response.json({ code: 'DELIVERY_NOT_AVAILABLE' }, { status: 404 });
   const data = Buffer.from(JSON.stringify(record.data));
   if (data.length > MAX_SERIALIZED_RESOURCE_DELIVERY_BYTES || offset.data > data.length) return Response.json({ code: 'DELIVERY_NOT_AVAILABLE' }, { status: 404 });

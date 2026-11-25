@@ -26,6 +26,7 @@ import { executeApprovedPayment, paymentEndpointForIntent, recoverApprovedPaymen
 import type { PaymentExecutor } from '../payment/payment-execution-contract';
 import type { MppChargeDependencies } from '../purchases/approved-mpp-charge';
 import { requestMppResourcePurchase } from '../purchases/request-mpp-resource-purchase';
+import { recoverMppCharge } from '../purchases/recover-mpp-charge';
 import { fetchMppResourceQuote } from '../payment/mpp-resource-charge';
 import { assertIsolatedPaymentDirectory } from '../payment/isolated-pay-execution';
 import { createPayExecution } from '../payment/mainnet-pay-execution';
@@ -432,13 +433,35 @@ export class AppRuntime {
     // Startup and scheduled recovery use the same verified protocol executable.
     return binary;
   }
+  private mppDeliveryOptions() {
+    const { binary, fetcher } = this.mppDependencies();
+    return { binary, fetcher, signal: this.reconciliationAbort.signal };
+  }
   requestMppPurchase(input: unknown, origin: string, principal: SpendPrincipal) {
-    const dependencies = this.mppDependencies();
+    const dependencies = { ...this.mppDependencies(), deferReconciliation: true };
     return this.runExternalPaymentOperation(async () => {
       await this.start(origin);
       const config = this.paymentConfiguration('simulated');
       return requestMppResourcePurchase(input, { config, ledger: this.ledger, principal, dependencies,
         assertAccepting: () => { if (!this.accepting) throw new Error('SERVICE_STOPPING'); } });
+    });
+  }
+  recoverPurchaseDelivery(purchaseId: string, principal: SpendPrincipal) {
+    return this.runExternalPaymentOperation(async () => {
+      const owner = principal.cardMemberId;
+      const record = this.ledger.getOwned(purchaseId, owner);
+      if (!record) throw new Error('PURCHASE_NOT_FOUND');
+      if (record.status !== 'PAID' || !record.intent.mpp || !record.intent.httpRequest
+        || this.ledger.savedOriginalPayment(record.approvalId)?.state !== 'CONFIRMED')
+        throw new Error('MPP_PAID_DELIVERY_REQUIRED');
+      await this.initializeWallet();
+      if (!this.accepting) throw new Error('SERVICE_STOPPING');
+      this.ledger.assertCardMemberActive(owner);
+      const config = this.paymentConfiguration('simulated');
+      await recoverMppCharge(this.ledger, record, config, record.intent.httpRequest.url, {
+        ...this.mppDeliveryOptions(), replayCredential: true,
+      });
+      return readAgentPurchase(this.ledger, owner, { purchaseId }, { includeDeliveryRecovery: true })!;
     });
   }
   quoteMppResource(resourceId: string, sample: unknown, memberId: string) {
@@ -480,6 +503,7 @@ export class AppRuntime {
     // The Electron single-instance owner starts this once before new purchases.
     this.ledger.recoverUnclaimedExternalAuthorizationsOnStartup();
     this.ledger.recoverUnsubmittedOnStartup();
+    this.ledger.recoverSubmittedOnStartup();
     this.ledger.recoverDeliveryClaimsOnStartup();
     this.ledger.reconciliation.recoverClaimsOnStartup();
     try {
@@ -492,7 +516,7 @@ export class AppRuntime {
         for (const item of pending) {
           if (!this.accepting) break;
           try { let record = (item.ownerCardMemberId ? this.ledger.getOwned(item.requestId, item.ownerCardMemberId) : this.ledger.getLegacy(item.requestId));
-            // Exclusive startup has no live submitting executor. Preserve every possible send.
+            // Signed legacy rows may predate the durable submission marker.
             if (record?.status === 'PAYING') {
               this.ledger.unknown(record.approvalId);
               record = (item.ownerCardMemberId ? this.ledger.getOwned(item.requestId, item.ownerCardMemberId) : this.ledger.getLegacy(item.requestId));
@@ -501,7 +525,7 @@ export class AppRuntime {
             if (record) await recoverApprovedPayment(this.ledger, item.requestId, config,
               paymentEndpointForIntent(origin, record.intent), () => {}, item.ownerCardMemberId,
               { automatic: true, signal: this.reconciliationAbort.signal,
-                ...(record.intent.mpp ? { binary: this.mppRecoveryBinary() } : {}) }); }
+                ...(record.intent.mpp ? this.mppDeliveryOptions() : {}) }); }
           catch { /* Keep mismatched or unavailable original payments frozen. */ }
         }
       }
@@ -538,11 +562,15 @@ export class AppRuntime {
       if (config.mode !== this.purchaseExecutionMode() || config.buyer !== wallet.address) return;
       for (const item of due) {
         if (!this.accepting) break;
-        const record = (item.ownerCardMemberId ? this.ledger.getOwned(item.requestId, item.ownerCardMemberId) : this.ledger.getLegacy(item.requestId));
-        if (!record) continue;
-        await recoverApprovedPayment(this.ledger, item.requestId, config, paymentEndpointForIntent(origin, record.intent),
-          () => {}, item.ownerCardMemberId, { fetcher: this.environment.isProduction ? undefined : this.dependencies.fetcher,
-            ...(record.intent.mpp ? { binary: this.mppRecoveryBinary() } : {}) });
+        try {
+          const record = item.ownerCardMemberId ? this.ledger.getOwned(item.requestId, item.ownerCardMemberId) : this.ledger.getLegacy(item.requestId);
+          if (!record) continue;
+          await recoverApprovedPayment(this.ledger, item.requestId, config, paymentEndpointForIntent(origin, record.intent),
+            () => {}, item.ownerCardMemberId, { fetcher: this.environment.isProduction ? undefined : this.dependencies.fetcher,
+              ...(record.intent.mpp ? this.mppDeliveryOptions() : {}) });
+        } catch {
+          // An unavailable adapter or an unreadable order must not strand other paid deliveries.
+        }
       }
       this.recoveryStatus = this.ledger.pendingRecovery().length ? 'pending' : 'complete';
     } catch { this.recoveryStatus = 'pending'; }

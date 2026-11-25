@@ -9,10 +9,10 @@ vi.mock('../../src/modules/app/app-runtime', () => ({ appRuntime: () => ({
 }) }));
 import { GET } from '../../src/app/api/agent/purchases/[purchaseId]/delivery/route';
 
-it('returns bounded, resumable bytes only for an owned completed delivery', async () => {
+it.each(['PAYING', 'PAYMENT_UNKNOWN', 'PAID', 'FAILED'])('returns owned completed bytes regardless of the separate %s payment state', async status => {
   state.owner = 'member-1'; state.capabilities = ['read'];
   const payload = { result: 'data'.repeat(12_000) };
-  state.record = { status: 'PAID', deliveryStatus: 'COMPLETE', data: payload };
+  state.record = { status, deliveryStatus: 'COMPLETE', data: payload };
   const pieces: Buffer[] = [];
   let offset = 0; let count = 0;
   do {

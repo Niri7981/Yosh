@@ -28,7 +28,7 @@ it.each(['recoverOnStartup', 'retryDueDeliveries'])('threads the trusted Mainnet
   vi.stubEnv('YOSH_MPP_PROTOCOL_ENGINE', undefined);
   const item = { requestId: 'original-001', ownerCardMemberId: 'member' };
   const record = { status: 'PAID', intent: { mpp: { protocol: 'mpp' }, httpRequest: { method: 'GET', url: 'https://merchant.example/data', headers: {}, access: 'https' } } };
-  const ledger = { recoverUnclaimedExternalAuthorizationsOnStartup: vi.fn(), recoverUnsubmittedOnStartup: vi.fn(),
+  const ledger = { recoverUnclaimedExternalAuthorizationsOnStartup: vi.fn(), recoverUnsubmittedOnStartup: vi.fn(), recoverSubmittedOnStartup: vi.fn(),
     recoverDeliveryClaimsOnStartup: vi.fn(), reconciliation: { recoverClaimsOnStartup: vi.fn() },
     pendingRecovery: () => [item], dueDeliveryRecovery: () => [item], getOwned: () => record };
   const runtime = { ledger, accepting: true, environment: { isProduction: true },

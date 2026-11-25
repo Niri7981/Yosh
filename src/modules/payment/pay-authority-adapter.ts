@@ -34,7 +34,7 @@ type Attempt = { facts: Facts; digest: string; generation: number; purchaseId: s
  * reconciliation own the decision. Mainnet requires explicit production
  * enablement and the product Grant bound atomically to each new purchase. */
 export function createPayAuthorityAdapter(options: { directory: string; runtime: () => AppRuntime; config: () => PaymentConfig;
-  executor: PaymentExecutor; origin: string; rpcUrl: string; mainnet?: true; devnet?: true; offlineResources?: OfflineResourcePolicy }) {
+  executor: PaymentExecutor; origin: string; rpcUrl: string; mainnet?: true; devnet?: true; deferReconciliation?: boolean; offlineResources?: OfflineResourcePolicy }) {
   if (options.mainnet && options.devnet) throw new Error('PAY_NETWORK_CONFIGURATION_CONFLICT');
   if (options.devnet) {
     if (process.env.YOSH_PAY_MCP_DEVNET !== '1' || !isDevnetDevelopment(options.directory)) throw new Error('PAY_DEVNET_CONFIGURATION_REQUIRED');
@@ -119,9 +119,9 @@ export function createPayAuthorityAdapter(options: { directory: string; runtime:
   };
   const response = (attempt: Attempt, principal: SpendPrincipal) => {
     const record = options.runtime().ledger.getOwned(attempt.purchaseId, principal.cardMemberId);
-    if (!record || record.status !== 'PAID' || record.deliveryStatus !== 'COMPLETE' || record.data === undefined) throw new Error('PAY_ORIGINAL_OUTCOME_UNRESOLVED');
-    // Raw merchant headers/body stay in Yosh: arbitrary fields may echo a payment
-    // credential. Return the validated, persisted Resource data only, after proof.
+    if (!record || record.deliveryStatus !== 'COMPLETE' || record.data === undefined) throw new Error('PAY_ORIGINAL_OUTCOME_UNRESOLVED');
+    // The controlled Pay response carries only the saved resource. The MCP
+    // wrapper reports the ledger's payment state separately for this operation.
     const body = Buffer.from(JSON.stringify(record.data));
     const original = options.runtime().ledger.savedOriginalPayment(record.approvalId);
     if (!original) throw new Error('PAY_ORIGINAL_EVIDENCE_REQUIRED');
@@ -242,9 +242,12 @@ export function createPayAuthorityAdapter(options: { directory: string; runtime:
           if (provenance.request_hash !== hash(facts.request) || provenance.quote_hash !== hash(facts.accepted)
             || hash(existing.intent.x402Challenge) !== hash(challenge))
             throw new Error('PAY_OPERATION_CONFLICT');
-          await recoverApprovedPayment(ledger, id, config, facts.request.url, undefined, principal.cardMemberId);
+          if (existing.executionMode === 'live_mainnet' || config.mode === 'live_mainnet')
+            ledger.assertReplayAllowed(existing, config.mode, ledger.paymentScope(config, config.mode));
+          if (existing.deliveryStatus !== 'COMPLETE')
+            await recoverApprovedPayment(ledger, id, config, facts.request.url, undefined, principal.cardMemberId);
           const saved = ledger.getOwned(id, principal.cardMemberId)!;
-          if (saved.status !== 'PAID' || saved.deliveryStatus !== 'COMPLETE') return { allow: false };
+          if (saved.deliveryStatus !== 'COMPLETE') return { allow: false };
           attempts.set(facts.attempt_id, { facts, digest: hash(facts), generation: epoch, purchaseId: id, approvalId: saved.approvalId, phase: 'replay' });
           return { allow: epoch === generation };
         }
@@ -302,7 +305,8 @@ export function createPayAuthorityAdapter(options: { directory: string; runtime:
         attempt.phase = 'executing';
         unsigned.set(record.approvalId, value);
         try {
-          await routeApprovedPayment([options.runtime().ledger, record.approvalId, config, attempt.facts.request.url, undefined, options.executor, attempt.permit]);
+          await routeApprovedPayment([options.runtime().ledger, record.approvalId, config, attempt.facts.request.url, undefined,
+            options.executor, attempt.permit, options.deferReconciliation ?? Boolean(liveNetwork)]);
           attempt.phase = 'done';
           return response(attempt, principal);
         } finally { unsigned.delete(record.approvalId); }

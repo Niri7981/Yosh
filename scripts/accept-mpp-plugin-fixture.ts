@@ -40,14 +40,14 @@ async function main() {
     YOSH_DATA_DIR: directory, YOSH_PORT: String(PAY_DEVELOPMENT_PROFILE.backendPort),
     SOLANA_RPC_URL: 'https://api.devnet.solana.com', YOSH_MANAGEMENT_TOKEN: randomBytes(32).toString('hex') });
   const environment = resolvePaymentEnvironment();
-  const resources = ['success', 'ungranted', 'low-fee', 'timeout'].map(name => ({
+  const resources = ['redelivery', 'success', 'ungranted', 'low-fee', 'timeout'].map(name => ({
     resourceId: `mpp-host-${name}`, providerId: 'mock-host-acceptance', paymentProtocol: 'mpp_solana_charge',
     network: environment.network, mint: environment.asset.mint, decimals: 6, recipient: merchant.publicKey.toBase58(), amount: '1000',
     request: { method: 'GET', url: `https://merchant.mpp-acceptance.invalid/${name}`, access: 'https', headers: {} },
   }));
   process.env.YOSH_MAINNET_RESOURCES = JSON.stringify(resources);
-  const transactions = new Map<string, { wire: string; known: boolean }>();
-  const counts = { quotes: 0, signingPreparations: 0, submissions: 0, rpc: 0, forbiddenNetwork: 0 };
+  const transactions = new Map<string, { wire: string; known: boolean; credential: string }>();
+  const counts = { quotes: 0, signingPreparations: 0, submissions: 0, originalCredentialRetries: 0, rpc: 0, forbiddenNetwork: 0 };
   const evidence = () => {
     const purchases = application.ledger.listForAdministration().map(record => ({ id: record.purchaseId, status: record.status,
       deliveryStatus: record.deliveryStatus, transaction: record.transaction ?? null })) ?? [];
@@ -101,8 +101,19 @@ async function main() {
     const wire = credential.payload.transaction;
     const transaction = VersionedTransaction.deserialize(Buffer.from(wire, 'base64'));
     const signature = getBase58Decoder().decode(transaction.signatures[0]);
-    if (transactions.has(signature)) throw new Error('FIXTURE_DUPLICATE_SUBMISSION');
-    transactions.set(signature, { wire, known: url.pathname !== '/timeout' }); counts.submissions++; evidence();
+    const existing = transactions.get(signature);
+    if (existing) {
+      if (url.pathname !== '/redelivery' || existing.credential !== authorization || wire !== existing.wire)
+        throw new Error('FIXTURE_DUPLICATE_SUBMISSION');
+      counts.originalCredentialRetries++;
+      evidence();
+      const receipt = Buffer.from(JSON.stringify({ method: 'solana', status: 'success', timestamp: new Date().toISOString(),
+        reference: signature })).toString('base64url');
+      return Response.json({ fixture: true, symbol: 'SOL/USD', price: '123.45' }, { headers: { 'payment-receipt': receipt } });
+    }
+    transactions.set(signature, { wire, known: url.pathname !== '/timeout', credential: authorization });
+    counts.submissions++; evidence();
+    if (url.pathname === '/redelivery') throw new Error('MOCK_RESPONSE_LOST_AFTER_SETTLEMENT');
     if (url.pathname === '/timeout') throw new Error('MOCK_SUBMISSION_TIMEOUT');
     const receipt = Buffer.from(JSON.stringify({ method: 'solana', status: 'success', timestamp: new Date().toISOString(), reference: signature })).toString('base64url');
     return Response.json({ fixture: true, message: 'MPP installed-plugin host acceptance', transaction: signature }, { headers: { 'payment-receipt': receipt } });

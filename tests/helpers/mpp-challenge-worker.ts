@@ -14,8 +14,13 @@ process.on('message', (raw: unknown) => {
     process.send?.({ ready: true });
     return;
   }
-  if (raw !== 'reserve') throw new Error('INVALID_TEST_MESSAGE');
   try {
+    if (raw !== 'reserve') {
+      const { claimDelivery } = z.object({ claimDelivery: z.string().uuid() }).strict().parse(raw);
+      const token = ledger!.claimMppCredentialDelivery(claimDelivery, () => {}, true, setup.now);
+      process.send?.({ token: token ?? null });
+      return;
+    }
     const record = ledger!.reserve(setup.intent, setup.quote, setup.now);
     process.send?.({ status: record.status });
   } catch (error) {

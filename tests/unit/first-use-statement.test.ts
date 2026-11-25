@@ -18,14 +18,15 @@ it('lists the generic tools without prompting and requests scoped consent only o
   const receipt = { paymentStatus: 'PAID', deliveryStatus: 'COMPLETE' };
   const purchase = vi.fn().mockRejectedValueOnce(new Error('LOCAL_CONFIRMATION_DENIED')).mockResolvedValueOnce(receipt);
   const describe = vi.fn().mockRejectedValueOnce(new Error('LOCAL_RESOURCE_OWNER_OFFLINE')).mockRejectedValueOnce(new Error('MAINNET_BACKEND_STARTING'));
-  const server = createFirstUseStatementServer(read, purchase, describe);
+  const recoverDelivery = vi.fn();
+  const server = createFirstUseStatementServer(read, purchase, describe, recoverDelivery);
   const client = new Client({ name: 'new-host', version: '1' });
   const [a, b] = InMemoryTransport.createLinkedPair();
   await server.connect(b); await client.connect(a);
   const call = (args: Record<string, unknown>) => client.callTool({ name: 'list_account_purchases', arguments: args });
   try {
     const { tools } = await client.listTools();
-    expect(tools.map(tool => tool.name)).toEqual(['list_account_purchases', 'describe_purchase_resource', 'request_purchase']);
+    expect(tools.map(tool => tool.name)).toEqual(['list_account_purchases', 'describe_purchase_resource', 'request_purchase', 'recover_purchase_delivery']);
     expect(tools[0].description).toContain('native confirmation window on this Mac');
     const lookup = () => client.callTool({ name: 'describe_purchase_resource', arguments: { resourceId: 'api' } });
     expect(await lookup()).toMatchObject({ isError: true, content: [{ text: expect.stringContaining('start the installed Yosh backend') }] });
@@ -34,6 +35,9 @@ it('lists the generic tools without prompting and requests scoped consent only o
     expect((await call({ environment: 'devnet' })).isError).toBe(true);
     expect((await call({ from: 30, until: 5 })).isError).toBe(true);
     expect((await client.callTool({ name: 'request_purchase' })).isError).toBe(true);
+    for (const extra of [{ environment: 'devnet' }, { approved: true }, { memberId: randomUUID() }])
+      expect((await client.callTool({ name: 'recover_purchase_delivery', arguments: { purchaseId: 'one', environment: 'mainnet', ...extra } })).isError).toBe(true);
+    expect(recoverDelivery).not.toHaveBeenCalled();
     const intent = { requestId: 'one', resourceId: 'api', reason: 'One research call' };
     const buy = (args: Record<string, unknown>) => client.callTool({ name: 'request_purchase', arguments: args });
     expect((await buy({ ...intent, approved: true })).isError).toBe(true);

@@ -44,7 +44,7 @@ export async function requestRegisteredResourcePurchase(raw: unknown, options: {
       throw new Error('REQUEST_ID_CONFLICT');
     const requestHash = hash({ resourceId: existing.intent.resourceId, providerId: existing.intent.providerId, request, reason: input.reason });
     if (!request || existing.intent.resourceId !== input.resourceId || existing.intent.requestHash !== requestHash) throw new Error('REQUEST_ID_CONFLICT');
-    if (options.deferExecution) return existing;
+    if (options.deferExecution || existing.deliveryStatus === 'COMPLETE') return existing;
     // Recovery uses the original immutable endpoint, even after registration changes.
     // It remains available with execution disabled and cannot create another signature.
     if (['PAYING', 'PAYMENT_UNKNOWN', 'PAID'].includes(existing.status)) {

@@ -71,6 +71,16 @@ export function verifyOriginalTransactionSignatures(transaction: VersionedTransa
   return true;
 }
 
+/** A sponsored x402 transfer is submitted with the buyer's signature only. The
+ * merchant's transaction ID is the fee payer's signature over those same bytes. */
+export function isOriginalSettlementSignature(wire: string, signature: string): boolean {
+  try {
+    const { transaction } = decodeOriginalTransaction(wire);
+    transaction.signatures[0] = Uint8Array.from(getBase58Encoder().encode(signature));
+    return verifyOriginalTransactionSignatures(transaction, true);
+  } catch { return false; }
+}
+
 export function transactionMessageHash(wire: string) { return digest(decodeOriginalTransaction(wire).message); }
 
 function tokenAccount(owner: string, mint: string) {

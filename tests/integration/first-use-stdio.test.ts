@@ -27,7 +27,7 @@ it('does not start the owner at discovery and cancels an outstanding owner reque
       setTimeout(() => process.exit(1), 5000);
     `);
     await client.connect(new StdioClientTransport({ command: process.execPath, args: [entry, ...args], stderr: 'ignore' }));
-    expect((await client.listTools()).tools.map(tool => tool.name)).toEqual(['list_account_purchases', 'describe_purchase_resource', 'request_purchase']);
+    expect((await client.listTools()).tools.map(tool => tool.name)).toEqual(['list_account_purchases', 'describe_purchase_resource', 'request_purchase', 'recover_purchase_delivery']);
     expect(existsSync(join(root, 'started'))).toBe(false);
     const pending = client.callTool({ name: 'list_account_purchases', arguments: {} }).catch(() => undefined);
     await expect.poll(() => existsSync(join(root, 'started'))).toBe(true);

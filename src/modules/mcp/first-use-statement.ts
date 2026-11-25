@@ -6,6 +6,7 @@ import { accountReadPath, StatementInput, type StatementQuery } from './account-
 import { PurchaseResourceLookup } from './purchase-resource-contract';
 import { describeLocalResource, describePurchaseResourceTool, hostPurchaseTool, LocalHostPurchaseToolInput, requestLocalPurchase, type HostPurchase } from './local-host-purchase';
 import { connectionFile, ConnectionSchema } from './connection';
+import { AgentDeliveryRecoveryInput, DeliveryRecoveryErrors } from './purchase-read-contract';
 
 const origin = 'http://127.0.0.1:13449';
 const text = (value: unknown) => ({ content: [{ type: 'text' as const, text: JSON.stringify(value) }] });
@@ -13,7 +14,8 @@ const statementInput = StatementInput.extend({ environment: z.literal('mainnet')
 type ReadStatement = (query: StatementQuery, signal: AbortSignal) => Promise<unknown>;
 
 export function createFirstUseStatementServer(read: ReadStatement, purchase: (input: HostPurchase, signal: AbortSignal, deliveryOffset?: number) => Promise<unknown>,
-  describe: (input: z.infer<typeof PurchaseResourceLookup>, signal: AbortSignal) => Promise<unknown>) {
+  describe: (input: z.infer<typeof PurchaseResourceLookup>, signal: AbortSignal) => Promise<unknown>,
+  recoverDelivery: (purchaseId: string, signal: AbortSignal) => Promise<unknown>) {
   const server = new McpServer({ name: 'yosh', version: '1' });
   server.registerTool('list_account_purchases', {
     description: 'View the shared Mainnet account statement. On first use Yosh opens a native confirmation window on this Mac. Direct the user to that window to verify the agent name and statement-only access; no Yosh app needs to be opened. The same call continues after approval. Totals cover the entire query; use nextBefore as before to page. This tool grants no spending authority.',
@@ -33,6 +35,18 @@ export function createFirstUseStatementServer(read: ReadStatement, purchase: (in
     (input, { signal }) => describeLocalResource(describe, input, signal));
   server.registerTool(hostPurchaseTool.name, { ...hostPurchaseTool, inputSchema: LocalHostPurchaseToolInput },
     (input, { signal }) => requestLocalPurchase(purchase, input, signal));
+  server.registerTool('recover_purchase_delivery', {
+    description: 'Retry delivery for this Agent’s confirmed paid Mainnet MPP purchase using its original credential and purchase ID. Returns the original receipt and the saved first result chunk when available. No new payment or signature.',
+    inputSchema: AgentDeliveryRecoveryInput.extend({ environment: z.literal('mainnet') }),
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+  }, async ({ purchaseId }, { signal }) => {
+    try { return text(await recoverDelivery(purchaseId, signal)); }
+    catch (error) {
+      const code = error instanceof Error ? error.message : '';
+      const allowed = Object.hasOwn(DeliveryRecoveryErrors, code) || ['AGENT_UNAUTHORIZED', 'LOCAL_HOST_BINDING_MISMATCH', 'LOCAL_PURCHASE_BINDING_MISMATCH'].includes(code);
+      return { ...text({ purchaseId, code: allowed ? code : 'MPP_DELIVERY_RECOVERY_UNAVAILABLE' }), isError: true };
+    }
+  });
   return server;
 }
 

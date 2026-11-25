@@ -10,6 +10,7 @@ import { loadBuyerSigner } from '../../src/modules/payment/wallet';
 import { type PaymentConfig } from '../../src/modules/payment/payment-config';
 import { TOKEN_PROGRAM } from '../../src/modules/payment/payment-environment';
 import { PurchaseLedger } from '../../src/modules/purchases/purchase-ledger';
+import { recoverMppCharge } from '../../src/modules/purchases/recover-mpp-charge';
 import { requestMppResourcePurchase } from '../../src/modules/purchases/request-mpp-resource-purchase';
 import { PAID_RESOURCE_PURCHASE_OPERATION } from '../../src/modules/authority/spend-grant';
 import { type X402Resource } from '../../src/modules/resources/http-resource';
@@ -29,7 +30,7 @@ async function fixture(options: {
   chainKnown?: boolean; merchantTimeout?: boolean; wrongReceipt?: boolean; invalidDelivery?: boolean;
   persistent?: boolean; recoveryLocation?: 'header' | 'query'; recoveryFailures?: number; concurrentQuotes?: number;
   omitExternalId?: boolean; distinctChallenges?: boolean; rejectRepeatedTransaction?: boolean;
-  publicTransactionDelivery?: boolean;
+  publicTransactionDelivery?: boolean; deferReconciliation?: boolean; omitReceipt?: boolean;
 } = {}) {
   const f = mppFixture(options.omitExternalId ? {} : { memo: 'sdk-purchase-fixture' });
   const resource: X402Resource = { paymentProtocol: 'mpp_solana_charge', resourceId: 'mpp-sdk-resource', providerId: 'fixture',
@@ -130,13 +131,14 @@ async function fixture(options: {
     if (options.merchantTimeout) throw new Error('MOCK_SUBMISSION_TIMEOUT');
     const receipt = Buffer.from(JSON.stringify({ method: 'solana', status: 'success', timestamp: new Date().toISOString(),
       reference: options.wrongReceipt ? getBase58Decoder().decode(new Uint8Array(64).fill(7)) : signature })).toString('base64url');
-    return options.invalidDelivery ? new Response('invalid delivery', { headers: { 'content-type': 'text/plain', 'payment-receipt': receipt } })
+    const receiptHeaders = options.omitReceipt ? undefined : { 'payment-receipt': receipt };
+    return options.invalidDelivery ? new Response('invalid delivery', { headers: { 'content-type': 'text/plain', ...receiptHeaders } })
       : Response.json({ result: 'offline SDK purchase fixture', ...(options.publicTransactionDelivery
-        ? { transaction: signature, explorer: `https://explorer.solana.com/tx/${signature}?cluster=devnet` } : {}) }, { headers: { 'payment-receipt': receipt } });
+        ? { transaction: signature, explorer: `https://explorer.solana.com/tx/${signature}?cluster=devnet` } : {}) }, { headers: receiptHeaders });
   });
   const input = { requestId: 'mpp-sdk-purchase', resourceId: resource.resourceId, reason: 'offline fixture' };
   const run = (override: Partial<typeof input> = {}) => requestMppResourcePurchase({ ...input, ...override }, {
-    config, ledger, principal, dependencies: { binary, fetcher: merchant },
+    config, ledger, principal, dependencies: { binary, fetcher: merchant, deferReconciliation: options.deferReconciliation },
   });
   return { ...f, config, resource, get ledger() { return ledger; }, principal, signTransactions, rpcMethods, merchant, run, recoveryRequests, chainTransactions,
     onSigned(hook: () => void | Promise<void>) { afterSign = hook; },
@@ -154,6 +156,38 @@ async function fixture(options: {
     counts: () => ({ quoteCalls, paidCalls }), record: () => ledger.getOwned(input.requestId, principal.cardMemberId)!,
   };
 }
+
+it('publishes the original MPP receipt and body before checking the chain, including an idempotent read after restart', async () => {
+  const f = await fixture({ persistent: true, chainKnown: false, deferReconciliation: true });
+  expect(await f.run()).toMatchObject({ status: 'PAYMENT_UNKNOWN', deliveryStatus: 'COMPLETE' });
+  expect(f.rpcMethods).not.toContain('getTransaction');
+  expect(f.record()).toMatchObject({ receiptStatus: 'UNVERIFIED', data: { result: 'offline SDK purchase fixture' } });
+  expect(f.ledger.managedSummary(Date.now(), 'live_devnet')).toMatchObject({ paid: '0', reserved: f.quote.amount });
+  f.reopen();
+  expect(await f.run()).toMatchObject({ status: 'PAYMENT_UNKNOWN', deliveryStatus: 'COMPLETE' });
+  expect(f.rpcMethods).not.toContain('getTransaction');
+  f.setChainKnown(true);
+  await recoverMppCharge(f.ledger, f.record(), f.config, f.resource.request.url, { binary, fetcher: f.merchant });
+  expect(f.record()).toMatchObject({ status: 'PAID', deliveryStatus: 'COMPLETE', receiptStatus: 'CONFIRMED',
+    data: { result: 'offline SDK purchase fixture' } });
+  expect(f.signTransactions).toHaveBeenCalledOnce();
+  expect(f.counts()).toEqual({ quoteCalls: 1, paidCalls: 1 });
+  expect(f.ledger.managedSummary(Date.now(), 'live_devnet')).toMatchObject({ reserved: '0', paid: f.quote.amount });
+});
+
+it.each([{ omitReceipt: true }, { invalidDelivery: true }, { wrongReceipt: true }])('withholds unconfirmed MPP delivery with %j', async options => {
+  const f = await fixture({ chainKnown: false, deferReconciliation: true, ...options });
+  expect(await f.run()).toMatchObject({ status: 'PAYMENT_UNKNOWN', deliveryStatus: 'NOT_PAID' });
+  expect(f.record().data).toBeUndefined();
+  expect(f.counts().paidCalls).toBe(1);
+});
+
+it('accepts an original MPP body lacking a receipt after independent confirmation', async () => {
+  const f = await fixture({ omitReceipt: true, deferReconciliation: true });
+  expect(await f.run()).toMatchObject({ status: 'PAID', deliveryStatus: 'COMPLETE' });
+  expect(f.rpcMethods).toContain('getTransaction');
+  expect(f.record()).toMatchObject({ receiptStatus: 'UNAVAILABLE', data: { result: 'offline SDK purchase fixture' } });
+});
 
 it('runs 402 → official SDK transaction/credential → one verified payment and delivered resource', async () => {
   const f = await fixture();
@@ -287,11 +321,79 @@ it.each([true, false])('preserves the unresolved-payment authority gate for conc
   expect(f.ledger.listForAdministration().filter(item => item.status === 'PAID')).toHaveLength(1);
 });
 
-it.each([{ wrongReceipt: true }, { invalidDelivery: true }])('keeps paid delivery separate and never replaces payment for %j', async options => {
-  const f = await fixture(options);
-  expect(await f.run()).toMatchObject({ status: 'PAID', deliveryStatus: 'UNSUPPORTED' });
+it('recovers after a lost response with the exact original credential once across restart and concurrent callers', async () => {
+  const f = await fixture({ persistent: true });
+  f.onPaidResponse(() => { f.onPaidResponse(() => {}); throw new Error('lost response'); });
+  expect(await f.run()).toMatchObject({ status: 'PAID', deliveryStatus: 'PENDING' });
+  const payment = f.ledger.savedMppPayment(f.record().approvalId)!;
+  f.reopen();
+  const callsBefore = f.rpcMethods.length;
+  await Promise.all([f.run(), f.run()]);
+  expect(f.record()).toMatchObject({ status: 'PAID', deliveryStatus: 'COMPLETE', receiptStatus: 'CONFIRMED',
+    data: { result: 'offline SDK purchase fixture' } });
+  const paidRequests = f.merchant.mock.calls.filter(([, init]) => new Headers(init?.headers).has('authorization'));
+  expect(paidRequests).toHaveLength(2);
+  for (const [url, init] of paidRequests) {
+    expect(String(url)).toBe(f.resource.request.url);
+    expect(init).toMatchObject({ method: 'GET', redirect: 'error' });
+    expect(new Headers(init?.headers).get('authorization') === payment.credential).toBe(true);
+  }
+  expect(f.rpcMethods).toHaveLength(callsBefore);
+  expect(f.signTransactions).toHaveBeenCalledOnce(); expect(loadBuyerSigner).toHaveBeenCalledOnce();
+  expect(f.counts().quoteCalls).toBe(1); expect(f.chainTransactions.size).toBe(1);
+  expect(f.ledger.managedSummary(Date.now(), 'live_devnet')).toMatchObject({ reserved: '0', paid: f.quote.amount });
+});
+
+it('only explicitly reopens a legacy unsupported original and stops on definitive merchant rejection', async () => {
+  const f = await fixture({ persistent: true, merchantTimeout: true, rejectRepeatedTransaction: true });
+  expect(await f.run()).toMatchObject({ status: 'PAID' });
+  f.ledger.blockDeliveryRecovery(f.record().approvalId, 'DELIVERY_RECOVERY_UNSUPPORTED');
+  f.reopen();
+  const manual = () => recoverMppCharge(f.ledger, f.record(), f.config, f.resource.request.url,
+    { binary, fetcher: f.merchant, replayCredential: true });
   await f.run();
-  expect(f.signTransactions).toHaveBeenCalledOnce(); expect(f.counts().paidCalls).toBe(1);
+  expect(f.record().deliveryStatus).toBe('UNSUPPORTED'); expect(f.counts().paidCalls).toBe(1);
+  await manual();
+  expect(f.record().deliveryRecovery).toMatchObject({ status: 'UNSUPPORTED', retryCount: 1, lastError: 'MPP_DELIVERY_REPLAY_REJECTED' });
+  f.reopen(); await manual(); await f.run();
+  expect(f.counts()).toEqual({ quoteCalls: 1, paidCalls: 2 });
+  expect(f.signTransactions).toHaveBeenCalledOnce(); expect(f.chainTransactions.size).toBe(1);
+});
+
+it('delivers valid saved-credential responses without a receipt, and rejects a new challenge even on HTTP 200', async () => {
+  for (const freshChallenge of [false, true]) {
+    const f = await fixture({ merchantTimeout: true });
+    expect(await f.run()).toMatchObject({ status: 'PAID', deliveryStatus: 'PENDING' });
+    f.merchant.mockResolvedValueOnce(Response.json({ price: '12.34' }, { headers: freshChallenge
+      ? { 'www-authenticate': 'Basic realm="api", Payment id="new"' } : {} }));
+    await f.run();
+    const record = f.record();
+    expect(record.deliveryStatus).toBe(freshChallenge ? 'UNSUPPORTED' : 'COMPLETE');
+    expect(record.receiptStatus).toBe('UNAVAILABLE');
+    if (freshChallenge) expect(record.deliveryRecovery.lastError).toBe('MPP_DELIVERY_REPLAY_REJECTED');
+    else expect(record.data).toEqual({ price: '12.34' });
+  }
+});
+
+it('stops credential redelivery after the persisted retry limit across restarts', async () => {
+  const f = await fixture({ persistent: true, merchantTimeout: true });
+  expect(await f.run()).toMatchObject({ status: 'PAID', deliveryStatus: 'PENDING' });
+  for (let count = 1; count <= 4; count++) {
+    f.advanceRecoveryClock(); await f.run(); f.reopen(); await f.run();
+    expect(f.record().deliveryRecovery).toMatchObject({ retryCount: count, status: count < 4 ? 'PENDING' : 'EXHAUSTED' });
+    expect(f.counts()).toEqual({ quoteCalls: 1, paidCalls: count + 1 });
+  }
+  expect(f.chainTransactions.size).toBe(1);
+  expect(f.signTransactions).toHaveBeenCalledOnce(); expect(loadBuyerSigner).toHaveBeenCalledOnce();
+});
+
+it.each([{ wrongReceipt: true }, { invalidDelivery: true }])('rejects invalid delivery on the original and on credential replay: %j', async options => {
+  const f = await fixture(options);
+  expect(await f.run()).toMatchObject({ status: 'PAID', deliveryStatus: 'PENDING' });
+  expect(await f.run()).toMatchObject({ status: 'PAID', deliveryStatus: 'PENDING' });
+  expect(f.record().deliveryRecovery.retryCount).toBe(1);
+  expect(f.signTransactions).toHaveBeenCalledOnce(); expect(f.counts().paidCalls).toBe(2);
+  expect(f.chainTransactions.size).toBe(1);
   expect(f.ledger.managedSummary(Date.now(), 'live_devnet')).toMatchObject({ reserved: '0', paid: f.quote.amount });
 });
 

@@ -77,7 +77,10 @@ it('opens complete long identifiers as text, returns to the list, and never requ
 });
 
 it.each([
-  ['PAYMENT_UNKNOWN', 'COMPLETE', 'mainnet', '核对原付款'],
+  ['PAYMENT_UNKNOWN', 'COMPLETE', 'mainnet', '已交付 · 付款核对中'],
+  ['PAYING', 'COMPLETE', 'mainnet', '已交付 · 付款核对中'],
+  ['FAILED', 'COMPLETE', 'mainnet', '已交付 · 付款失败'],
+  ['PAYMENT_UNKNOWN', 'NOT_PAID', 'mainnet', '核对原付款'],
   ['PAID', 'EXHAUSTED', 'mainnet', '已付款 · 未取回结果'],
   ['PAID', 'PENDING', 'mainnet', '已付款 · 交付中'],
   ['APPROVED', 'NOT_PAID', 'mainnet', '已允许'],

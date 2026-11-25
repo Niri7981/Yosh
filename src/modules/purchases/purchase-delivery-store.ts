@@ -4,6 +4,8 @@ import { DeliveryRecoveryCapabilitySchema, type DeliveryRecoveryCapability } fro
 import { initializeDeliveryState } from './delivery-migration';
 import { DELIVERY_RETRY_LIMIT, DeliveryRecoveryStateSchema, ReceiptStatusSchema, type DeliveryRecoveryState, type ReceiptStatus } from './delivery-state';
 
+type ReceiptBinding = { transaction: string; network: string; payer: string; amount: string };
+
 /** Internal persistence for delivery only. The ledger validates paid ownership and
  * evidence first and owns the shared transaction, including result and audit writes.
  * This module neither opens transactions nor holds a payment/signing capability. */
@@ -33,17 +35,36 @@ export class PurchaseDeliveryStore {
   }
   recordReceipt(purchaseId: string, outcome: ReceiptStatus, receipt?: { transaction: string; network: string; payer?: string; amount?: string }) {
     this.assertTransaction();
+    // Persist only the public fields used to match the merchant observation to proof.
+    const binding = receipt && { transaction: receipt.transaction, network: receipt.network, payer: receipt.payer, amount: receipt.amount };
     // Once verified, a later missing/invalid response does not erase that receipt fact.
     this.db.prepare(`UPDATE purchase_delivery SET receipt_state=?,receipt=COALESCE(?,receipt)
-      WHERE purchase_id=? AND receipt_state<>'CONFIRMED'`).run(ReceiptStatusSchema.parse(outcome), receipt ? JSON.stringify(receipt) : null, purchaseId);
+      WHERE purchase_id=? AND receipt_state<>'CONFIRMED'`).run(ReceiptStatusSchema.parse(outcome), binding ? JSON.stringify(binding) : null, purchaseId);
   }
-  claim(purchaseId: string, kind: 'initial' | 'retry', now: number): string | undefined {
+  confirmMatchingReceipt(purchaseId: string, proof: ReceiptBinding) {
+    this.assertTransaction();
+    this.db.prepare(`UPDATE purchase_delivery SET receipt_state='CONFIRMED'
+      WHERE purchase_id=? AND receipt_state='UNVERIFIED'
+      AND json_extract(receipt,'$.transaction')=? AND json_extract(receipt,'$.network')=?
+      AND json_extract(receipt,'$.payer')=?
+      AND (json_type(receipt,'$.amount') IS NULL OR json_extract(receipt,'$.amount')=?)
+      AND (json_type(receipt,'$.success') IS NULL OR json_type(receipt,'$.success')='true')`)
+      .run(purchaseId, proof.transaction, proof.network, proof.payer, proof.amount);
+  }
+  /** Reopen only the legacy 'no recovery API' terminal, under the same write lock
+   * as the verified credential claim. A merchant refusal or exhausted budget stays closed. */
+  reopenUnsupportedCredential(purchaseId: string) {
+    this.assertTransaction();
+    this.db.prepare(`UPDATE purchase_delivery SET state='PENDING' WHERE purchase_id=? AND state='UNSUPPORTED'
+      AND last_error='DELIVERY_RECOVERY_UNSUPPORTED'`).run(purchaseId);
+  }
+  claim(purchaseId: string, kind: 'initial' | 'retry', now: number, originalMppCredential = false): string | undefined {
     this.assertTransaction();
     const row = this.db.prepare('SELECT * FROM purchase_delivery WHERE purchase_id=?').get(purchaseId);
     if (!row) throw new Error('DELIVERY_STATE_MISSING');
     if (row.state !== 'PENDING') return;
     if (kind === 'retry') {
-      if (this.capability(purchaseId).kind === 'none') { this.terminal(purchaseId, 'DELIVERY_RECOVERY_UNSUPPORTED', 'UNSUPPORTED'); return; }
+      if (!originalMppCredential && this.capability(purchaseId).kind === 'none') { this.terminal(purchaseId, 'DELIVERY_RECOVERY_UNSUPPORTED', 'UNSUPPORTED'); return; }
       if (Number(row.retry_count) >= DELIVERY_RETRY_LIMIT) { this.terminal(purchaseId, 'DELIVERY_RETRY_EXHAUSTED', 'EXHAUSTED'); return; }
       if (Number(row.next_attempt_at) > now) return;
     } else if (row.initial_attempted === 1) return;
@@ -60,15 +81,32 @@ export class PurchaseDeliveryStore {
     const changed = this.db.prepare("UPDATE purchase_delivery SET state=?,last_error=? WHERE purchase_id=? AND state='PENDING'").run(state, code, purchaseId);
     if (changed.changes) this.event(purchaseId, `delivery.${state}`);
   }
-  failAttempt(purchaseId: string, token: string, code: string, now: number) {
+  rejectCredential(purchaseId: string, token: string) {
+    this.assertTransaction();
+    const changed = this.db.prepare(`UPDATE purchase_delivery SET state='UNSUPPORTED',last_error='MPP_DELIVERY_REPLAY_REJECTED',
+      next_attempt_at=0,claim_token=NULL,claim_kind=NULL,claim_at=NULL
+      WHERE purchase_id=? AND state='DELIVERING' AND claim_kind='retry' AND claim_token=?`).run(purchaseId, token);
+    if (changed.changes) this.event(purchaseId, 'delivery.UNSUPPORTED');
+  }
+  failAttempt(purchaseId: string, token: string, code: string, now: number, originalMppCredential: boolean) {
     this.assertTransaction();
     const row = this.db.prepare("SELECT * FROM purchase_delivery WHERE purchase_id=? AND state='DELIVERING' AND claim_token=?").get(purchaseId, token);
     if (!row) return; // A stale response cannot release another owner's claim.
-    const state = this.capability(purchaseId).kind === 'none' ? 'UNSUPPORTED' : Number(row.retry_count) >= DELIVERY_RETRY_LIMIT ? 'EXHAUSTED' : 'PENDING';
+    const state = !originalMppCredential && this.capability(purchaseId).kind === 'none' ? 'UNSUPPORTED' : Number(row.retry_count) >= DELIVERY_RETRY_LIMIT ? 'EXHAUSTED' : 'PENDING';
     const next = row.claim_kind === 'retry' ? now + 1000 * 2 ** Math.max(0, Number(row.retry_count) - 1) : now;
     this.db.prepare(`UPDATE purchase_delivery SET state=?,claim_token=NULL,claim_kind=NULL,claim_at=NULL,next_attempt_at=?,last_error=?
       WHERE purchase_id=? AND claim_token=?`).run(state, next, state === 'UNSUPPORTED' ? 'DELIVERY_RECOVERY_UNSUPPORTED' : code, purchaseId, token);
     this.event(purchaseId, state === 'PENDING' ? 'delivery.RETRY_PENDING' : `delivery.${state}`);
+  }
+  /** A late original response can arrive after a background recovery claim or a terminal retry.
+   * The first saved result wins. Invalidate any outstanding claim in the same transaction. */
+  completeOriginal(purchaseId: string): boolean {
+    this.assertTransaction();
+    const changed = this.db.prepare(`UPDATE purchase_delivery SET state='COMPLETE',initial_attempted=1,
+      claim_token=NULL,claim_kind=NULL,claim_at=NULL,next_attempt_at=0,last_error=NULL
+      WHERE purchase_id=? AND state<>'COMPLETE'`).run(purchaseId);
+    if (changed.changes) this.event(purchaseId, 'delivery.ORIGINAL_RESPONSE_ACCEPTED');
+    return changed.changes === 1;
   }
   /** Returns false for an already completed order; the caller saves result data and
    * its audit event in this same transaction. No partial completion may commit. */

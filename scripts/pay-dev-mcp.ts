@@ -15,7 +15,7 @@ import { AgentResourceRegistrationInput } from '../src/modules/resources/agent-r
 import { MAX_SERIALIZED_RESOURCE_DELIVERY_BYTES, ResourceRequestInputSchema } from '../src/modules/resources/http-resource';
 import { AgentRegistrationErrorCodes } from '../src/modules/mcp/server';
 import { accountReadPath, accountTools } from '../src/modules/mcp/account-read-contract';
-import { AgentPurchaseReadInput, AgentPurchaseSummary } from '../src/modules/mcp/purchase-read-contract';
+import { AgentDeliveryRecoveryInput, AgentPurchaseReadInput, AgentPurchaseSummary, DeliveryRecoveryErrors } from '../src/modules/mcp/purchase-read-contract';
 import { PurchaseRequestInputSchema } from '../src/modules/purchases/purchase-request-input';
 import { PLUGIN_OFFLINE_RESOURCE_PATHS } from '../src/modules/pay-dev/offline-resource-policy';
 
@@ -122,6 +122,8 @@ async function main() {
   const resourceTools = live || (IS_CODEX_PLUGIN_DEVELOPMENT && !simulated) ? [
     { name: 'request_mpp_purchase', path: '/api/agent/mpp/purchases', schema: PurchaseRequestInputSchema,
       description: 'Request a registered MPP Solana Charge using a stable requestId. Requires a separate mpp_charge Spend Grant and explicit SOL fee cap. Mainnet requires the verified MPP standalone runtime and uses real funds. Unknown outcomes must retain the same purchase ID; never retry with a new ID or another protocol.' },
+    { name: 'recover_purchase_delivery', path: '/api/agent/mpp/recover-delivery', schema: AgentDeliveryRecoveryInput,
+      description: 'Retry delivery for a confirmed paid MPP purchase owned by this Agent. Yosh uses its original merchant request and payment credential within the original retry budget. Does not sign or create a payment. Returns the original purchase status. When delivery is COMPLETE use get_purchase_delivery to read the result.' },
     { name: 'quote_mpp_resource', path: '/api/agent/mpp/quote',
       schema: z.object({ resourceId: z.string().min(1).max(200), sample: ResourceRequestInputSchema.optional() }).strict(),
       description: 'Read a fresh unpaid MPP Solana Charge challenge for a registered API. Does not reserve, sign, pay or create a Grant. Use request_mpp_purchase only after user authorization.' },
@@ -140,7 +142,7 @@ async function main() {
       inputSchema: z.toJSONSchema(AgentPurchaseReadInput),
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false } },
     { name: 'get_purchase_delivery',
-      description: 'Read one bounded chunk of a completed delivery owned by this Agent. Pass the purchaseId from get_purchase. Continue with nextOffset until null and decode base64 chunks in order. Read only; does not recover or pay.',
+      description: 'Read one bounded chunk of a saved result owned by this Agent. When get_purchase reports deliveryStatus COMPLETE, use its purchaseId even if paymentStatus is still PAYMENT_UNKNOWN. Continue with nextOffset until null and decode base64 chunks in order. Read only; does not recover or pay.',
       inputSchema: { type: 'object', properties: { purchaseId: { type: 'string' }, offset: { type: 'integer', minimum: 0,
         maximum: MAX_SERIALIZED_RESOURCE_DELIVERY_BYTES, default: 0 } }, required: ['purchaseId'], additionalProperties: false },
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false } },
@@ -219,6 +221,13 @@ async function main() {
   };
   const callResource = async (id: string | number, params: unknown) => {
     let result;
+    const name = z.object({ name: z.string() }).safeParse(params).data?.name;
+    const unavailable = name === 'recover_purchase_delivery' ? 'MPP_DELIVERY_RECOVERY_UNAVAILABLE' : 'RESOURCE_REGISTRATION_UNAVAILABLE';
+    const allowed = [...AgentRegistrationErrorCodes, 'RESOURCE_DISCOVERY_UNAVAILABLE', 'RESOURCE_QUOTE_UNAVAILABLE', 'RESOURCE_POST_APPROVAL_REQUIRED',
+      'OFFLINE_RESOURCE_LIFECYCLE_UNAVAILABLE', 'OFFLINE_FIXTURE_INPUT_INVALID', 'OFFLINE_RESOURCE_TOOL_UNAVAILABLE',
+      'MPP_MAINNET_ACCEPTANCE_REQUIRED', 'MPP_ISOLATED_RUNTIME_REQUIRED', 'MPP_PROTOCOL_UNAVAILABLE', 'MPP_REGISTERED_RESOURCE_REQUIRED',
+      'MPP_RESOURCE_UNSUPPORTED', 'MPP_QUOTE_BINDING_INVALID', 'MPP_CHALLENGE_REQUIRED', 'MPP_CHALLENGE_ALREADY_USED', 'MPP_PURCHASE_REQUEST_FAILED',
+      'REQUEST_ID_CONFLICT', 'MPP_DELIVERY_RECOVERY_INPUT_INVALID', ...Object.keys(DeliveryRecoveryErrors)];
     try {
       const input = z.object({ name: z.string(), arguments: z.unknown().optional(), _meta: z.unknown().optional() }).strict().parse(params);
       const tool = resourceTools.find(tool => tool.name === input.name);
@@ -239,24 +248,17 @@ async function main() {
       const value: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8'));
       if (!response.ok) {
         const code = z.object({ code: z.string() }).safeParse(value);
-        const allowed = [...AgentRegistrationErrorCodes, 'RESOURCE_DISCOVERY_UNAVAILABLE', 'RESOURCE_QUOTE_UNAVAILABLE', 'RESOURCE_POST_APPROVAL_REQUIRED',
-          'OFFLINE_RESOURCE_LIFECYCLE_UNAVAILABLE', 'OFFLINE_FIXTURE_INPUT_INVALID', 'OFFLINE_RESOURCE_TOOL_UNAVAILABLE',
-          'MPP_MAINNET_ACCEPTANCE_REQUIRED', 'MPP_ISOLATED_RUNTIME_REQUIRED', 'MPP_PROTOCOL_UNAVAILABLE', 'MPP_REGISTERED_RESOURCE_REQUIRED',
-          'MPP_RESOURCE_UNSUPPORTED', 'MPP_QUOTE_BINDING_INVALID', 'MPP_CHALLENGE_REQUIRED', 'MPP_CHALLENGE_ALREADY_USED', 'MPP_PURCHASE_REQUEST_FAILED', 'REQUEST_ID_CONFLICT'];
         throw new Error(response.status === 401 ? 'AGENT_UNAUTHORIZED'
-          : code.success && allowed.includes(code.data.code) ? code.data.code : 'RESOURCE_REGISTRATION_UNAVAILABLE');
+          : code.success && allowed.includes(code.data.code) ? code.data.code : unavailable);
       }
-      result = { content: [{ type: 'text', text: JSON.stringify(value) }] };
+      const output = tool.name === 'recover_purchase_delivery' ? AgentPurchaseSummary.parse(value) : value;
+      result = { content: [{ type: 'text', text: JSON.stringify(output) }] };
     } catch (error) {
-      const allowed = [...AgentRegistrationErrorCodes, 'RESOURCE_DISCOVERY_UNAVAILABLE', 'RESOURCE_QUOTE_UNAVAILABLE', 'RESOURCE_POST_APPROVAL_REQUIRED',
-        'OFFLINE_RESOURCE_LIFECYCLE_UNAVAILABLE', 'OFFLINE_FIXTURE_INPUT_INVALID', 'OFFLINE_RESOURCE_TOOL_UNAVAILABLE',
-          'MPP_MAINNET_ACCEPTANCE_REQUIRED', 'MPP_ISOLATED_RUNTIME_REQUIRED', 'MPP_PROTOCOL_UNAVAILABLE', 'MPP_REGISTERED_RESOURCE_REQUIRED',
-          'MPP_RESOURCE_UNSUPPORTED', 'MPP_QUOTE_BINDING_INVALID', 'MPP_CHALLENGE_REQUIRED', 'MPP_CHALLENGE_ALREADY_USED', 'MPP_PURCHASE_REQUEST_FAILED', 'REQUEST_ID_CONFLICT'];
       const code = error instanceof z.ZodError ? 'RESOURCE_TOOL_INPUT_INVALID'
-        : error instanceof Error && allowed.includes(error.message) ? error.message : 'RESOURCE_REGISTRATION_UNAVAILABLE';
-      const mppCall = z.object({ name: z.literal('request_mpp_purchase') }).passthrough().safeParse(params).success;
-      result = { isError: true, content: [{ type: 'text', text: mppCall
+        : error instanceof Error && allowed.includes(error.message) ? error.message : unavailable;
+      result = { isError: true, content: [{ type: 'text', text: name === 'request_mpp_purchase'
         ? `${code}: Request interrupted. Read the original purchase ID; do not assume no payment and do not create a replacement.`
+        : name === 'recover_purchase_delivery' ? `${code}: Check get_purchase for the original purchase. No new payment was requested.`
         : `${code}: No spending permission or payment was created.${code.startsWith('OFFLINE_')
         ? ' This isolated Offline environment supports fixed fixtures only; public API discovery and registration are unavailable.'
         : code === 'RESOURCE_POST_APPROVAL_REQUIRED' ? ' Review POST requests in Yosh before discovery.' : ''}` }] };
@@ -400,7 +402,9 @@ async function main() {
         void purchaseSummary({ operationId }).then(summary => {
           if (purchase.data.result.isError && ['DENIED', 'REQUIRES_APPROVAL'].includes(summary.status))
             purchase.data.result.content = [{ type: 'text', text: `${summary.policyCode}: Yosh ${summary.status.toLowerCase()} this original purchase. Review its recorded scope in the matching Yosh app; no replacement payment was created.` }];
-          purchase.data.result.content.push({ type: 'text', text: JSON.stringify({ yoshPurchase: summary }) });
+          const next = purchase.data.result.isError && summary.deliveryStatus === 'COMPLETE'
+            ? { tool: 'get_purchase_delivery', purchaseId: summary.purchaseId } : undefined;
+          purchase.data.result.content.push({ type: 'text', text: JSON.stringify({ yoshPurchase: summary, next }) });
           if (!closed) process.stdout.write(`${JSON.stringify(purchase.data)}\n`);
         }).catch(() => {
           // No persisted record is not proof of a missing Grant or nonpayment.

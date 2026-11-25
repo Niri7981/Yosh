@@ -15,7 +15,7 @@ async function main() {
   const server = createFirstUseStatementServer(async (query, signal) => {
     const { memberId } = await client.statementMember(signal);
     return readMemberStatement(directory, memberId, query, signal);
-  }, client.purchase, client.describeResource);
+  }, client.purchase, client.describeResource, client.recoverDelivery);
   // SDK stdio listens for data but doesn't close the server on EOF. Closing
   // explicitly also aborts each pending owner command when the host exits.
   const close = () => { void server.close(); };

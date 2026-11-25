@@ -758,6 +758,15 @@ export class PurchaseLedger {
       for (const row of rows) this.event(String(row.id), 'payment.FAILED_BEFORE_SUBMISSION');
     });
   }
+  /** Exclusive startup has no live sender. Schedule submitted originals even
+   * if the wallet is temporarily unavailable on this boot. */
+  recoverSubmittedOnStartup() {
+    const submitted = this.db.prepare(`SELECT p.approval_id FROM purchases p
+      JOIN original_payments o ON o.purchase_id=p.id
+      WHERE p.status='PAYING' AND p.execution_mode IN ('live_devnet','live_mainnet')
+      AND o.submission_attempted_at IS NOT NULL AND o.state IN ('SUBMISSION_ATTEMPTED','OUTCOME_UNKNOWN')`).all();
+    for (const row of submitted) this.unknown(String(row.approval_id));
+  }
   /** An external approval is resumable only by its live owner and epoch. A
    * reopened process must terminate unclaimed approvals rather than minting a
    * replacement permit or releasing any signed/possibly submitted payment. */
@@ -785,10 +794,15 @@ export class PurchaseLedger {
     this.atomic(() => {
       const record = this.recordForApproval(approvalId);
       outcome = ReceiptStatusSchema.parse(outcome);
+      if (outcome === 'UNVERIFIED' && !receipt) throw new Error('SETTLEMENT_RECEIPT_BINDING_MISMATCH');
       if (outcome === 'CONFIRMED' && (!this.hasVerifiedLivePayment(record) || !receipt || receipt.transaction !== record.transaction
         || receipt.network !== record.intent.network || (record.paymentEvidence?.version !== 1 && receipt.payer !== record.paymentEvidence?.payer)
         || (receipt.amount !== undefined && receipt.amount !== record.intent.amount))) throw new Error('SETTLEMENT_RECEIPT_BINDING_MISMATCH');
       this.delivery.recordReceipt(record.intent.id, outcome, receipt);
+      if (outcome === 'UNVERIFIED' && record.paymentEvidence?.version === 3 && this.hasVerifiedLivePayment(record)) {
+        this.delivery.confirmMatchingReceipt(record.intent.id, { transaction: record.paymentEvidence.transaction, network: record.intent.network,
+          payer: record.paymentEvidence.payer, amount: record.intent.amount });
+      }
     });
   }
   /** No money/authority writes. The durable claim is consumed before any recovery HTTP request. */
@@ -804,6 +818,35 @@ export class PurchaseLedger {
       return this.delivery.claim(record.intent.id, kind, now);
     });
   }
+  private canReplayMppCredential(record: PurchaseRecord) {
+    // Version 3 checks the confirmed original transaction and its exact signed
+    // payload. A signature from an unrelated payment is never sufficient.
+    return !!record.intent.mpp && record.intent.httpRequest?.method === 'GET'
+      && record.paymentEvidence?.version === 3 && this.hasVerifiedLivePayment(record);
+  }
+  claimMppCredentialDelivery(approvalId: string, validate: (record: PurchaseRecord) => void, reopenUnsupported: boolean, now = this.now()) {
+    return this.atomic(() => {
+      if (this.stopping) return;
+      const record = this.recordForApproval(approvalId);
+      const historical = reopenUnsupported && record.deliveryStatus === 'UNSUPPORTED'
+        && record.deliveryRecovery.lastError === 'DELIVERY_RECOVERY_UNSUPPORTED';
+      if (record.deliveryStatus !== 'PENDING' && !historical) return;
+      if (record.status !== 'PAID' || !record.intent.mpp || this.delivery.capability(record.intent.id).kind === 'payment_identifier') return;
+      if (!this.canReplayMppCredential(record)) {
+        this.delivery.terminal(record.intent.id, 'DELIVERY_PAYMENT_EVIDENCE_INVALID', 'UNSUPPORTED');
+        return;
+      }
+      validate(record);
+      if (historical) this.delivery.reopenUnsupportedCredential(record.intent.id);
+      return this.delivery.claim(record.intent.id, 'retry', now, true);
+    });
+  }
+  rejectMppCredentialDelivery(approvalId: string, token: string) {
+    this.atomic(() => {
+      const record = this.recordForApproval(approvalId);
+      if (record.status === 'PAID' && record.intent.mpp) this.delivery.rejectCredential(record.intent.id, token);
+    });
+  }
   blockDeliveryRecovery(approvalId: string, code: string, state: 'UNSUPPORTED' | 'EXHAUSTED' = 'UNSUPPORTED') {
     this.atomic(() => {
       const record = this.recordForApproval(approvalId);
@@ -814,7 +857,7 @@ export class PurchaseLedger {
   failDeliveryAttempt(approvalId: string, token: string, code = 'DELIVERY_RESPONSE_UNAVAILABLE', now = this.now()) {
     this.atomic(() => {
       const record = this.recordForApproval(approvalId);
-      this.delivery.failAttempt(record.intent.id, token, code, now);
+      this.delivery.failAttempt(record.intent.id, token, code, now, this.canReplayMppCredential(record));
     });
   }
   /** Sole data-directory owner only, before accepting requests. Interrupted claims
@@ -1170,6 +1213,7 @@ export class PurchaseLedger {
   private matchesOriginalProof(record: PurchaseRecord, proof: Extract<PaymentEvidence, { version: 3 }>) {
     const original = this.savedOriginalPayment(record.approvalId);
     return Boolean(original && original.state === 'CONFIRMED' && original.transaction === proof.transaction
+      && (!record.intent.mpp || original.evidence.identity.knownSignature === proof.transaction)
       && proof.originalEvidenceHash === hash(original.evidence) && proof.scopeId === original.evidence.scopeId
       && proof.messageHash === original.evidence.identity.messageHash && proof.payer === original.evidence.identity.payer);
   }
@@ -1185,6 +1229,8 @@ export class PurchaseLedger {
       this.db.prepare("UPDATE original_payments SET state='CONFIRMED',transaction_id=? WHERE purchase_id=?").run(transaction, record.intent.id);
       this.db.prepare("UPDATE purchases SET status=?,transaction_id=?,confirmed_day=?,payment_evidence=? WHERE approval_id=? AND status IN ('PAYING','PAYMENT_UNKNOWN')")
         .run(purchaseStatusAfter(record.status, 'CONFIRM_PAYMENT'), transaction, this.activeDay(now, record.monetaryScope), JSON.stringify(proof), approvalId);
+      this.delivery.confirmMatchingReceipt(record.intent.id, { transaction, network: original.evidence.identity.network,
+        payer: original.evidence.identity.payer, amount: original.evidence.identity.amount });
       this.event(record.intent.id, 'payment.PAID');
     });
   }
@@ -1261,6 +1307,29 @@ export class PurchaseLedger {
   }
   confirmPayment(approvalId: string, transaction: string, verification: PaymentVerification, now = Date.now()) {
     this.atomic(() => this.recordConfirmation(approvalId, transaction, verification, now));
+  }
+  /** The executor calls this only with the validated body of the original signed merchant request.
+   * Delivery is independent of chain reconciliation, which alone transitions the live payment. */
+  saveOriginalMerchantDelivery(approvalId: string, data: unknown): unknown {
+    return this.atomic(() => {
+      const record = this.recordForApproval(approvalId);
+      const original = this.savedOriginalPayment(approvalId);
+      if (!isLiveMode(record.executionMode) || !original || original.submissionAttemptedAt === null ||
+        !['SUBMISSION_ATTEMPTED', 'OUTCOME_UNKNOWN', 'CONFIRMED', 'FINALIZED_FAILED'].includes(original.state))
+        throw new Error('ORIGINAL_SUBMISSION_REQUIRED');
+      const result = z.json().parse(data);
+      this.assertSafeDelivery(approvalId, result);
+      const body = JSON.stringify(result);
+      if (Buffer.byteLength(body) > MAX_SERIALIZED_RESOURCE_DELIVERY_BYTES) throw new Error('DELIVERY_RESPONSE_TOO_LARGE');
+      if (!this.delivery.completeOriginal(record.intent.id)) {
+        if (record.data === undefined) throw new Error('DELIVERY_DATA_CONFLICT');
+        return record.data;
+      }
+      const saved = this.db.prepare('UPDATE purchases SET data=? WHERE approval_id=? AND data IS NULL').run(body, approvalId);
+      if (saved.changes !== 1) throw new Error('DELIVERY_DATA_CONFLICT');
+      this.event(record.intent.id, 'delivery.COMPLETE');
+      return result;
+    });
   }
   finish(approvalId: string, result: { transaction: string; data: unknown }, now = Date.now(), deliveryClaim?: string) {
     this.atomic(() => this.finishLocked(approvalId, result, now, deliveryClaim));
